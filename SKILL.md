@@ -56,6 +56,8 @@ cst backup / restore / relocate / stats / subagents   # (same as claude-sessions
 - `Space` toggle mark · `Ctrl-X` clear marks · `Del` delete marked/current
 - **`D` or `Ctrl-D`** — toggle 작업종료
 - **`H`** — hide ✓ rows (no Ctrl-H alias — Backspace collision)
+- **`C`** — toggle: only sessions under the TUI launch cwd (prefix match on the
+  session's recorded cwd; NFC-normalized so Korean paths match)
 - **`R` or `Ctrl-R`** — rescan
 - `?` — help modal · `/` — enter search mode · `Esc` — clear/quit
 
