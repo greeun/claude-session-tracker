@@ -12,7 +12,7 @@ Data sources:
 """
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 import argparse
 import json
@@ -37,7 +37,7 @@ STATE_PATH = CACHE_DIR / "state.json"
 STATUS_ACTIVE = "●"   # 세션사용중 — live process in ~/.claude/sessions/
 STATUS_ENDED = "○"    # 세션종료  — process gone or never registered
 STATUS_DONE = "✓"     # 작업종료  — user marked finished via D / cst done
-STATUS_WIDTH = 4       # glyph + 3 trailing spaces; aligns with "STAT" header
+STATUS_WIDTH = 2       # glyph padded to "ST" header width (2 display cols)
 
 # Full-text labels used in help / stats / CLI headers.
 LABEL_ACTIVE = "세션사용중"
@@ -272,6 +272,26 @@ def truncate_display(s: str, width: int) -> str:
         out += ch
         used += cw
     return out + "…"
+
+
+def truncate_display_tail(s: str, width: int) -> str:
+    """Truncate from the left so the tail of the string is preserved.
+
+    Used for paths where the final segment (project name) is the meaningful
+    part to keep visible; prepends … when cut.
+    """
+    if display_width(s) <= width:
+        return s
+    out_chars: list[str] = []
+    used = 0
+    for ch in reversed(s):
+        ea = unicodedata.east_asian_width(ch)
+        cw = 2 if ea in ("W", "F") else 1
+        if used + cw > width - 1:  # reserve 1 for ellipsis
+            break
+        out_chars.append(ch)
+        used += cw
+    return "…" + "".join(reversed(out_chars))
 
 
 # ---------- common helpers ----------
@@ -652,11 +672,11 @@ def cmd_list(args: argparse.Namespace) -> int:
     # to longer numbers, but the layout still works).
     num_w = max(3, len(str(len(sessions))))
     header = (
-        f"{'#':>{num_w}}  "
-        f"{pad_display('STAT', STATUS_WIDTH)}  "
+        f"{'#':>{num_w}} "
+        f"{pad_display('ST', STATUS_WIDTH)} "
         f"{'LAST ACTIVITY':<16}  "
-        f"{'SESSION':<10}  "
-        f"{'MSGS':>5}  "
+        f"{'SESSION':<10} "
+        f"{'MSGS':>4}  "
         f"{'MESSAGE':<60}  "
         f"PROJECT"
     )
@@ -669,11 +689,11 @@ def cmd_list(args: argparse.Namespace) -> int:
         first = truncate(s.first_user_msg, 60) or "(no user message)"
         proj = shorten_path(s.cwd)
         print(
-            f"{idx:>{num_w}}  "
-            f"{pad_display(st, STATUS_WIDTH)}  "
+            f"{idx:>{num_w}} "
+            f"{pad_display(st, STATUS_WIDTH)} "
             f"{ts:<16}  "
-            f"{sid:<10}  "
-            f"{s.msg_count:>5}  "
+            f"{sid:<10} "
+            f"{s.msg_count:>4}  "
             f"{pad_display(truncate_display(first, 60), 60)}  "
             f"{proj}"
         )
@@ -1238,20 +1258,22 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None, da
         num_w = max(3, len(str(len(items) or len(sessions))))
         ts_w = 16
         sid_w = 8
-        msgs_w = 6
+        msgs_w = 4
         status_w = STATUS_WIDTH
-        # Fixed width up through MSGS column, counting 2-space separators.
-        fixed = (1 + num_w + 2) + (status_w + 2) + (ts_w + 2) + (sid_w + 2) + (msgs_w + 2) + 2
+        # Fixed width up through MSGS column. Tight 1-space separators around
+        # ST (#→ST, ST→LAST ACTIVITY) and between SESSION→MSGS; the rest use
+        # 2-space separators.
+        fixed = (1 + num_w + 1) + (status_w + 1) + (ts_w + 2) + (sid_w + 1) + (msgs_w + 2) + 2
         remaining = max(30, w - fixed - 1)
         # split remaining: ~50% message, ~50% project (project at least 20)
         proj_w = max(20, remaining // 2)
         msg_w = max(20, remaining - proj_w - 2)
 
         col_header = (
-            f" {'#':>{num_w}}  "
-            f"{pad_display('STAT', status_w)}  "
+            f" {'#':>{num_w}} "
+            f"{pad_display('ST', status_w)} "
             f"{'LAST ACTIVITY':<{ts_w}}  "
-            f"{'SESSION':<{sid_w}}  "
+            f"{'SESSION':<{sid_w}} "
             f"{'MSGS':>{msgs_w}}  "
             f"{pad_display('MESSAGE', msg_w)}  "
             f"PROJECT"
@@ -1300,11 +1322,11 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None, da
             else:
                 tail_raw = s.first_user_msg or "(no user msg)"
             msg_cell = pad_display(truncate_display(" ".join(tail_raw.split()), msg_w), msg_w)
-            proj_cell = truncate_display(shorten_path(s.cwd), proj_w)
+            proj_cell = truncate_display_tail(shorten_path(s.cwd), proj_w)
 
-            line_before_status = f"{mark}{idx + 1:>{num_w}}  "
+            line_before_status = f"{mark}{idx + 1:>{num_w}} "
             line_after_status = (
-                f"  {ts:<{ts_w}}  {sid:<{sid_w}}  "
+                f" {ts:<{ts_w}}  {sid:<{sid_w}} "
                 f"{s.msg_count:>{msgs_w}}  {msg_cell}  {proj_cell}"
             )
 
