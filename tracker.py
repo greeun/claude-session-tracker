@@ -12,7 +12,7 @@ Data sources:
 """
 from __future__ import annotations
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 
 import argparse
 import json
@@ -1072,6 +1072,8 @@ HELP_LINES = [
     "  D / Ctrl-D             mark 작업종료 on marked rows, else toggle on current row",
     "  H                      toggle hide: show/hide 작업종료 rows",
     "                         (Ctrl-H is unavailable — it aliases Backspace)",
+    "  C                      toggle: only show sessions under the TUI launch cwd",
+    "                         (prefix match on the recorded session cwd)",
     "  R / Ctrl-R             rescan sessions + live-process registry",
     "  Del / Fn+Delete        delete marked/current session(s)",
     "  ?                      this help",
@@ -1151,6 +1153,11 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None, da
     search_hits: dict[str, str] | None = None
     search_mode: bool = False  # True while typing inside the `/` prompt
     hide_done: bool = False    # H toggle: hide 작업종료 sessions from the view
+    cwd_only: bool = False     # C toggle: only sessions under the TUI launch cwd
+    try:
+        launch_cwd = unicodedata.normalize("NFC", os.getcwd())
+    except OSError:
+        launch_cwd = ""
 
     def status_attr(st: str):
         if st == STATUS_ACTIVE:
@@ -1166,6 +1173,9 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None, da
             pool = sessions
         if hide_done:
             pool = [s for s in pool if s.session_id not in done]
+        if cwd_only and launch_cwd:
+            pool = [s for s in pool
+                    if unicodedata.normalize("NFC", s.cwd or "").startswith(launch_cwd)]
         if not query:
             return pool
         q = query.lower()
@@ -1234,11 +1244,12 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None, da
         live_count = sum(1 for s in items if s.session_id in live and s.session_id not in done)
         done_count = sum(1 for s in items if s.session_id in done)
         hide_hint = "  [✓ 숨김]" if hide_done else ""
+        cwd_hint = f"  [📂 {shorten_path(launch_cwd)}]" if cwd_only else ""
         header = (
             f" claude-session-tracker v{__version__}  "
             f"{len(items)}/{len(sessions)}  "
-            f"●{live_count} ✓{done_count}{mark_hint}{search_hint}{hide_hint}"
-            "   ? help  Enter open  / filter  ^R rescan  ^D mark✓  H hide✓  Esc quit "
+            f"●{live_count} ✓{done_count}{mark_hint}{search_hint}{hide_hint}{cwd_hint}"
+            "   ? help  Enter open  / filter  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit "
         )
         if search_mode:
             prompt = f"/ {query}"
@@ -1577,6 +1588,17 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None, da
             top = 0
             toast = ("Hiding 작업종료 (press H again to show)"
                      if hide_done else "Showing all statuses")
+        elif ch in (ord('C'), ord('c')):
+            cwd_only = not cwd_only
+            sel = 0
+            top = 0
+            if cwd_only:
+                toast = (f"Only sessions under {shorten_path(launch_cwd)} (press C again to clear)"
+                         if launch_cwd else "No launch cwd available")
+                if not launch_cwd:
+                    cwd_only = False
+            else:
+                toast = "Showing sessions from all cwds"
         elif ch in (ord('R'), ord('r'), 18):  # R / r / Ctrl-R
             toast = "Rescanning…"
             try:
