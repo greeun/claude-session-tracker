@@ -12,7 +12,7 @@ Data sources:
 """
 from __future__ import annotations
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 import argparse
 import json
@@ -31,6 +31,9 @@ SESSIONS_REGISTRY_DIR = Path.home() / ".claude" / "sessions"
 HOME = str(Path.home())
 CACHE_DIR = Path.home() / ".cache" / "claude-session-tracker"
 CACHE_PATH = CACHE_DIR / "index.json"
+# Bumped whenever the cached SessionMeta shape or extraction logic changes,
+# so stale entries are re-indexed instead of serving wrong snippets.
+_CACHE_SCHEMA = 2
 STATE_PATH = CACHE_DIR / "state.json"
 
 # Compact glyphs shown in tables (display width 1 each).
@@ -477,6 +480,29 @@ class SessionMeta:
     git_branch: str = ""
 
 
+# Claude Code prepends these XML-ish wrappers to user events when the user
+# runs slash commands, `!bash`, `#memory`, etc. They carry no real prompt,
+# only system metadata, so we skip them when picking a session's first
+# "real" user message.
+_SYSTEM_WRAPPER_PREFIXES = (
+    "<local-command-caveat>",
+    "<command-name>",
+    "<command-message>",
+    "<command-args>",
+    "<command-stdout>",
+    "<command-stderr>",
+    "<bash-input>",
+    "<bash-stdout>",
+    "<bash-stderr>",
+)
+
+
+def _is_system_wrapper_msg(text: str) -> bool:
+    if not text:
+        return True
+    return text.lstrip().startswith(_SYSTEM_WRAPPER_PREFIXES)
+
+
 def iter_jsonl(path: Path) -> Iterator[dict]:
     try:
         with path.open("r", encoding="utf-8", errors="replace") as f:
@@ -519,7 +545,9 @@ def load_session_meta(path: Path, fast: bool = False) -> SessionMeta | None:
         if etype == "user" and not meta.first_user_msg:
             msg = evt.get("message") or {}
             text = extract_text(msg.get("content")).strip()
-            if text and not text.startswith("[tool_use:"):
+            if (text
+                    and not text.startswith("[tool_use:")
+                    and not _is_system_wrapper_msg(text)):
                 meta.first_user_msg = text
     if meta.msg_count == 0:
         return None
@@ -547,14 +575,19 @@ def all_subagent_files() -> list[Path]:
 def _load_cache() -> dict:
     try:
         with CACHE_PATH.open("r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
     except (OSError, json.JSONDecodeError):
-        return {}
+        return {"schema": _CACHE_SCHEMA, "entries": {}}
+    if data.get("schema") != _CACHE_SCHEMA:
+        # Extraction rules changed — drop stale entries so they're re-indexed.
+        return {"schema": _CACHE_SCHEMA, "entries": {}}
+    return data
 
 
 def _save_cache(cache: dict) -> None:
     try:
         CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        cache["schema"] = _CACHE_SCHEMA
         tmp = CACHE_PATH.with_suffix(".tmp")
         with tmp.open("w", encoding="utf-8") as f:
             json.dump(cache, f)
