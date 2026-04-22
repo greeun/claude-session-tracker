@@ -12,7 +12,7 @@ Data sources:
 """
 from __future__ import annotations
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 import argparse
 import json
@@ -1069,7 +1069,7 @@ HELP_LINES = [
     "Session actions (normal mode)",
     "  Space                  toggle mark on the current row",
     "  Ctrl-X                 clear all marks",
-    "  D / Ctrl-D             toggle 작업종료 (task done) on the current row",
+    "  D / Ctrl-D             mark 작업종료 on marked rows, else toggle on current row",
     "  H                      toggle hide: show/hide 작업종료 rows",
     "                         (Ctrl-H is unavailable — it aliases Backspace)",
     "  R / Ctrl-R             rescan sessions + live-process registry",
@@ -1557,7 +1557,14 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None, da
         elif ch == ord('?'):
             _show_help_modal(stdscr)
         elif ch in (ord('D'), ord('d'), 4):  # D / d / Ctrl-D
-            if items:
+            if marked:
+                target_sids = [s.session_id for s in sessions if s.session_id in marked]
+                for sid in target_sids:
+                    set_done(sid, True)
+                done = done_ids()
+                marked.clear()
+                toast = f"Marked 작업종료: {len(target_sids)} session(s)"
+            elif items:
                 target_sid = items[sel].session_id
                 now_done = mark_done(target_sid)
                 done = done_ids()
