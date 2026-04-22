@@ -12,7 +12,7 @@ Data sources:
 """
 from __future__ import annotations
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 import argparse
 import json
@@ -1664,6 +1664,10 @@ def cmd_pick(args: argparse.Namespace) -> int:
 # ---------- CLI: relocate / backup / restore / stats ----------
 
 def encode_cwd(cwd: str) -> str:
+    # Claude Code normalizes to NFC before replacing non-[A-Za-z0-9-] with '-'.
+    # macOS hands back NFD from getcwd(); normalize first so Korean/other non-ASCII
+    # paths land in the same folder Claude Code itself uses.
+    cwd = unicodedata.normalize("NFC", cwd)
     return re.sub(r"[^A-Za-z0-9\-]", "-", cwd)
 
 
