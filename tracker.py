@@ -12,7 +12,7 @@ Data sources:
 """
 from __future__ import annotations
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 import argparse
 import json
@@ -1093,6 +1093,7 @@ HELP_LINES = [
     "      PgUp PgDn Home End page / jump while filtering",
     "      Backspace / Ctrl-U edit / wipe the query",
     "      Ctrl-D             toggle 작업종료 on the current row",
+    "      Ctrl-A             toggle mark on ALL filtered rows (select all)",
     "      Ctrl-R             rescan sessions + live-process registry",
     "      Enter              commit filter, exit prompt (filter stays applied)",
     "                         → then use ↑↓, Enter, D, R, Del normally",
@@ -1101,6 +1102,7 @@ HELP_LINES = [
     "",
     "Session actions (normal mode)",
     "  Space                  toggle mark on the current row",
+    "  Ctrl-A                 toggle mark on ALL filtered rows (select all)",
     "  Ctrl-X                 clear all marks",
     "  D / Ctrl-D             mark 작업종료 on marked rows, else toggle on current row",
     "  H                      toggle hide: show/hide 작업종료 rows",
@@ -1540,6 +1542,15 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None, da
                 sel = min(sel, max(0, len(sessions) - 1))
                 top = max(0, min(top, max(0, len(sessions) - 1)))
                 toast = f"Rescanned: {len(sessions)} session(s)"
+            elif ch == 1:  # Ctrl-A — mark all filtered items (toggle)
+                if items:
+                    visible_sids = {s.session_id for s in items}
+                    if visible_sids.issubset(marked):
+                        marked -= visible_sids
+                        toast = f"Cleared marks on {len(visible_sids)} session(s)"
+                    else:
+                        marked |= visible_sids
+                        toast = f"Marked {len(visible_sids)} session(s)"
             elif ch in (curses.KEY_BACKSPACE, 127, 8):
                 query = query[:-1]
                 sel = 0
@@ -1682,6 +1693,15 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None, da
                 toast = f"Deleted {deleted} session(s)" + (f", {errors} failed" if errors else "")
         elif ch == 24:  # Ctrl-X — clear marks
             marked.clear()
+        elif ch == 1:  # Ctrl-A — mark all filtered items (toggle)
+            if items:
+                visible_sids = {s.session_id for s in items}
+                if visible_sids.issubset(marked):
+                    marked -= visible_sids
+                    toast = f"Cleared marks on {len(visible_sids)} session(s)"
+                else:
+                    marked |= visible_sids
+                    toast = f"Marked {len(visible_sids)} session(s)"
         elif ch == ord('/'):
             search_mode = True  # next iteration renders the `/` prompt with a cursor
         # all other keys (letters, digits, etc.) are ignored in normal mode
