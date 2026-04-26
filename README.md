@@ -167,6 +167,7 @@ A curses picker with fzf-style filter, status glyphs, and action keys. **Two mod
 | `↑↓` / `Ctrl-P Ctrl-N` | Move one row |
 | `PgUp` / `PgDn` / `Home` / `End` | Page / jump |
 | **`Enter`** | **Open selected session in a new terminal window** (same terminal app as your current one) |
+| **`v`** / **`V`** | **Preview the focused session** in a read-only modal (transcript, cwd, timestamps). Inside: `↑↓` scroll · `PgUp/PgDn` page · `g/G` top/bottom · `q/Esc/v` close |
 | `Space` | Toggle mark on current row |
 | `Ctrl-X` | Clear all marks |
 | **`D`** or **`Ctrl-D`** | Toggle **작업종료** on current row (persists) |
