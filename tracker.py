@@ -12,7 +12,7 @@ Data sources:
 """
 from __future__ import annotations
 
-__version__ = "0.4.2"
+__version__ = "0.5.0"
 
 import argparse
 import json
@@ -64,7 +64,8 @@ def _applescript_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def open_in_new_terminal(cwd: str, session_id: str) -> tuple[bool, str]:
+def open_in_new_terminal(cwd: str, session_id: str,
+                         skip_perm: bool = False) -> tuple[bool, str]:
     """Spawn `cd <cwd> && claude --resume <session_id>` in a new terminal window.
 
     Returns (ok, info). On success, `info` names the terminal used; on failure,
@@ -74,6 +75,9 @@ def open_in_new_terminal(cwd: str, session_id: str) -> tuple[bool, str]:
     already has a working PATH) and inject it into the new shell, so the new
     terminal doesn't need its own PATH to be set up correctly. On non-zero
     exit we also keep the window open so the user can read any error.
+
+    When `skip_perm` is True, append `--dangerously-skip-permissions` to the
+    resume invocation.
     """
     import shlex
     import shutil
@@ -84,13 +88,14 @@ def open_in_new_terminal(cwd: str, session_id: str) -> tuple[bool, str]:
     safe_cwd = shlex.quote(cwd)
     safe_sid = shlex.quote(session_id)
     safe_claude = shlex.quote(claude_bin)
+    skip_flag = " --dangerously-skip-permissions" if skip_perm else ""
 
     # Keep the terminal window open on failure so the user can read the error.
     # `read -r` without a prompt waits for Enter; on clean exit (rc=0), we
     # fall through and the shell closes normally.
     shell_cmd = (
         f"cd {safe_cwd} && "
-        f"{safe_claude} --resume {safe_sid}; "
+        f"{safe_claude} --resume {safe_sid}{skip_flag}; "
         f'rc=$?; if [ "$rc" -ne 0 ]; then '
         f'printf "\\n[cst] \'claude --resume\' failed (exit %s)\\n"'
         f' "$rc"; '
@@ -111,7 +116,10 @@ def open_in_new_terminal(cwd: str, session_id: str) -> tuple[bool, str]:
             try:
                 subprocess.Popen(
                     ["osascript", "-e", script],
+                    stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    close_fds=True,
                 )
                 return True, f"opened in {label}"
             except OSError as e:
@@ -123,7 +131,10 @@ def open_in_new_terminal(cwd: str, session_id: str) -> tuple[bool, str]:
             try:
                 subprocess.Popen(
                     ["osascript", "-e", f'tell application "{app_name}" to activate'],
+                    stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    close_fds=True,
                 )
             except OSError:
                 pass
@@ -132,7 +143,11 @@ def open_in_new_terminal(cwd: str, session_id: str) -> tuple[bool, str]:
                      activate_name: str | None = None) -> tuple[bool, str]:
             try:
                 subprocess.Popen(
-                    argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    argv,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    close_fds=True,
                 )
                 if activate_name:
                     _activate_app(activate_name)
@@ -222,19 +237,28 @@ def open_in_new_terminal(cwd: str, session_id: str) -> tuple[bool, str]:
                     subprocess.Popen(
                         [path, "--working-directory", cwd,
                          "--", "bash", "-lc", shell_cmd],
+                        stdin=subprocess.DEVNULL,
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        start_new_session=True,
+                        close_fds=True,
                     )
                 elif term == "konsole":
                     subprocess.Popen(
                         [path, "--workdir", cwd,
                          "-e", "bash", "-lc", shell_cmd],
+                        stdin=subprocess.DEVNULL,
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        start_new_session=True,
+                        close_fds=True,
                     )
                 else:
                     # alacritty, kitty, wezterm, xterm, x-terminal-emulator, …
                     subprocess.Popen(
                         [path, "-e", "bash", "-lc", shell_cmd],
+                        stdin=subprocess.DEVNULL,
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        start_new_session=True,
+                        close_fds=True,
                     )
                 return True, f"opened in {term}"
             except OSError:
@@ -924,7 +948,8 @@ def cmd_resume(args: argparse.Namespace) -> int:
         print(f"(no session matching {args.session_id!r})", file=sys.stderr)
         return 1
     cwd = target.cwd or "."
-    cmd = f'cd "{cwd}" && claude --resume {target.session_id}'
+    skip_flag = " --dangerously-skip-permissions" if getattr(args, "skip_perm", False) else ""
+    cmd = f'cd "{cwd}" && claude --resume {target.session_id}{skip_flag}'
     if args.print_only:
         print(cmd)
         return 0
@@ -1084,6 +1109,8 @@ HELP_LINES = [
     "  Enter                  open selected session in a NEW terminal window",
     "                         (spawns `cd <cwd> && claude --resume <id>`;",
     "                          macOS: iTerm/Terminal; Linux: $TERMINAL or xterm)",
+    "                         Without `cst --skip-perm`, a per-resume popup",
+    "                         asks whether to add --dangerously-skip-permissions.",
     "  Esc                    clear filter/search, or quit if none",
     "",
     "Filter / search  (ALL text input is behind `/`)",
@@ -1101,6 +1128,8 @@ HELP_LINES = [
     "      Esc                clear query and exit prompt",
     "",
     "Session actions (normal mode)",
+    "  v / V                  preview the focused session (read-only modal)",
+    "                         ↑↓ scroll · PgUp/PgDn page · g/G top/bottom · q/Esc/v close",
     "  Space                  toggle mark on the current row",
     "  Ctrl-A                 toggle mark on ALL filtered rows (select all)",
     "  Ctrl-X                 clear all marks",
@@ -1122,6 +1151,148 @@ HELP_LINES = [
     "",
     "Press any key to close…",
 ]
+
+
+def _wrap_display(s: str, width: int) -> list[str]:
+    """Wrap a single logical line into chunks that fit within `width` display columns."""
+    if width <= 0:
+        return [""]
+    if not s:
+        return [""]
+    out: list[str] = []
+    cur = ""
+    used = 0
+    for ch in s:
+        ea = unicodedata.east_asian_width(ch)
+        cw = 2 if ea in ("W", "F") else 1
+        if used + cw > width:
+            out.append(cur)
+            cur = ch
+            used = cw
+        else:
+            cur += ch
+            used += cw
+    if cur:
+        out.append(cur)
+    return out or [""]
+
+
+def _preview_modal(stdscr, target: SessionMeta, status: str) -> None:
+    """Scrollable read-only preview of the focused session's transcript.
+
+    Closed by q/Q/Esc/v/V. No state mutation — purely informational.
+    """
+    import curses
+    h, w = stdscr.getmaxyx()
+    box_w = min(120, max(60, w - 2))
+    box_h = min(40, max(12, h - 2))
+    y0 = max(0, (h - box_h) // 2)
+    x0 = max(0, (w - box_w) // 2)
+    win = curses.newwin(box_h, box_w, y0, x0)
+    win.keypad(True)
+
+    inner_w = box_w - 4
+
+    # Build a flat list of (text, attr) display lines.
+    lines: list[tuple[str, int]] = []
+    header_attr = curses.color_pair(2) | curses.A_BOLD
+    cwd_attr = curses.color_pair(4)
+    dim_attr = curses.A_DIM
+    user_attr = curses.color_pair(2) | curses.A_BOLD
+    asst_attr = curses.color_pair(3) | curses.A_BOLD
+
+    lines.append((truncate_display(f"Session  {target.session_id}", inner_w), header_attr))
+    lines.append((truncate_display(f"Status   {status_label(status)}", inner_w), 0))
+    lines.append((truncate_display(f"Cwd      {shorten_path(target.cwd)}", inner_w), cwd_attr))
+    lines.append((truncate_display(
+        f"Started  {fmt_ts(target.first_ts)}    Last  {fmt_ts(target.last_ts)}    Msgs  {target.msg_count}",
+        inner_w), dim_attr))
+    if target.first_user_msg:
+        lines.append(("", 0))
+        lines.append(("First user message:", curses.A_BOLD))
+        for ln in _wrap_display(target.first_user_msg, inner_w):
+            lines.append((ln, 0))
+    lines.append(("", 0))
+    lines.append(("─" * inner_w, dim_attr))
+
+    rendered = 0
+    try:
+        for evt in iter_jsonl(target.path):
+            etype = evt.get("type")
+            if etype not in ("user", "assistant"):
+                continue
+            text = extract_text((evt.get("message") or {}).get("content")).strip()
+            if not text:
+                continue
+            ts = fmt_ts(parse_ts(evt.get("timestamp")))
+            prefix = "🧑 user" if etype == "user" else "🤖 assistant"
+            attr = user_attr if etype == "user" else asst_attr
+            lines.append((truncate_display(f"{prefix}  [{ts}]", inner_w), attr))
+            if len(text) > 1200:
+                text = text[:1200] + f"… (+{len(text) - 1200} chars)"
+            for raw_ln in text.splitlines() or [""]:
+                for ln in _wrap_display(raw_ln, inner_w):
+                    lines.append((ln, 0))
+            lines.append(("", 0))
+            rendered += 1
+    except Exception as e:
+        lines.append((truncate_display(f"(read error: {e})", inner_w), curses.color_pair(5)))
+
+    if rendered == 0:
+        lines.append(("(no user/assistant messages)", dim_attr))
+
+    list_h = box_h - 3  # 1 top border + 1 bottom border + 1 footer line
+    max_top = max(0, len(lines) - list_h)
+    top = 0
+
+    while True:
+        try:
+            win.erase()
+            win.box()
+            title = f" Preview · {target.session_id[:8]} "
+            try:
+                win.addnstr(0, max(2, (box_w - len(title)) // 2), title,
+                            box_w - 4, header_attr)
+            except curses.error:
+                pass
+            for i in range(list_h - 1):  # leave last inner row for footer
+                idx = top + i
+                if idx >= len(lines):
+                    break
+                text, attr = lines[idx]
+                try:
+                    win.addnstr(1 + i, 2, text, box_w - 4, attr)
+                except curses.error:
+                    pass
+            pos = f" {min(top + list_h - 1, len(lines))}/{len(lines)} "
+            prompt = " ↑↓ scroll · PgUp/PgDn page · g/G top/bottom · q/Esc/v close "
+            try:
+                win.addnstr(box_h - 2, 2, prompt, box_w - 4 - len(pos) - 1, dim_attr)
+                win.addnstr(box_h - 2, max(2, box_w - 2 - len(pos)), pos, len(pos), dim_attr)
+            except curses.error:
+                pass
+            win.refresh()
+            k = win.getch()
+        except KeyboardInterrupt:
+            break
+        if k in (ord('q'), ord('Q'), 27, ord('v'), ord('V')):
+            break
+        elif k in (curses.KEY_UP, 16):
+            top = max(0, top - 1)
+        elif k in (curses.KEY_DOWN, 14):
+            top = min(max_top, top + 1)
+        elif k == curses.KEY_PPAGE:
+            top = max(0, top - (list_h - 1))
+        elif k == curses.KEY_NPAGE:
+            top = min(max_top, top + (list_h - 1))
+        elif k in (curses.KEY_HOME, ord('g')):
+            top = 0
+        elif k in (curses.KEY_END, ord('G')):
+            top = max_top
+
+    del win
+    stdscr.touchwin()
+    stdscr.refresh()
 
 
 def _show_help_modal(stdscr):
@@ -1151,7 +1322,8 @@ def _show_help_modal(stdscr):
         stdscr.refresh()
 
 
-def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None, days: int | None):
+def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
+             days: int | None, skip_perm_default: bool = False):
     import curses
     curses.curs_set(0)
     try:
@@ -1257,6 +1429,51 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None, da
                     return True
                 if k in (ord("n"), ord("N"), 27, 10, 13):
                     return False
+        finally:
+            del win
+            stdscr.touchwin()
+            stdscr.refresh()
+
+    def confirm_skip_perm(target: SessionMeta) -> bool | None:
+        """Ask whether to apply --dangerously-skip-permissions for this resume.
+
+        Returns True to resume with the flag, False to resume without it, None
+        to cancel (do not resume).
+        """
+        h2, w2 = stdscr.getmaxyx()
+        box_w = min(72, max(48, w2 - 6))
+        box_h = 9
+        y0 = max(0, (h2 - box_h) // 2)
+        x0 = max(0, (w2 - box_w) // 2)
+        win = curses.newwin(box_h, box_w, y0, x0)
+        win.keypad(True)
+        try:
+            win.box()
+            title = " --dangerously-skip-permissions? "
+            win.addnstr(0, max(2, (box_w - len(title)) // 2), title,
+                        box_w - 4, curses.color_pair(5) | curses.A_BOLD)
+            label = truncate(
+                f"{target.session_id[:8]}  {shorten_path(target.cwd)}",
+                box_w - 6,
+            )
+            win.addnstr(2, 3, f"Resume: {label}", box_w - 6)
+            win.addnstr(3, 3,
+                        "Apply --dangerously-skip-permissions for this resume?",
+                        box_w - 6)
+            win.addnstr(4, 3,
+                        "Skips all permission prompts inside Claude Code.",
+                        box_w - 6, curses.A_DIM)
+            prompt = " [y] Yes    [n] No    [Esc] Cancel "
+            win.addnstr(box_h - 2, 3, prompt, box_w - 6, curses.A_BOLD)
+            win.refresh()
+            while True:
+                k = win.getch()
+                if k in (ord("y"), ord("Y"), 10, 13):
+                    return True
+                if k in (ord("n"), ord("N")):
+                    return False
+                if k == 27:
+                    return None
         finally:
             del win
             stdscr.touchwin()
@@ -1585,9 +1802,20 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None, da
             # Enter — spawn `claude --resume` in a NEW terminal window; stay in TUI.
             if items:
                 target = items[sel]
-                ok, info = open_in_new_terminal(target.cwd, target.session_id)
+                if skip_perm_default:
+                    use_skip = True
+                else:
+                    choice = confirm_skip_perm(target)
+                    if choice is None:
+                        toast = "Resume cancelled"
+                        continue
+                    use_skip = choice
+                ok, info = open_in_new_terminal(
+                    target.cwd, target.session_id, skip_perm=use_skip,
+                )
                 short = target.session_id[:8]
-                toast = (f"→ {short}  {info}" if ok
+                flag_note = "  [skip-perm]" if use_skip else ""
+                toast = (f"→ {short}{flag_note}  {info}" if ok
                          else f"Open failed: {info}  ({short})")
         elif ch == 27:
             # Esc: clear filter/search if any; otherwise quit
@@ -1611,6 +1839,11 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None, da
                     sel += 1
         elif ch == ord('?'):
             _show_help_modal(stdscr)
+        elif ch in (ord('v'), ord('V')):
+            if items:
+                target = items[sel]
+                st = resolve_status(target.session_id, live, done)
+                _preview_modal(stdscr, target, st)
         elif ch in (ord('D'), ord('d'), 4):  # D / d / Ctrl-D
             if marked:
                 target_sids = [s.session_id for s in sessions if s.session_id in marked]
@@ -1726,8 +1959,9 @@ def cmd_pick(args: argparse.Namespace) -> int:
     if not sessions:
         print("\r(no sessions found)            ")
         return 0
+    skip_perm = bool(getattr(args, "skip_perm", False))
     try:
-        curses.wrapper(_pick_ui, sessions, args.cwd, args.days)
+        curses.wrapper(_pick_ui, sessions, args.cwd, args.days, skip_perm)
     except KeyboardInterrupt:
         pass
     # The TUI handles Enter by spawning a new terminal window, so we don't
@@ -2216,6 +2450,9 @@ def _build_parser() -> argparse.ArgumentParser:
                     version=f"claude-session-tracker v{__version__}")
     ap.add_argument("--tui", action="store_true",
                     help="launch the interactive TUI (same as `cst pick`)")
+    ap.add_argument("--skip-perm", dest="skip_perm", action="store_true",
+                    help="pass --dangerously-skip-permissions when resuming "
+                         "(TUI & resume). Without it, the TUI prompts per resume.")
     sub = ap.add_subparsers(dest="cmd")
 
     p_pick = sub.add_parser("pick", help="interactive picker (TUI)")
@@ -2308,9 +2545,12 @@ def main() -> int:
     ap = _build_parser()
     args = ap.parse_args()
 
+    skip_perm = bool(getattr(args, "skip_perm", False))
+
     # --tui overrides; launches the picker regardless of subcommand
     if getattr(args, "tui", False) and not getattr(args, "cmd", None):
-        ns = argparse.Namespace(cwd=None, days=None, func=cmd_pick)
+        ns = argparse.Namespace(cwd=None, days=None, func=cmd_pick,
+                                skip_perm=skip_perm)
         return cmd_pick(ns)
 
     if not getattr(args, "cmd", None):
