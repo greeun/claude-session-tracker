@@ -12,7 +12,7 @@ Data sources:
 """
 from __future__ import annotations
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 import argparse
 import json
@@ -65,19 +65,15 @@ def _applescript_escape(s: str) -> str:
 
 
 def open_in_new_terminal(cwd: str, session_id: str,
-                         skip_perm: bool = False) -> tuple[bool, str]:
+                         skip_perm: bool = False,
+                         cmux_mode: str | None = None) -> tuple[bool, str]:
     """Spawn `cd <cwd> && claude --resume <session_id>` in a new terminal window.
 
     Returns (ok, info). On success, `info` names the terminal used; on failure,
     it carries the error message to surface in the TUI toast.
 
-    We resolve `claude`'s absolute path in the *parent* process (where cst
-    already has a working PATH) and inject it into the new shell, so the new
-    terminal doesn't need its own PATH to be set up correctly. On non-zero
-    exit we also keep the window open so the user can read any error.
-
-    When `skip_perm` is True, append `--dangerously-skip-permissions` to the
-    resume invocation.
+    When `cmux_mode` is "workspace" or "window", use cmux to open in the
+    respective mode instead of spawning a native terminal window.
     """
     import shlex
     import shutil
@@ -105,6 +101,64 @@ def open_in_new_terminal(cwd: str, session_id: str,
     )
 
     term_program = os.environ.get("TERM_PROGRAM", "")
+
+    if cmux_mode:
+        cmux_bin = shutil.which("cmux")
+        if not cmux_bin:
+            return False, "cmux binary not found"
+        resume_cmd = f"cd {safe_cwd} && {safe_claude} --resume {safe_sid}{skip_flag}"
+        ws_name = f"claude:{session_id[:8]}"
+        try:
+            if cmux_mode == "window":
+                result = subprocess.run(
+                    [cmux_bin, "new-window"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode != 0:
+                    return False, f"cmux new-window failed: {result.stderr.strip()}"
+                parts = result.stdout.strip().split()
+                win_id = parts[1] if len(parts) >= 2 else None
+                if not win_id:
+                    return False, "cmux new-window returned no window id"
+                ws_result = subprocess.run(
+                    [cmux_bin, "list-workspaces", "--window", win_id],
+                    capture_output=True, text=True, timeout=5,
+                )
+                ws_ref = None
+                for line in ws_result.stdout.strip().splitlines():
+                    tok = line.split()
+                    for t in tok:
+                        if t.startswith("workspace:"):
+                            ws_ref = t
+                            break
+                    if ws_ref:
+                        break
+                if ws_ref:
+                    subprocess.run(
+                        [cmux_bin, "send", "--workspace", ws_ref,
+                         resume_cmd + "\\n"],
+                        capture_output=True, timeout=5,
+                    )
+                    subprocess.run(
+                        [cmux_bin, "workspace-action", "--action", "rename",
+                         "--workspace", ws_ref, "--title", ws_name],
+                        capture_output=True, timeout=5,
+                    )
+                return True, "opened in cmux window"
+            else:
+                subprocess.Popen(
+                    [cmux_bin, "new-workspace", "--name", ws_name,
+                     "--cwd", cwd, "--command", resume_cmd],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+                return True, "opened in cmux workspace"
+        except OSError as e:
+            return False, f"cmux spawn failed: {e}"
+        except subprocess.TimeoutExpired:
+            return False, "cmux command timed out"
 
     if sys.platform == "darwin":
         tp = term_program
@@ -1109,6 +1163,7 @@ HELP_LINES = [
     "  Enter                  open selected session in a NEW terminal window",
     "                         (spawns `cd <cwd> && claude --resume <id>`;",
     "                          macOS: iTerm/Terminal; Linux: $TERMINAL or xterm)",
+    "                         cmux: choose [t] workspace tab or [w] new window",
     "                         Without `cst --skip-perm`, a per-resume popup",
     "                         asks whether to add --dangerously-skip-permissions.",
     "  Esc                    clear filter/search, or quit if none",
@@ -1479,6 +1534,45 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             stdscr.touchwin()
             stdscr.refresh()
 
+    _in_cmux = bool(os.environ.get("CMUX_WORKSPACE_ID"))
+
+    def choose_cmux_mode() -> str | None:
+        """Show cmux open-mode chooser: workspace tab vs new window.
+
+        Returns "workspace", "window", or None (cancel).
+        """
+        h2, w2 = stdscr.getmaxyx()
+        box_w = min(56, max(40, w2 - 6))
+        box_h = 7
+        y0 = max(0, (h2 - box_h) // 2)
+        x0 = max(0, (w2 - box_w) // 2)
+        win = curses.newwin(box_h, box_w, y0, x0)
+        win.keypad(True)
+        try:
+            win.box()
+            title = " cmux: Open Mode "
+            win.addnstr(0, max(2, (box_w - len(title)) // 2), title,
+                        box_w - 4, curses.color_pair(2) | curses.A_BOLD)
+            win.addnstr(2, 3, "[t] Workspace tab  (current window)",
+                        box_w - 6)
+            win.addnstr(3, 3, "[w] New window",
+                        box_w - 6)
+            win.addnstr(box_h - 2, 3, " t / w / Esc cancel ",
+                        box_w - 6, curses.A_BOLD)
+            win.refresh()
+            while True:
+                k = win.getch()
+                if k in (ord("t"), ord("T"), 10, 13):
+                    return "workspace"
+                if k in (ord("w"), ord("W")):
+                    return "window"
+                if k == 27:
+                    return None
+        finally:
+            del win
+            stdscr.touchwin()
+            stdscr.refresh()
+
     while True:
         stdscr.erase()
         h, w = stdscr.getmaxyx()
@@ -1810,8 +1904,15 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                         toast = "Resume cancelled"
                         continue
                     use_skip = choice
+                cmux_m = None
+                if _in_cmux:
+                    cmux_m = choose_cmux_mode()
+                    if cmux_m is None:
+                        toast = "Resume cancelled"
+                        continue
                 ok, info = open_in_new_terminal(
                     target.cwd, target.session_id, skip_perm=use_skip,
+                    cmux_mode=cmux_m,
                 )
                 short = target.session_id[:8]
                 flag_note = "  [skip-perm]" if use_skip else ""
