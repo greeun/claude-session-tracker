@@ -1,6 +1,6 @@
 ---
 name: claude-session-tracker
-description: Browse, search, resume, back up, restore, relocate, AND track the live/ended/done status of every local Claude Code session. Fork of claude-sessions that adds a STATUS column (● 세션사용중 / ○ 세션종료 / ✓ 작업종료) driven by the ~/.claude/sessions/<pid>.json live-process registry plus a user-driven 작업종료 flag and an fzf-style `/` filter. CLI via `cst`, TUI via `cst --tui`. Use when the user asks to "list sessions", "어떤 세션이 지금 열려있나", "작업 끝난 세션 표시", "세션 상태 확인", "cst", "session tracker", or wants to resume/back up/restore/search sessions.
+description: Track live/ended/done status of Claude Code sessions. List, search, resume, backup, restore sessions via `cst` CLI or TUI. Use when user says "list sessions", "세션 상태", "cst", "session tracker", or wants to resume/search/backup sessions.
 ---
 
 # claude-session-tracker

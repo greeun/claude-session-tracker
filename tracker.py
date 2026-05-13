@@ -12,7 +12,7 @@ Data sources:
 """
 from __future__ import annotations
 
-__version__ = "0.5.1"
+__version__ = "0.5.3"
 
 import argparse
 import json
@@ -325,6 +325,7 @@ def open_in_new_terminal(cwd: str, session_id: str,
 # ---------- display width helpers (Korean/East-Asian-aware) ----------
 
 def display_width(s: str) -> int:
+    s = unicodedata.normalize("NFC", s)
     w = 0
     for ch in s:
         ea = unicodedata.east_asian_width(ch)
@@ -341,6 +342,7 @@ def pad_display(s: str, width: int, align: str = "left") -> str:
 
 def truncate_display(s: str, width: int) -> str:
     """Truncate a string so its display width is <= width. Appends … when cut."""
+    s = unicodedata.normalize("NFC", s)
     if display_width(s) <= width:
         return s
     out = ""
@@ -361,6 +363,7 @@ def truncate_display_tail(s: str, width: int) -> str:
     Used for paths where the final segment (project name) is the meaningful
     part to keep visible; prepends … when cut.
     """
+    s = unicodedata.normalize("NFC", s)
     if display_width(s) <= width:
         return s
     out_chars: list[str] = []
@@ -955,6 +958,90 @@ def cmd_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def _build_export_text(target: "SessionMeta", st: str) -> str:
+    lines: list[str] = []
+    lines.append(f"Session:  {target.session_id}")
+    lines.append(f"Status:   {status_label(st)}")
+    lines.append(f"Cwd:      {target.cwd}")
+    lines.append(f"Started:  {fmt_ts(target.first_ts)}")
+    lines.append(f"Last:     {fmt_ts(target.last_ts)}")
+    lines.append(f"Messages: {target.msg_count}")
+    lines.append("-" * 80)
+    for evt in iter_jsonl(target.path):
+        etype = evt.get("type")
+        if etype not in ("user", "assistant"):
+            continue
+        ts = fmt_ts(parse_ts(evt.get("timestamp")))
+        text = extract_text((evt.get("message") or {}).get("content")).strip()
+        if not text:
+            continue
+        prefix = "🧑" if etype == "user" else "🤖"
+        lines.append(f"\n{prefix} [{ts}]")
+        lines.extend(text.splitlines() or [""])
+    return "\n".join(lines) + "\n"
+
+
+def _build_export_md(target: "SessionMeta", st: str) -> str:
+    lines: list[str] = []
+    lines.append(f"# Session: {target.session_id}")
+    lines.append(f"")
+    lines.append(f"**Status:** {status_label(st)}  ")
+    lines.append(f"**Started:** {fmt_ts(target.first_ts)}  ")
+    lines.append(f"**Last:** {fmt_ts(target.last_ts)}  ")
+    lines.append(f"**Cwd:** {shorten_path(target.cwd)}  ")
+    lines.append(f"**Messages:** {target.msg_count}  ")
+    lines.append("")
+    lines.append("---")
+    for evt in iter_jsonl(target.path):
+        etype = evt.get("type")
+        if etype not in ("user", "assistant"):
+            continue
+        ts = fmt_ts(parse_ts(evt.get("timestamp")))
+        text = extract_text((evt.get("message") or {}).get("content")).strip()
+        if not text:
+            continue
+        prefix = "🧑 User" if etype == "user" else "🤖 Assistant"
+        lines.append(f"\n## {prefix} [{ts}]")
+        lines.append("")
+        lines.extend(text.splitlines() or [""])
+    return "\n".join(lines) + "\n"
+
+
+def export_session(target: "SessionMeta", fmt: str, out: str | None) -> Path:
+    live, _ = scan_live_sessions()
+    done = done_ids()
+    st = resolve_status(target.session_id, live, done)
+
+    if fmt == "txt":
+        content = _build_export_text(target, st)
+        ext = "txt"
+    else:
+        content = _build_export_md(target, st)
+        ext = "md"
+
+    if out:
+        dest = Path(out)
+        if dest.is_dir():
+            date_str = (target.last_ts or target.first_ts or datetime.now()).strftime("%Y-%m-%d")
+            dest = dest / f"{target.session_id[:8]}-{date_str}.{ext}"
+    else:
+        date_str = (target.last_ts or target.first_ts or datetime.now()).strftime("%Y-%m-%d")
+        dest = Path(f"{target.session_id[:8]}-{date_str}.{ext}")
+
+    dest.write_text(content, encoding="utf-8")
+    return dest
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    target = find_session(args.session_id)
+    if not target:
+        print(f"(no session matching {args.session_id!r})", file=sys.stderr)
+        return 1
+    dest = export_session(target, args.format, args.out)
+    print(f"Exported: {dest}")
+    return 0
+
+
 def cmd_subagents(args: argparse.Namespace) -> int:
     target = find_session(args.session_id)
     if not target:
@@ -1134,6 +1221,10 @@ def _tui_run_search(stdscr, sessions: list[SessionMeta], query: str) -> dict[str
                     stdscr.refresh()
                 except curses.error:
                     pass
+            # Fast path: session ID match needs no file I/O
+            if regex.search(s.session_id):
+                hits[s.session_id] = f"[session ID: {s.session_id}]"
+                continue
             try:
                 for evt in iter_jsonl(s.path):
                     if evt.get("type") not in ("user", "assistant"):
@@ -1170,7 +1261,7 @@ HELP_LINES = [
     "",
     "Filter / search  (ALL text input is behind `/`)",
     "  /                      enter filter prompt (cursor shown on prompt line)",
-    "      typing             live metadata filter (id + cwd + first msg)",
+    "      typing             live metadata filter (session ID · cwd · first msg)",
     "      ↑↓ / Ctrl-P Ctrl-N move selection while filtering",
     "      PgUp PgDn Home End page / jump while filtering",
     "      Backspace / Ctrl-U edit / wipe the query",
@@ -1185,6 +1276,7 @@ HELP_LINES = [
     "Session actions (normal mode)",
     "  v / V                  preview the focused session (read-only modal)",
     "                         ↑↓ scroll · PgUp/PgDn page · g/G top/bottom · q/Esc/v close",
+    "  e / E                  export focused session transcript to .md in cwd",
     "  Space                  toggle mark on the current row",
     "  Ctrl-A                 toggle mark on ALL filtered rows (select all)",
     "  Ctrl-X                 clear all marks",
@@ -1693,17 +1785,18 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                     full = (line_before_status
                             + pad_display(st, status_w)
                             + line_after_status)
-                    stdscr.addnstr(list_top + i, 0, full.ljust(w), w, attr)
+                    stdscr.addnstr(list_top + i, 0, pad_display(full, w), w, attr)
                 except curses.error:
                     pass
             else:
                 try:
                     pre_attr = curses.color_pair(6) | curses.A_BOLD if is_marked else curses.A_NORMAL
                     stdscr.addnstr(list_top + i, 0, line_before_status, w, pre_attr)
-                    stdscr.addnstr(list_top + i, len(line_before_status),
+                    pre_dw = display_width(line_before_status)
+                    stdscr.addnstr(list_top + i, pre_dw,
                                    pad_display(st, status_w), w, status_attr(st))
-                    col = len(line_before_status) + status_w
-                    stdscr.addnstr(list_top + i, col, line_after_status, w - col,
+                    col = pre_dw + status_w
+                    stdscr.addnstr(list_top + i, col, line_after_status, max(0, w - col),
                                    pre_attr)
                 except curses.error:
                     pass
@@ -1945,6 +2038,14 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                 target = items[sel]
                 st = resolve_status(target.session_id, live, done)
                 _preview_modal(stdscr, target, st)
+        elif ch in (ord('e'), ord('E')):
+            if items:
+                target = items[sel]
+                try:
+                    dest = export_session(target, "md", None)
+                    toast = f"Exported: {dest}"
+                except Exception as exc:
+                    toast = f"Export failed: {exc}"
         elif ch in (ord('D'), ord('d'), 4):  # D / d / Ctrl-D
             if marked:
                 target_sids = [s.session_id for s in sessions if s.session_id in marked]
@@ -2595,6 +2696,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_reloc.add_argument("--dry-run", action="store_true")
     p_reloc.add_argument("-y", "--yes", action="store_true")
     p_reloc.set_defaults(func=cmd_relocate)
+
+    p_export = sub.add_parser("export", help="export session transcript to a file")
+    p_export.add_argument("session_id")
+    p_export.add_argument("--format", choices=("md", "txt"), default="md",
+                          help="output format: md (default) or txt")
+    p_export.add_argument("--out", type=str, default=None,
+                          help="output file or directory path (default: current dir)")
+    p_export.set_defaults(func=cmd_export)
 
     p_resume = sub.add_parser("resume", help="emit a cd+resume command")
     p_resume.add_argument("session_id")
