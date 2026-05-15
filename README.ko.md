@@ -41,20 +41,22 @@ cst install-hook
 
 ---
 
-## 프롬프트 훅 — `/done` / `/undone` 를 AI 토큰 0으로
+## 프롬프트 훅 — `done!` / `undone!` 를 AI 토큰 0으로
 
 `cst install-hook` 은 `~/.claude/settings.json` 에 `UserPromptSubmit` 훅을
 등록합니다. 그러면 어떤 Claude Code 세션 안에서든 이렇게 입력할 수 있습니다:
 
 | 입력 | 동작 |
 |:--|:--|
-| `/done` | **현재** 세션을 ✓ 작업종료 (훅 payload의 `session_id` 사용) |
-| `/done <id>` | 해당 세션 마크 (8자 prefix 가능) |
-| `/undone [id]` | 작업종료 해제 |
+| `done!` | **현재** 세션을 ✓ 작업종료 (훅 payload의 `session_id` 사용) |
+| `done! <id>` | 해당 세션 마크 (8자 prefix 가능) |
+| `undone! [id]` | 작업종료 해제 |
+| `/done`, `/undone` | 레거시 — 여전히 인식되지만, 맨 앞 `/` 는 Claude Code 슬래시 커맨드 팔레트를 띄워 제출을 막는 경우가 많음. bang 형태 권장. |
 
+트리거는 프롬프트 **전체** 여야 합니다 (`done!` 또는 `done! <id>`). "I am
+done!" / "done! 수고했어" 같은 문장은 매칭되지 않고 그대로 모델로 갑니다.
 훅이 로컬에서 토글을 실행하고 **프롬프트가 모델에 도달하기 전에 차단**하므로
-모델 호출 자체가 없습니다 — **토큰 0**. 그 외 모든 프롬프트는 그대로 모델로
-전달됩니다.
+모델 호출 자체가 없습니다 — **토큰 0**.
 
 ```bash
 cst install-hook              # 멱등 — 기존 훅 보존
@@ -72,8 +74,8 @@ cst uninstall-hook            # 제거 (다른 UserPromptSubmit 훅은 유지)
     { "type": "command", "command": "cst prompt-hook", "timeout": 25 } ] } ] } }
 ```
 
-설치 직후 `/done` 이 그대로 모델로 넘어가면, `/hooks` 를 한 번 열거나 Claude
-Code를 재시작해 설정 워처를 리로드하세요.
+훅 **코드** 변경은 즉시 반영됩니다(매번 `cst` 를 새로 실행). `settings.json`
+변경만 `/hooks` 를 한 번 열거나 재시작해 설정 워처를 리로드하면 됩니다.
 
 ---
 

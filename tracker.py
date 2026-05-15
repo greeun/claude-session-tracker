@@ -1168,15 +1168,22 @@ def cmd_live(args: argparse.Namespace) -> int:
 # ---------- prompt-hook (UserPromptSubmit: /done & /undone, 0 tokens) ----------
 
 # `cst prompt-hook` is wired into ~/.claude/settings.json by `cst install-hook`.
-# It intercepts the literal prompts "/done" / "/undone" (optionally with a
+# It intercepts the trigger prompts "done!" / "undone!" (optionally with a
 # session id) BEFORE they reach the model and toggles 작업종료 locally, then
 # blocks the prompt — so the model is never invoked (zero tokens). Anything
 # else: exit 0 with no output, and the prompt proceeds normally.
+#
+# The primary triggers are bang-suffixed ("done!" / "undone!") on purpose: a
+# leading "/" collides with Claude Code's slash-command palette, which
+# intercepts the input before it is ever submitted as a prompt (so the hook
+# never fires). The legacy "/done" / "/undone" forms are still accepted for
+# environments where they happen to submit as plain text.
 
 HOOK_EVENT = "UserPromptSubmit"
 HOOK_CMD = "cst prompt-hook"
 SETTINGS_PATH_DEFAULT = Path.home() / ".claude" / "settings.json"
-PROMPT_HOOK_RE = re.compile(r"^/(done|undone)(?:\s+(\S+))?\s*$")
+PROMPT_HOOK_RE = re.compile(
+    r"^(?:(done|undone)!|/(done|undone))(?:\s+(\S+))?\s*$")
 
 
 def _is_our_hook_cmd(cmd: str) -> bool:
@@ -1199,8 +1206,8 @@ def cmd_prompt_hook(args: argparse.Namespace) -> int:
     if not m:
         return 0  # not our command — normal prompt, goes to the model
 
-    action = m.group(1)                       # "done" | "undone"
-    raw_target = m.group(2) or session_id     # explicit arg wins, else self
+    action = m.group(1) or m.group(2)         # "done" | "undone"
+    raw_target = m.group(3) or session_id     # explicit arg wins, else self
 
     def _block(reason: str) -> int:
         print(json.dumps({"decision": "block", "reason": reason},

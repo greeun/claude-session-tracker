@@ -39,27 +39,32 @@ cst resume <id> --print-only | bash
 cst done <id>             # toggle-on 작업종료
 cst undone <id>           # clear 작업종료
 cst live [--all]          # live Claude Code processes (--all shows stale registry entries)
-cst install-hook          # wire the 0-token /done hook into ~/.claude/settings.json
+cst install-hook          # wire the 0-token done! hook into ~/.claude/settings.json
 cst uninstall-hook        # remove it (other UserPromptSubmit hooks preserved)
 cst prompt-hook           # (internal) the UserPromptSubmit hook itself — not run by hand
 cst backup / restore / relocate / stats / subagents   # (same as claude-sessions)
 ```
 
-## Prompt hook — `/done` / `/undone` with zero AI tokens
+## Prompt hook — `done!` / `undone!` with zero AI tokens
 
 `cst install-hook` adds a `UserPromptSubmit` hook (`cst prompt-hook`) to
 `~/.claude/settings.json`. Inside any Claude Code session the user can then type:
 
-- `/done` → mark the **current** session ✓ 작업종료 (uses the hook payload's
+- `done!` → mark the **current** session ✓ 작업종료 (uses the hook payload's
   `session_id`)
-- `/done <id>` → mark that session · `/undone [id]` → clear the flag
+- `done! <id>` → mark that session · `undone! [id]` → clear the flag
+- legacy `/done` / `/undone` are still accepted, but a leading `/` opens
+  Claude Code's slash-command palette and usually prevents the prompt from
+  being submitted — prefer the bang forms.
 
 The hook runs `set_done()` locally and **blocks the prompt before it reaches
-the model** — so no model call happens (0 tokens). Any other prompt passes
-through untouched. Install is idempotent and migrates the older
-`~/.claude/hooks/cst-done.py` form automatically; existing hooks (e.g.
-`csm hook activity`) are preserved. If `/done` doesn't fire right after
-install, the user opens `/hooks` once or restarts (settings-watcher reload).
+the model** — so no model call happens (0 tokens). The trigger must be the
+whole prompt (`done!` or `done! <id>`); anything else (e.g. "I am done!",
+"done! nice work") passes through untouched. Install is idempotent and
+migrates the older `~/.claude/hooks/cst-done.py` form automatically; existing
+hooks (e.g. `csm hook activity`) are preserved. Code changes take effect
+immediately (the hook re-runs `cst`); only settings.json changes need a
+`/hooks`-open or restart to reload.
 
 ## TUI keybindings
 
