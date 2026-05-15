@@ -32,9 +32,48 @@ ln -sf ~/.claude/skills/claude-session-tracker/tracker.py ~/.local/bin/cst
 # 3. 확인
 cst --version
 # claude-session-tracker v0.1.0
+
+# 4. (선택) 토큰 0짜리 /done 훅을 Claude Code에 설치
+cst install-hook
 ```
 
 `~/.local/bin`이 `PATH`에 포함돼 있어야 합니다. Python 3.10+ 필요.
+
+---
+
+## 프롬프트 훅 — `/done` / `/undone` 를 AI 토큰 0으로
+
+`cst install-hook` 은 `~/.claude/settings.json` 에 `UserPromptSubmit` 훅을
+등록합니다. 그러면 어떤 Claude Code 세션 안에서든 이렇게 입력할 수 있습니다:
+
+| 입력 | 동작 |
+|:--|:--|
+| `/done` | **현재** 세션을 ✓ 작업종료 (훅 payload의 `session_id` 사용) |
+| `/done <id>` | 해당 세션 마크 (8자 prefix 가능) |
+| `/undone [id]` | 작업종료 해제 |
+
+훅이 로컬에서 토글을 실행하고 **프롬프트가 모델에 도달하기 전에 차단**하므로
+모델 호출 자체가 없습니다 — **토큰 0**. 그 외 모든 프롬프트는 그대로 모델로
+전달됩니다.
+
+```bash
+cst install-hook              # 멱등 — 기존 훅 보존
+cst install-hook --settings /경로/settings.json   # 기본 경로가 아닐 때
+cst uninstall-hook            # 제거 (다른 UserPromptSubmit 훅은 유지)
+```
+
+`install-hook` 은 멱등이며(재실행 시 "no change"), 예전 형태
+`~/.claude/hooks/cst-done.py` 도 자동 이전합니다. `csm hook activity` 같은
+다른 훅은 보존됩니다. 수동 등록 시 동일한 항목:
+
+```json
+{ "hooks": { "UserPromptSubmit": [
+  { "matcher": "", "hooks": [
+    { "type": "command", "command": "cst prompt-hook", "timeout": 25 } ] } ] } }
+```
+
+설치 직후 `/done` 이 그대로 모델로 넘어가면, `/hooks` 를 한 번 열거나 Claude
+Code를 재시작해 설정 워처를 리로드하세요.
 
 ---
 

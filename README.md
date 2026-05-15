@@ -32,9 +32,48 @@ ln -sf ~/.claude/skills/claude-session-tracker/tracker.py ~/.local/bin/cst
 # 3. Verify
 cst --version
 # claude-session-tracker v0.1.0
+
+# 4. (optional) wire the 0-token /done hook into Claude Code
+cst install-hook
 ```
 
 Requires `~/.local/bin` in `PATH`, and Python 3.10+.
+
+---
+
+## Prompt hook — `/done` / `/undone` for 0 AI tokens
+
+`cst install-hook` registers a `UserPromptSubmit` hook in
+`~/.claude/settings.json` so that, inside any Claude Code session, you can type:
+
+| You type | Effect |
+|:--|:--|
+| `/done` | mark **this** session ✓ 작업종료 (uses the hook's `session_id`) |
+| `/done <id>` | mark that session (8-char prefix OK) |
+| `/undone [id]` | clear the 작업종료 flag |
+
+The hook runs the toggle locally and **blocks the prompt before it reaches the
+model**, so the model is never invoked — **zero tokens**. Every other prompt is
+untouched and goes to the model normally.
+
+```bash
+cst install-hook              # idempotent; preserves existing hooks
+cst install-hook --settings /path/to/settings.json   # non-default location
+cst uninstall-hook            # remove it (keeps other UserPromptSubmit hooks)
+```
+
+`install-hook` is idempotent (re-running reports "no change") and auto-migrates
+the legacy `~/.claude/hooks/cst-done.py` form. Other hooks (e.g.
+`csm hook activity`) are kept. Equivalent manual entry:
+
+```json
+{ "hooks": { "UserPromptSubmit": [
+  { "matcher": "", "hooks": [
+    { "type": "command", "command": "cst prompt-hook", "timeout": 25 } ] } ] } }
+```
+
+If `/done` still reaches the model right after install, open `/hooks` once (or
+restart Claude Code) so the settings watcher reloads.
 
 ---
 

@@ -1165,6 +1165,149 @@ def cmd_live(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------- prompt-hook (UserPromptSubmit: /done & /undone, 0 tokens) ----------
+
+# `cst prompt-hook` is wired into ~/.claude/settings.json by `cst install-hook`.
+# It intercepts the literal prompts "/done" / "/undone" (optionally with a
+# session id) BEFORE they reach the model and toggles 작업종료 locally, then
+# blocks the prompt — so the model is never invoked (zero tokens). Anything
+# else: exit 0 with no output, and the prompt proceeds normally.
+
+HOOK_EVENT = "UserPromptSubmit"
+HOOK_CMD = "cst prompt-hook"
+SETTINGS_PATH_DEFAULT = Path.home() / ".claude" / "settings.json"
+PROMPT_HOOK_RE = re.compile(r"^/(done|undone)(?:\s+(\S+))?\s*$")
+
+
+def _is_our_hook_cmd(cmd: str) -> bool:
+    """True for the current command and the legacy temp-file form, so
+    install-hook can migrate older setups idempotently."""
+    c = (cmd or "").strip()
+    return c.endswith("cst prompt-hook") or "cst-done.py" in c
+
+
+def cmd_prompt_hook(args: argparse.Namespace) -> int:
+    raw = sys.stdin.read()
+    try:
+        data = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError:
+        return 0  # unparseable payload — let the prompt go through
+    prompt = (data.get("prompt") or "").strip()
+    session_id = (data.get("session_id") or "").strip()
+
+    m = PROMPT_HOOK_RE.match(prompt)
+    if not m:
+        return 0  # not our command — normal prompt, goes to the model
+
+    action = m.group(1)                       # "done" | "undone"
+    raw_target = m.group(2) or session_id     # explicit arg wins, else self
+
+    def _block(reason: str) -> int:
+        print(json.dumps({"decision": "block", "reason": reason},
+                          ensure_ascii=False))
+        return 0
+
+    note = "※ 이 프롬프트는 모델에 전달되지 않았습니다 (토큰 0)."
+    if not raw_target:
+        return _block(
+            f"[cst {action}] no session id — payload had no session_id and "
+            f"none was given. Nothing changed.\n{note}")
+    target = find_session(raw_target)
+    if target is None:
+        return _block(
+            f"[cst {action}] 실패 — '{raw_target}' 에 해당하는 세션 없음 "
+            f"(미존재 또는 모호). 변경 없음.\n{note}")
+    set_done(target.session_id, action == "done")
+    glyph = "✓ 작업종료 ON" if action == "done" else "○ 작업종료 해제"
+    return _block(
+        f"[cst {action}] 성공 — {glyph}\n"
+        f"대상 세션: {target.session_id[:8]}  {shorten_path(target.cwd)}\n"
+        f"{note}")
+
+
+def _load_settings(path: Path) -> tuple[dict | None, str | None]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None, f"(settings file not found: {path})"
+    try:
+        return json.loads(text), None
+    except json.JSONDecodeError as e:
+        return None, f"(settings file is not valid JSON: {e})"
+
+
+def _write_settings(path: Path, data: dict) -> None:
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                   encoding="utf-8")
+    tmp.replace(path)
+
+
+def _strip_our_entries(hook_list: list) -> tuple[list, int]:
+    kept, removed = [], 0
+    for entry in hook_list:
+        cmds = [h.get("command", "") for h in (entry.get("hooks") or [])
+                if isinstance(h, dict)]
+        if any(_is_our_hook_cmd(c) for c in cmds):
+            removed += 1
+            continue
+        kept.append(entry)
+    return kept, removed
+
+
+def cmd_install_hook(args: argparse.Namespace) -> int:
+    path = Path(os.path.expanduser(args.settings))
+    before, err = _load_settings(path)
+    if before is None:
+        print(err, file=sys.stderr)
+        return 1
+    work, _ = _load_settings(path)            # independent copy to mutate
+    hooks = work.setdefault("hooks", {})
+    lst = hooks.get(HOOK_EVENT, [])
+    if not isinstance(lst, list):
+        print(f"(hooks.{HOOK_EVENT} is not a list — aborting)", file=sys.stderr)
+        return 1
+    kept, removed = _strip_our_entries(lst)
+    kept.append({
+        "matcher": "",
+        "hooks": [{"type": "command", "command": HOOK_CMD, "timeout": 25}],
+    })
+    hooks[HOOK_EVENT] = kept
+    if json.dumps(before, sort_keys=True) == json.dumps(work, sort_keys=True):
+        print(f"✓ already installed — {HOOK_EVENT}: {HOOK_CMD} (no change)")
+        return 0
+    _write_settings(path, work)
+    migrated = (f" (migrated {removed} prior entr"
+                f"{'y' if removed == 1 else 'ies'})") if removed else ""
+    other = len(kept) - 1
+    print(f"✓ installed → {path}\n"
+          f"  {HOOK_EVENT}: {HOOK_CMD}{migrated}\n"
+          f"  {other} other {HOOK_EVENT} hook(s) preserved.\n"
+          f"  Open /hooks once (or restart) if it doesn't fire immediately.")
+    return 0
+
+
+def cmd_uninstall_hook(args: argparse.Namespace) -> int:
+    path = Path(os.path.expanduser(args.settings))
+    data, err = _load_settings(path)
+    if data is None:
+        print(err, file=sys.stderr)
+        return 1
+    lst = (data.get("hooks") or {}).get(HOOK_EVENT)
+    if not isinstance(lst, list):
+        print(f"✓ not installed — no {HOOK_EVENT} hooks to remove")
+        return 0
+    kept, removed = _strip_our_entries(lst)
+    if removed == 0:
+        print("✓ not installed — nothing to remove")
+        return 0
+    data["hooks"][HOOK_EVENT] = kept
+    _write_settings(path, data)
+    print(f"✓ uninstalled from {path} "
+          f"(removed {removed}; {len(kept)} other {HOOK_EVENT} hook(s) kept)")
+    return 0
+
+
 # ---------- TUI ----------
 
 def _tui_search_prompt(stdscr, initial: str = "") -> str | None:
@@ -2747,6 +2890,27 @@ def _build_parser() -> argparse.ArgumentParser:
     p_live.add_argument("--all", action="store_true",
                         help="include stale registry entries (dead PIDs)")
     p_live.set_defaults(func=cmd_live)
+
+    p_phook = sub.add_parser(
+        "prompt-hook",
+        help="UserPromptSubmit hook: intercept /done & /undone (0 tokens)")
+    p_phook.set_defaults(func=cmd_prompt_hook)
+
+    p_ihook = sub.add_parser(
+        "install-hook",
+        help="wire prompt-hook into ~/.claude/settings.json (idempotent)")
+    p_ihook.add_argument("--settings", default=str(SETTINGS_PATH_DEFAULT),
+                         help="settings.json path "
+                              "(default: ~/.claude/settings.json)")
+    p_ihook.set_defaults(func=cmd_install_hook)
+
+    p_uhook = sub.add_parser(
+        "uninstall-hook",
+        help="remove prompt-hook from settings.json (keeps other hooks)")
+    p_uhook.add_argument("--settings", default=str(SETTINGS_PATH_DEFAULT),
+                         help="settings.json path "
+                              "(default: ~/.claude/settings.json)")
+    p_uhook.set_defaults(func=cmd_uninstall_hook)
 
     return ap
 
