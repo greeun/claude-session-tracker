@@ -81,16 +81,53 @@ def open_in_new_terminal(cwd: str, session_id: str,
 
     claude_bin = shutil.which("claude") or "claude"
 
+    # `claude --resume <id>` is project-scoped: it only finds the session whose
+    # cwd-string mangles to the project dir holding the transcript. If the
+    # recorded cwd was since deleted/moved, `cd <cwd>` fails, the `&&`
+    # short-circuits and resume never runs. Recreate an empty placeholder so
+    # the cwd string still maps to the right project (claude reads the
+    # transcript from ~/.claude/projects/<mangled>/, not from the dir itself).
+    # Done parent-side too so terminals that take `--cwd <cwd>` (wezterm,
+    # ghostty, kitty, alacritty, cmux) don't choke on a missing directory.
+    recreated_cwd = False
+    try:
+        if cwd and not os.path.isdir(cwd):
+            os.makedirs(cwd, exist_ok=True)
+            recreated_cwd = True
+    except OSError:
+        # Best-effort; the shell `mkdir -p` below retries, and if that also
+        # fails the existing cd-failure handler surfaces the error.
+        recreated_cwd = False
+
     safe_cwd = shlex.quote(cwd)
     safe_sid = shlex.quote(session_id)
     safe_claude = shlex.quote(claude_bin)
     skip_flag = " --dangerously-skip-permissions" if skip_perm else ""
+    # When the recorded cwd was gone we recreated an empty placeholder so
+    # project-scoped `claude --resume` can still find the transcript. If the
+    # folder was *moved* (not deleted) the real files live elsewhere — point
+    # the user at `cst relocate` instead of silently leaving them in an empty
+    # dir. We deliberately do NOT auto-detect the new location (a same-named
+    # sibling could be the wrong project).
+    recreated_notice = (
+        (
+            'printf "[cst] note: recorded cwd was missing — '
+            'recreated an EMPTY placeholder:\\n  %s\\n" {cwd}; '
+            'printf "[cst] history is intact and resuming, but project files '
+            'are NOT here.\\n"; '
+            'printf "[cst] if this folder was MOVED, remap it properly with:'
+            '\\n  cst relocate %s <new-path>\\n\\n" {sid}; '
+        ).format(cwd=safe_cwd, sid=safe_sid)
+        if recreated_cwd else ""
+    )
 
     # Keep the terminal window open on failure so the user can read the error.
     # `read -r` without a prompt waits for Enter; on clean exit (rc=0), we
     # fall through and the shell closes normally.
     shell_cmd = (
+        f"mkdir -p {safe_cwd} && "
         f"cd {safe_cwd} && "
+        f"{recreated_notice}"
         f"{safe_claude} --resume {safe_sid}{skip_flag}; "
         f'rc=$?; if [ "$rc" -ne 0 ]; then '
         f'printf "\\n[cst] \'claude --resume\' failed (exit %s)\\n"'
@@ -106,7 +143,10 @@ def open_in_new_terminal(cwd: str, session_id: str,
         cmux_bin = shutil.which("cmux")
         if not cmux_bin:
             return False, "cmux binary not found"
-        resume_cmd = f"cd {safe_cwd} && {safe_claude} --resume {safe_sid}{skip_flag}"
+        resume_cmd = (
+            f"mkdir -p {safe_cwd} && cd {safe_cwd} && "
+            f"{safe_claude} --resume {safe_sid}{skip_flag}"
+        )
         ws_name = f"claude:{session_id[:8]}"
         try:
             if cmux_mode == "window":
