@@ -601,6 +601,41 @@ class SessionMeta:
     git_branch: str = ""
 
 
+@dataclass
+class Candidate:
+    path: str
+    score: int
+    signals: list[str]
+
+
+@dataclass
+class RelocateResult:
+    ok: bool
+    message: str
+    new_path: Path | None = None
+    new_cwd: str = ""
+    old_cwd: str = ""
+    old_subdir: Path | None = None
+    new_subdir: Path | None = None
+    rewritten: int = 0
+    sub_moved: bool = False
+    reason: str = ""  # ok | nodir | samecwd | collision | writefail | nosession
+
+    def _with_warnings(self, *warns: str) -> "RelocateResult":
+        extra = [w for w in warns if w]
+        if extra:
+            self.message = self.message + "\n" + "\n".join(extra)
+        return self
+
+
+# Confidence gate for auto-relocate. A candidate is only "confirm" when its
+# fingerprint score >= HIGH_CONFIDENCE_SCORE; a single low-score candidate
+# still routes to "pick" (shown, never auto-confirmed). Conservative on
+# purpose — bias toward "pick" over a weak "confirm".
+HIGH_CONFIDENCE_SCORE = 3
+CONFIDENCE_MARGIN = 2
+
+
 # Claude Code prepends these XML-ish wrappers to user events when the user
 # runs slash commands, `!bash`, `#memory`, etc. They carry no real prompt,
 # only system metadata, so we skip them when picking a session's first
@@ -1855,6 +1890,215 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             stdscr.touchwin()
             stdscr.refresh()
 
+    def _orphan_relocate_flow(target: SessionMeta):
+        """Recorded cwd is gone. Search for the moved folder and offer a
+        relocate. Returns ("relocate", new_cwd) | ("placeholder", old_cwd)
+        | ("cancel", None)."""
+        old_cwd = target.cwd
+
+        # status line while scanning
+        h2, w2 = stdscr.getmaxyx()
+        try:
+            stdscr.addnstr(h2 - 1, 0,
+                           " scanning for moved folder… ".ljust(w2 - 1),
+                           w2 - 1, curses.color_pair(2) | curses.A_BOLD)
+            stdscr.refresh()
+        except curses.error:
+            pass
+        cands = find_relocation_candidates(old_cwd, target)
+        kind, payload = classify_candidates(cands)
+
+        def _modal(lines: list[str], prompt: str, keymap: dict):
+            h3, w3 = stdscr.getmaxyx()
+            box_w = min(86, max(54, w3 - 6))
+            box_h = min(h3 - 2, max(9, len(lines) + 5))
+            y0 = max(0, (h3 - box_h) // 2)
+            x0 = max(0, (w3 - box_w) // 2)
+            win = curses.newwin(box_h, box_w, y0, x0)
+            win.keypad(True)
+            try:
+                win.box()
+                title = " Folder moved? "
+                try:
+                    win.addnstr(0, max(2, (box_w - len(title)) // 2), title,
+                                box_w - 4, curses.color_pair(5) | curses.A_BOLD)
+                except curses.error:
+                    pass
+                row = 2
+                for ln in lines[:box_h - 4]:
+                    try:
+                        win.addnstr(row, 3, truncate(ln, box_w - 6), box_w - 6)
+                    except curses.error:
+                        pass
+                    row += 1
+                try:
+                    win.addnstr(box_h - 2, 3, prompt, box_w - 6, curses.A_BOLD)
+                except curses.error:
+                    pass
+                win.refresh()
+                while True:
+                    k = win.getch()
+                    for keys, val in keymap.items():
+                        if k in keys:
+                            return val
+            finally:
+                del win
+                stdscr.touchwin()
+                stdscr.refresh()
+
+        def _notice(msg: str, sub: str):
+            lines = [msg, "", sub, "", "[press any key]"]
+            h3, w3 = stdscr.getmaxyx()
+            box_w = min(86, max(54, w3 - 6))
+            box_h = min(h3 - 2, max(7, len(lines) + 4))
+            win = curses.newwin(box_h, box_w, max(0, (h3 - box_h) // 2),
+                                max(0, (w3 - box_w) // 2))
+            win.keypad(True)
+            try:
+                win.box()
+                row = 1
+                for ln in lines:
+                    try:
+                        win.addnstr(row, 3, truncate(ln, box_w - 6), box_w - 6)
+                    except curses.error:
+                        pass
+                    row += 1
+                win.refresh()
+                win.getch()
+            finally:
+                del win
+                stdscr.touchwin()
+                stdscr.refresh()
+
+        def _manual_entry():
+            h3, w3 = stdscr.getmaxyx()
+            box_w = min(86, max(54, w3 - 6))
+            win = curses.newwin(5, box_w, max(0, (h3 - 5) // 2),
+                                max(0, (w3 - box_w) // 2))
+            win.keypad(True)
+            try:
+                curses.echo()
+                try:
+                    curses.curs_set(1)
+                except curses.error:
+                    pass
+                win.box()
+                try:
+                    win.addnstr(1, 2, "New path for this session:", box_w - 4)
+                except curses.error:
+                    pass
+                win.refresh()
+                raw = win.getstr(2, 2, box_w - 6).decode("utf-8", "replace")
+            except Exception:
+                raw = ""
+            finally:
+                curses.noecho()
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
+                del win
+                stdscr.touchwin()
+                stdscr.refresh()
+            p = os.path.expanduser(raw.strip())
+            return p if p and os.path.isdir(p) else None
+
+        def _do_relocate(new_cwd: str):
+            res = relocate_session(target, new_cwd, dry_run=False)
+            if res.ok and res.reason in ("ok", "samecwd"):
+                target.cwd = res.new_cwd or new_cwd
+                if res.new_path is not None:
+                    target.path = res.new_path
+                return ("relocate", target.cwd)
+            return ("fail", res.message)
+
+        def _resolve(new_cwd: str):
+            r = _do_relocate(new_cwd)
+            if r[0] == "relocate":
+                return r
+            _notice(f"Relocate failed: {r[1]}",
+                    "Opening an empty placeholder instead.")
+            return ("placeholder", old_cwd)
+
+        sp = shorten_path(old_cwd)
+        if kind == "confirm":
+            best = payload
+            sig = (", ".join(best.signals[:6]) or "name match")
+            lines = [
+                f"Recorded cwd is gone:  {sp}",
+                f"Best match (score {best.score}):",
+                f"  {shorten_path(best.path)}",
+                f"  signals: {sig}",
+                "",
+                "Relocate this session there and open?",
+            ]
+            choice = _modal(
+                lines,
+                " [y] relocate & open   [e] enter path   [o] placeholder   [Esc] cancel ",
+                {(ord("y"), ord("Y"), 10, 13): "y",
+                 (ord("e"), ord("E")): "e",
+                 (ord("o"), ord("O")): "o",
+                 (27,): "esc"})
+            if choice == "y":
+                return _resolve(best.path)
+            if choice == "e":
+                p = _manual_entry()
+                return _resolve(p) if p else ("placeholder", old_cwd)
+            if choice == "o":
+                return ("placeholder", old_cwd)
+            return ("cancel", None)
+
+        if kind == "pick":
+            view = payload[:6]
+            pick_sel = 0
+            while True:
+                lines = [f"Recorded cwd is gone:  {sp}",
+                         "Pick the new location:", ""]
+                for i, c in enumerate(view):
+                    mark = "›" if i == pick_sel else " "
+                    sgl = (", ".join(c.signals[:4]) or "name only")
+                    lines.append(f"{mark} [{i+1}] s{c.score}  "
+                                 f"{shorten_path(c.path)}  ({sgl})")
+                lines += ["", "↑↓ select · Enter choose · e=enter path · "
+                              "o=placeholder · Esc=cancel"]
+                choice = _modal(
+                    lines, " ↑↓  Enter  e  o  Esc ",
+                    {(curses.KEY_UP, 16): "up",
+                     (curses.KEY_DOWN, 14): "down",
+                     (10, 13): "enter",
+                     (ord("e"), ord("E")): "e",
+                     (ord("o"), ord("O")): "o",
+                     (27,): "esc"})
+                if choice == "up":
+                    pick_sel = (pick_sel - 1) % len(view)
+                elif choice == "down":
+                    pick_sel = (pick_sel + 1) % len(view)
+                elif choice == "enter":
+                    return _resolve(view[pick_sel].path)
+                elif choice == "e":
+                    p = _manual_entry()
+                    return _resolve(p) if p else ("placeholder", old_cwd)
+                elif choice == "o":
+                    return ("placeholder", old_cwd)
+                else:
+                    return ("cancel", None)
+
+        # kind == "none"
+        choice = _modal(
+            [f"Recorded cwd is gone:  {sp}",
+             "No moved-folder candidates found.", "",
+             "Enter a path, open an empty placeholder, or cancel."],
+            " [e] enter path   [o] placeholder   [Esc] cancel ",
+            {(ord("e"), ord("E")): "e",
+             (ord("o"), ord("O")): "o",
+             (27,): "esc"})
+        if choice == "e":
+            p = _manual_entry()
+            return _resolve(p) if p else ("placeholder", old_cwd)
+        if choice == "o":
+            return ("placeholder", old_cwd)
+        return ("cancel", None)
+
     while True:
         stdscr.erase()
         h, w = stdscr.getmaxyx()
@@ -2179,6 +2423,13 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             # Enter — spawn `claude --resume` in a NEW terminal window; stay in TUI.
             if items:
                 target = items[sel]
+                open_cwd = target.cwd
+                if target.cwd and not os.path.isdir(target.cwd):
+                    kind, new_cwd = _orphan_relocate_flow(target)
+                    if kind == "cancel":
+                        toast = "Resume cancelled"
+                        continue
+                    open_cwd = new_cwd
                 if skip_perm_default:
                     use_skip = True
                 else:
@@ -2194,7 +2445,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                         toast = "Resume cancelled"
                         continue
                 ok, info = open_in_new_terminal(
-                    target.cwd, target.session_id, skip_perm=use_skip,
+                    open_cwd, target.session_id, skip_perm=use_skip,
                     cmux_mode=cmux_m,
                 )
                 short = target.session_id[:8]
@@ -2395,55 +2646,315 @@ def _rewrite_cwd_inplace(path: Path, new_cwd: str) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def cmd_relocate(args: argparse.Namespace) -> int:
-    target = find_session(args.session_id)
-    if not target:
-        print(f"(no session matching {args.session_id!r})", file=sys.stderr)
-        return 1
-    new_cwd = str(Path(args.new_cwd).expanduser())
+_WALK_SKIP = {".git", "node_modules", ".venv", "venv", "__pycache__",
+              ".cache", "Library", "System", ".Trash", ".npm", ".cargo",
+              "dist", "build", ".next", ".terraform"}
+
+
+def _relocate_search_roots(old_cwd: str, launch_cwd: str | None = None) -> list[str]:
+    """{ nearest existing ancestor of old_cwd, launch cwd, $HOME }, realpath +
+    NFC, deduped, with any root that is a subpath of another dropped."""
+    cands: list[str] = []
+    p = Path(old_cwd)
+    for anc in [p, *p.parents]:
+        if anc.is_dir():
+            cands.append(str(anc))
+            break
+    if launch_cwd is None:
+        try:
+            launch_cwd = os.getcwd()
+        except OSError:
+            launch_cwd = ""
+    if launch_cwd:
+        cands.append(launch_cwd)
+    cands.append(str(Path.home()))
+    norm: list[str] = []
+    for c in cands:
+        try:
+            rp = os.path.realpath(c)
+        except OSError:
+            continue
+        rp = unicodedata.normalize("NFC", rp)
+        if rp and os.path.isdir(rp) and rp not in norm:
+            norm.append(rp)
+    # drop a root that lives under another root already in the set
+    keep: list[str] = []
+    for r in norm:
+        if not any(r != o and (r == o or r.startswith(o.rstrip("/") + "/"))
+                   for o in norm):
+            keep.append(r)
+    return keep or norm
+
+
+def _mdfind_dirs(base: str, deadline: float) -> list[str]:
+    """macOS Spotlight only. Empty list on any non-darwin / missing / error."""
+    if sys.platform != "darwin":
+        return []
+    import shutil
+    import subprocess
+    import time
+    if not shutil.which("mdfind"):
+        return []
+    budget = max(0.2, deadline - time.monotonic())
+    safe_base = base.replace("\\", "\\\\").replace('"', '\\"')
+    try:
+        out = subprocess.run(
+            ["mdfind",
+             f'kMDItemFSName == "{safe_base}" && kMDItemContentType == "public.folder"'],
+            capture_output=True, text=True, timeout=budget,
+        )
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
+        return []
+    res = []
+    for ln in out.stdout.splitlines():
+        ln = ln.strip()
+        if ln and os.path.isdir(ln) and os.path.basename(ln.rstrip("/")) == base:
+            res.append(ln)
+    return res
+
+
+def _fd_dirs(base: str, roots: list[str], deadline: float) -> list[str]:
+    """`fd`/`fdfind` if present. Empty on missing binary / error."""
+    import shutil
+    import subprocess
+    import time
+    fd = shutil.which("fd") or shutil.which("fdfind")
+    if not fd or not roots:
+        return []
+    budget = max(0.2, deadline - time.monotonic())
+    argv = [fd, "-t", "d", "-a", "-F", base, *roots]
+    try:
+        out = subprocess.run(argv, capture_output=True, text=True, timeout=budget)
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
+        return []
+    res = []
+    for ln in out.stdout.splitlines():
+        ln = ln.strip()
+        if ln and os.path.isdir(ln) and os.path.basename(ln.rstrip("/")) == base:
+            res.append(ln)
+    return res
+
+
+def _walk_dirs(base: str, roots: list[str], deadline: float,
+               max_depth: int = 8) -> list[str]:
+    """Bounded os.walk fallback. Depth-limited, skip-set, time-bounded.
+
+    NOTE: directories whose basename is in _WALK_SKIP or starts with '.' are
+    pruned for performance, so a target folder named like a skip entry
+    (e.g. 'build'/'dist') is not found by this fallback. mdfind/fd run first
+    and are unaffected.
+    """
+    import time
+    res: list[str] = []
+    for root in roots:
+        root = root.rstrip("/")
+        base_depth = root.count(os.sep)
+        for dirpath, dirnames, _ in os.walk(root):
+            if time.monotonic() > deadline:
+                return res
+            depth = dirpath.count(os.sep) - base_depth
+            if depth >= max_depth:
+                kept = [d for d in dirnames
+                        if d not in _WALK_SKIP and not d.startswith(".")]
+                if base in kept:
+                    res.append(os.path.join(dirpath, base))
+                dirnames[:] = []
+                continue
+            dirnames[:] = [d for d in dirnames
+                           if d not in _WALK_SKIP and not d.startswith(".")]
+            for d in dirnames:
+                if d == base:
+                    res.append(os.path.join(dirpath, d))
+    return res
+
+
+def _session_file_fingerprint(path: "Path", *, limit: int = 40,
+                               max_bytes: int = 512_000) -> set[str]:
+    """Distinct basenames of file paths the session touched (Read/Edit/Write/
+    NotebookEdit tool inputs). Bounded read; never raises."""
+    names: set[str] = set()
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            read = 0
+            for line in f:
+                read += len(line.encode("utf-8", errors="replace"))
+                if read > max_bytes or len(names) >= limit:
+                    break
+                line = line.strip()
+                if not line or '"file_path"' not in line:
+                    continue
+                try:
+                    evt = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                msg = evt.get("message") or {}
+                content = msg.get("content") if isinstance(msg, dict) else None
+                if not isinstance(content, list):
+                    continue
+                # len(names) is re-checked after every add below, so the set
+                # is capped at exactly `limit` (no per-line overshoot).
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    inp = block.get("input")
+                    if isinstance(inp, dict):
+                        fp = inp.get("file_path")
+                        if isinstance(fp, str) and fp:
+                            names.add(os.path.basename(fp.rstrip("/")))
+                            if len(names) >= limit:
+                                break
+    except OSError:
+        return set()
+    return names
+
+
+def find_relocation_candidates(old_cwd: str, target: "SessionMeta", *,
+                                time_budget: float = 2.0,
+                                max_results: int = 8,
+                                _roots: list[str] | None = None
+                                ) -> list["Candidate"]:
+    """Find directories the moved folder may now live at, ranked by how many
+    of the session's referenced files they contain. Never raises.
+
+    If the session referenced no files (empty fingerprint) every candidate
+    scores 0 (plus a +1 ".git" nudge); the caller's confidence gate then
+    routes to a manual pick rather than auto-confirm — intended graceful
+    degradation, not a bug.
+    """
+    import time
+    try:
+        base = unicodedata.normalize("NFC",
+                                     os.path.basename(old_cwd.rstrip("/")))
+        if not base:
+            return []
+        deadline = time.monotonic() + time_budget
+
+        # _roots is a test seam: when explicitly provided, search ONLY those
+        # roots via the bounded walk (mdfind is system-wide and ignores roots,
+        # which would make seeded tests non-deterministic on macOS). Production
+        # callers never pass _roots and get the full mdfind -> fd -> walk path.
+        if _roots is not None:
+            roots = _roots
+            dirs = _walk_dirs(base, roots, deadline)
+        else:
+            roots = _relocate_search_roots(old_cwd)
+            dirs = _mdfind_dirs(base, deadline)
+            if not dirs:
+                dirs = _fd_dirs(base, roots, deadline)
+            if not dirs:
+                dirs = _walk_dirs(base, roots, deadline)
+
+        old_real = os.path.realpath(old_cwd) if old_cwd else ""
+        seen: set[str] = set()
+        norm_dirs: list[str] = []
+        for dpath in dirs:
+            try:
+                rp = unicodedata.normalize("NFC", os.path.realpath(dpath))
+            except OSError:
+                continue
+            if rp in seen or not os.path.isdir(rp) or rp == old_real:
+                continue
+            seen.add(rp)
+            norm_dirs.append(rp)
+
+        fp = _session_file_fingerprint(target.path)
+        results: list[Candidate] = []
+        for dpath in norm_dirs:
+            if time.monotonic() > deadline:
+                break
+            # eligibility: relocate would refuse if same-id exists at target
+            proj = PROJECTS_DIR / encode_cwd(dpath)
+            if (proj / target.path.name).exists():
+                continue
+            present: set[str] = set()
+            try:
+                with os.scandir(dpath) as it:
+                    for e in it:
+                        nm = e.name
+                        if nm in fp:
+                            present.add(nm)
+                        elif e.is_dir(follow_symlinks=False):
+                            try:
+                                for e2 in os.scandir(e.path):
+                                    if e2.name in fp:
+                                        present.add(e2.name)
+                            except OSError:
+                                pass
+            except OSError:
+                pass
+            score = len(present)
+            signals = sorted(present)
+            # isdir() on the candidate dir itself; unrelated to _walk_dirs
+            # pruning ".git" from its descent.
+            if os.path.isdir(os.path.join(dpath, ".git")):
+                score += 1
+                signals.append(".git")
+            results.append(Candidate(path=dpath, score=score, signals=signals))
+
+        results.sort(key=lambda c: (c.score, -len(c.path)), reverse=True)
+        return results[:max_results]
+    except Exception:
+        return []
+
+
+def classify_candidates(
+    cands: list["Candidate"],
+) -> tuple[str, "Candidate"] | tuple[str, list["Candidate"]]:
+    """('confirm', best) | ('pick', cands) | ('none', []).
+
+    'confirm' only when the top score clears HIGH_CONFIDENCE_SCORE AND is
+    either the lone candidate or beats the runner-up by >= CONFIDENCE_MARGIN.
+    """
+    if not cands:
+        return ("none", [])
+    top = cands[0]
+    if top.score >= HIGH_CONFIDENCE_SCORE and (
+        len(cands) == 1 or top.score - cands[1].score >= CONFIDENCE_MARGIN
+    ):
+        return ("confirm", top)
+    return ("pick", cands)
+
+
+def relocate_session(target: "SessionMeta", new_cwd: str, *,
+                      keep_original: bool = False,
+                      force: bool = False,
+                      dry_run: bool = False) -> "RelocateResult":
+    """Pure relocate core (no prints, no input()). Rewrites every transcript
+    line's `cwd` to new_cwd and moves the transcript (+ subagents subdir) into
+    PROJECTS_DIR/encode_cwd(new_cwd). Atomic via temp file + replace. Refuses
+    to overwrite an existing same-id session at the target.
+
+    dry_run=True validates and fills derived paths WITHOUT mutating.
+    """
+    new_cwd = str(Path(new_cwd).expanduser())
     if not new_cwd.startswith("/"):
         new_cwd = str(Path(new_cwd).resolve())
 
-    if not args.force and not Path(new_cwd).is_dir():
-        print(f"Target folder does not exist: {new_cwd}\n"
-              f"(use --force to relocate anyway)", file=sys.stderr)
-        return 1
+    if not force and not Path(new_cwd).is_dir():
+        return RelocateResult(False, f"Target folder does not exist: {new_cwd}",
+                               new_cwd=new_cwd, old_cwd=target.cwd, reason="nodir")
 
     if new_cwd == target.cwd:
-        print(f"Session already has cwd={new_cwd} — nothing to do.")
-        return 0
+        return RelocateResult(True, f"Session already has cwd={new_cwd} — nothing to do.",
+                              new_cwd=new_cwd, old_cwd=target.cwd, reason="samecwd")
 
     new_project_dir = PROJECTS_DIR / encode_cwd(new_cwd)
     new_path = new_project_dir / target.path.name
-
-    if new_path.exists():
-        print(f"Target path already exists: {new_path}\n"
-              f"(a session with the same id lives there — refusing to overwrite)",
-              file=sys.stderr)
-        return 1
-
     old_subdir = target.path.parent / target.path.stem
     new_subdir = new_project_dir / target.path.stem
 
-    print(f"Session:  {target.session_id}")
-    print(f"From cwd: {shorten_path(target.cwd)}")
-    print(f"To   cwd: {shorten_path(new_cwd)}")
-    print(f"File:     {shorten_path(str(target.path))}")
-    print(f"     →    {shorten_path(str(new_path))}")
-    if old_subdir.is_dir():
-        print(f"Subagents: {shorten_path(str(old_subdir))}")
-        print(f"      →    {shorten_path(str(new_subdir))}")
-    print("Mode:     " + ("copy (originals will be kept)" if args.keep_original else "move"))
+    if new_path.exists():
+        return RelocateResult(
+            False,
+            f"Target path already exists: {new_path}\n"
+            f"(a session with the same id lives there — refusing to overwrite)",
+            new_path=new_path, new_cwd=new_cwd, old_cwd=target.cwd,
+            old_subdir=old_subdir, new_subdir=new_subdir, reason="collision")
 
-    if args.dry_run:
-        print("(dry run — nothing changed)")
-        return 0
-
-    if not args.yes:
-        reply = input("Proceed? [y/N] ").strip().lower()
-        if reply not in ("y", "yes"):
-            print("Aborted.")
-            return 0
+    if dry_run:
+        return RelocateResult(True, "(dry run — nothing changed)",
+                              new_path=new_path, new_cwd=new_cwd, old_cwd=target.cwd,
+                              old_subdir=old_subdir, new_subdir=new_subdir, reason="ok")
 
     new_project_dir.mkdir(parents=True, exist_ok=True)
     tmp_path = new_path.with_suffix(".jsonl.tmp")
@@ -2467,14 +2978,17 @@ def cmd_relocate(args: argparse.Namespace) -> int:
                 dst.write(json.dumps(evt, ensure_ascii=False) + "\n")
         tmp_path.replace(new_path)
     except OSError as e:
-        print(f"Failed to write new session file: {e}", file=sys.stderr)
         tmp_path.unlink(missing_ok=True)
-        return 1
+        return RelocateResult(False, f"Failed to write new session file: {e}",
+                              new_path=new_path, new_cwd=new_cwd, old_cwd=target.cwd,
+                              old_subdir=old_subdir, new_subdir=new_subdir,
+                              reason="writefail")
 
     sub_moved = False
+    sub_warn = ""
     if old_subdir.is_dir():
         try:
-            if args.keep_original:
+            if keep_original:
                 import shutil
                 shutil.copytree(old_subdir, new_subdir)
             else:
@@ -2485,21 +2999,84 @@ def cmd_relocate(args: argparse.Namespace) -> int:
                 for sub_jsonl in new_subdir.glob("subagents/*.jsonl"):
                     _rewrite_cwd_inplace(sub_jsonl, new_cwd)
         except OSError as e:
-            print(f"Warning: could not relocate subagents dir: {e}", file=sys.stderr)
+            sub_warn = f"Warning: could not relocate subagents dir: {e}"
 
-    if not args.keep_original:
+    orig_warn = ""
+    if not keep_original:
         try:
             target.path.unlink()
         except OSError as e:
-            print(f"Warning: failed to remove original {target.path}: {e}", file=sys.stderr)
+            orig_warn = f"Warning: failed to remove original {target.path}: {e}"
 
     try:
         CACHE_PATH.unlink()
     except OSError:
         pass
 
-    print(f"✓ Relocated session (rewrote cwd on {rewritten} event(s))"
-          + (", subagents moved" if sub_moved else ""))
+    msg = (f"✓ Relocated session (rewrote cwd on {rewritten} event(s))"
+           + (", subagents moved" if sub_moved else ""))
+    return RelocateResult(True, msg, new_path=new_path, new_cwd=new_cwd,
+                          old_cwd=target.cwd, old_subdir=old_subdir,
+                          new_subdir=new_subdir, rewritten=rewritten,
+                          sub_moved=sub_moved, reason="ok",
+                          )._with_warnings(sub_warn, orig_warn)
+
+
+def cmd_relocate(args: argparse.Namespace) -> int:
+    target = find_session(args.session_id)
+    if not target:
+        print(f"(no session matching {args.session_id!r})", file=sys.stderr)
+        return 1
+
+    preview = relocate_session(target, args.new_cwd,
+                               keep_original=args.keep_original,
+                               force=args.force, dry_run=True)
+    if preview.reason == "nodir":
+        print(f"Target folder does not exist: {preview.new_cwd}\n"
+              f"(use --force to relocate anyway)", file=sys.stderr)
+        return 1
+    if preview.reason == "samecwd":
+        print(preview.message)
+        return 0
+    if preview.reason == "collision":
+        print(preview.message, file=sys.stderr)
+        return 1
+
+    print(f"Session:  {target.session_id}")
+    print(f"From cwd: {shorten_path(target.cwd)}")
+    print(f"To   cwd: {shorten_path(preview.new_cwd)}")
+    print(f"File:     {shorten_path(str(target.path))}")
+    print(f"     →    {shorten_path(str(preview.new_path))}")
+    if preview.old_subdir and preview.old_subdir.is_dir():
+        print(f"Subagents: {shorten_path(str(preview.old_subdir))}")
+        print(f"      →    {shorten_path(str(preview.new_subdir))}")
+    print("Mode:     " + ("copy (originals will be kept)"
+                           if args.keep_original else "move"))
+
+    if args.dry_run:
+        print("(dry run — nothing changed)")
+        return 0
+
+    if not args.yes:
+        reply = input("Proceed? [y/N] ").strip().lower()
+        if reply not in ("y", "yes"):
+            print("Aborted.")
+            return 0
+
+    result = relocate_session(target, args.new_cwd,
+                              keep_original=args.keep_original,
+                              force=args.force, dry_run=False)
+    if not result.ok:
+        print(result.message, file=sys.stderr)
+        return 1
+    # Preserve original streams: 'Warning:' lines to stderr, success to stdout.
+    _msg_lines = result.message.split("\n")
+    _warn = [ln for ln in _msg_lines if ln.startswith("Warning:")]
+    _main = [ln for ln in _msg_lines if not ln.startswith("Warning:")]
+    for _w in _warn:
+        print(_w, file=sys.stderr)
+    if _main:
+        print("\n".join(_main))
     return 0
 
 
