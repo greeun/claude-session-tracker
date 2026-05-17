@@ -43,9 +43,9 @@ STATUS_DONE = "✓"     # 작업종료  — user marked finished via D / cst don
 STATUS_WIDTH = 2       # glyph padded to "ST" header width (2 display cols)
 
 # Full-text labels used in help / stats / CLI headers.
-LABEL_ACTIVE = "세션사용중"
-LABEL_ENDED = "세션종료"
-LABEL_DONE = "작업종료"
+LABEL_ACTIVE = "live"
+LABEL_ENDED = "ended"
+LABEL_DONE = "done"
 
 STATUS_LABELS: dict[str, str] = {
     STATUS_ACTIVE: LABEL_ACTIVE,
@@ -1114,7 +1114,7 @@ def cmd_done(args: argparse.Namespace) -> int:
         print(f"(no session matching {args.session_id!r})", file=sys.stderr)
         return 1
     set_done(target.session_id, True)
-    print(f"✓ Marked 작업종료: {target.session_id[:8]}  {shorten_path(target.cwd)}")
+    print(f"✓ Marked done: {target.session_id[:8]}  {shorten_path(target.cwd)}")
     return 0
 
 
@@ -1124,7 +1124,7 @@ def cmd_undone(args: argparse.Namespace) -> int:
         print(f"(no session matching {args.session_id!r})", file=sys.stderr)
         return 1
     set_done(target.session_id, False)
-    print(f"✓ Cleared 작업종료: {target.session_id[:8]}  {shorten_path(target.cwd)}")
+    print(f"✓ Cleared done: {target.session_id[:8]}  {shorten_path(target.cwd)}")
     return 0
 
 
@@ -1214,7 +1214,7 @@ def cmd_prompt_hook(args: argparse.Namespace) -> int:
                           ensure_ascii=False))
         return 0
 
-    note = "※ 이 프롬프트는 모델에 전달되지 않았습니다 (토큰 0)."
+    note = "Note: this prompt was not sent to the model (0 tokens)."
     if not raw_target:
         return _block(
             f"[cst {action}] no session id — payload had no session_id and "
@@ -1222,13 +1222,13 @@ def cmd_prompt_hook(args: argparse.Namespace) -> int:
     target = find_session(raw_target)
     if target is None:
         return _block(
-            f"[cst {action}] 실패 — '{raw_target}' 에 해당하는 세션 없음 "
-            f"(미존재 또는 모호). 변경 없음.\n{note}")
+            f"[cst {action}] failed — no session matching '{raw_target}' "
+            f"(not found or ambiguous). Nothing changed.\n{note}")
     set_done(target.session_id, action == "done")
-    glyph = "✓ 작업종료 ON" if action == "done" else "○ 작업종료 해제"
+    glyph = "✓ done ON" if action == "done" else "○ done cleared"
     return _block(
-        f"[cst {action}] 성공 — {glyph}\n"
-        f"대상 세션: {target.session_id[:8]}  {shorten_path(target.cwd)}\n"
+        f"[cst {action}] success — {glyph}\n"
+        f"target session: {target.session_id[:8]}  {shorten_path(target.cwd)}\n"
         f"{note}")
 
 
@@ -1415,7 +1415,7 @@ HELP_LINES = [
     "      ↑↓ / Ctrl-P Ctrl-N move selection while filtering",
     "      PgUp PgDn Home End page / jump while filtering",
     "      Backspace / Ctrl-U edit / wipe the query",
-    "      Ctrl-D             toggle 작업종료 on the current row",
+    "      Ctrl-D             toggle done on the current row",
     "      Ctrl-A             toggle mark on ALL filtered rows (select all)",
     "      Ctrl-R             rescan sessions + live-process registry",
     "      Enter              commit filter, exit prompt (filter stays applied)",
@@ -1430,8 +1430,8 @@ HELP_LINES = [
     "  Space                  toggle mark on the current row",
     "  Ctrl-A                 toggle mark on ALL filtered rows (select all)",
     "  Ctrl-X                 clear all marks",
-    "  D / Ctrl-D             mark 작업종료 on marked rows, else toggle on current row",
-    "  H                      toggle hide: show/hide 작업종료 rows",
+    "  D / Ctrl-D             mark done on marked rows, else toggle on current row",
+    "  H                      toggle hide: show/hide done rows",
     "                         (Ctrl-H is unavailable — it aliases Backspace)",
     "  C                      toggle: only show sessions under the TUI launch cwd",
     "                         (prefix match on the recorded session cwd)",
@@ -1440,9 +1440,9 @@ HELP_LINES = [
     "  ?                      this help",
     "",
     "Status glyphs",
-    "  ● 세션사용중   live process registered in ~/.claude/sessions/",
-    "  ○ 세션종료     session not running (PID gone or never registered)",
-    "  ✓ 작업종료     explicitly marked done by user (persistent)",
+    "  ● live    live process registered in ~/.claude/sessions/",
+    "  ○ ended   session not running (PID gone or never registered)",
+    "  ✓ done    explicitly marked done by user (persistent)",
     "",
     "Note: plain letters do NOT filter in normal mode — press `/` first.",
     "",
@@ -1831,7 +1831,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
         )
         live_count = sum(1 for s in items if s.session_id in live and s.session_id not in done)
         done_count = sum(1 for s in items if s.session_id in done)
-        hide_hint = "  [✓ 숨김]" if hide_done else ""
+        hide_hint = "  [✓ hidden]" if hide_done else ""
         cwd_hint = f"  [📂 {shorten_path(launch_cwd)}]" if cwd_only else ""
         header = (
             f" claude-session-tracker v{__version__}  "
@@ -2086,8 +2086,8 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                     target_sid = items[sel].session_id
                     now_done = mark_done(target_sid)
                     done = done_ids()
-                    toast = ("Marked 작업종료" if now_done
-                             else "Cleared 작업종료") + f": {target_sid[:8]}"
+                    toast = ("Marked done" if now_done
+                             else "Cleared done") + f": {target_sid[:8]}"
             elif ch == 18:  # Ctrl-R — rescan (mirrors normal-mode R)
                 fresh = load_all_sessions(cwd_filter=cwd_filter, days=days, progress=False)
                 sessions[:] = fresh
@@ -2203,19 +2203,19 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                     set_done(sid, True)
                 done = done_ids()
                 marked.clear()
-                toast = f"Marked 작업종료: {len(target_sids)} session(s)"
+                toast = f"Marked done: {len(target_sids)} session(s)"
             elif items:
                 target_sid = items[sel].session_id
                 now_done = mark_done(target_sid)
                 done = done_ids()
-                toast = ("Marked 작업종료" if now_done else "Cleared 작업종료") \
+                toast = ("Marked done" if now_done else "Cleared done") \
                         + f": {target_sid[:8]}"
         elif ch in (ord('H'), ord('h')):
             # No Ctrl-H alias: Ctrl-H == ASCII 8 == Backspace on most terminals.
             hide_done = not hide_done
             sel = 0
             top = 0
-            toast = ("Hiding 작업종료 (press H again to show)"
+            toast = ("Hiding done (press H again to show)"
                      if hide_done else "Showing all statuses")
         elif ch in (ord('C'), ord('c')):
             cwd_only = not cwd_only
@@ -2884,11 +2884,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_stats.add_argument("--top", type=int, default=15)
     p_stats.set_defaults(func=cmd_stats)
 
-    p_done = sub.add_parser("done", help="mark session as 작업종료")
+    p_done = sub.add_parser("done", help="mark session as done")
     p_done.add_argument("session_id")
     p_done.set_defaults(func=cmd_done)
 
-    p_undone = sub.add_parser("undone", help="clear 작업종료 flag")
+    p_undone = sub.add_parser("undone", help="clear done flag")
     p_undone.add_argument("session_id")
     p_undone.set_defaults(func=cmd_undone)
 
