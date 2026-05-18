@@ -1418,6 +1418,47 @@ def cmd_prompt_hook(args: argparse.Namespace) -> int:
         f"{note}")
 
 
+# `cst status-hook` is wired into ~/.claude/settings.json by `cst install-hook`
+# under several Claude Code lifecycle events. It reads the hook JSON on stdin,
+# maps hook_event_name -> a status, and records it into state.json["status"].
+# No stdout (non-blocking; 0 tokens). See the waiting-status design spec.
+
+_HOOK_STATE = {
+    "SessionStart": "working",
+    "UserPromptSubmit": "working",
+    "PreToolUse": "working",
+    "Notification": "waiting",
+    "PermissionRequest": "waiting",
+    "Stop": "idle",
+    "SessionEnd": "-",   # sentinel: clear the overlay entry
+}
+
+
+def hook_event_to_state(event: str) -> str:
+    """Claude Code hook event -> state name. '' = ignore, '-' = clear."""
+    return _HOOK_STATE.get((event or "").strip(), "")
+
+
+def cmd_status_hook(args: argparse.Namespace) -> int:
+    raw = sys.stdin.read()
+    try:
+        data = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError:
+        return 0
+    if not isinstance(data, dict):
+        return 0
+    event = (data.get("hook_event_name")
+             or getattr(args, "event", None) or "").strip()
+    sid = (data.get("session_id") or "").strip()
+    if not sid or not event:
+        return 0
+    s = hook_event_to_state(event)
+    if s == "":
+        return 0  # unknown event — ignore
+    set_status(sid, None if s == "-" else s, event)
+    return 0
+
+
 def _load_settings(path: Path) -> tuple[dict | None, str | None]:
     try:
         text = path.read_text(encoding="utf-8")
@@ -3630,6 +3671,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "prompt-hook",
         help="UserPromptSubmit hook: intercept /done & /undone (0 tokens)")
     p_phook.set_defaults(func=cmd_prompt_hook)
+
+    p_shook = sub.add_parser(
+        "status-hook",
+        help="lifecycle hook: record working/waiting/idle into state.json")
+    p_shook.add_argument("event", nargs="?", default=None,
+                         help="optional event override (else read from stdin)")
+    p_shook.set_defaults(func=cmd_status_hook)
 
     p_ihook = sub.add_parser(
         "install-hook",

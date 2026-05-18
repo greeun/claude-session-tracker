@@ -1,6 +1,9 @@
 import importlib.util
+import io
+import json as _json
 import pathlib
 import sys
+import tempfile
 import unittest
 
 _TP = pathlib.Path(__file__).resolve().parent.parent / "tracker.py"
@@ -97,6 +100,77 @@ class TestResolveStatusWrapper(unittest.TestCase):
         self.assertEqual(
             tracker.resolve_status("s1", set(), {"s1"}),
             tracker.STATUS_DONE)
+
+
+class TestHookMapper(unittest.TestCase):
+    def test_mapping(self):
+        m = tracker.hook_event_to_state
+        self.assertEqual(m("UserPromptSubmit"), "working")
+        self.assertEqual(m("Notification"), "waiting")
+        self.assertEqual(m("PermissionRequest"), "waiting")
+        self.assertEqual(m("Stop"), "idle")
+        self.assertEqual(m("SessionEnd"), "-")        # clear sentinel
+        self.assertEqual(m("PreToolUse"), "working")  # understood if wired
+        self.assertEqual(m("SessionStart"), "working")
+        self.assertEqual(m("Bogus"), "")              # ignore sentinel
+
+
+class TestStatusHookCmd(unittest.TestCase):
+    def _run_seq(self, payloads):
+        """Apply each payload through cmd_status_hook against ONE temp
+        state file; return (last_rc, final_state)."""
+        old_stdin, old_state = sys.stdin, tracker.STATE_PATH
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        tmp.close()
+        tracker.STATE_PATH = pathlib.Path(tmp.name)
+        rc = None
+        try:
+            for p in payloads:
+                sys.stdin = io.StringIO(
+                    p if isinstance(p, str) else _json.dumps(p))
+                rc = tracker.cmd_status_hook(tracker.argparse.Namespace())
+            return rc, tracker.load_state()
+        finally:
+            sys.stdin = old_stdin
+            tracker.STATE_PATH = old_state
+            pathlib.Path(tmp.name).unlink(missing_ok=True)
+
+    def test_notification_sets_waiting(self):
+        rc, st = self._run_seq([{"hook_event_name": "Notification",
+                                 "session_id": "abc"}])
+        self.assertEqual(rc, 0)
+        self.assertEqual(st["status"]["abc"]["state"], "waiting")
+        self.assertEqual(st["status"]["abc"]["event"], "Notification")
+
+    def test_session_end_clears_existing(self):
+        rc, st = self._run_seq([
+            {"hook_event_name": "Stop", "session_id": "abc"},
+            {"hook_event_name": "SessionEnd", "session_id": "abc"},
+        ])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("abc", st.get("status", {}))
+
+    def test_stop_then_prompt_transitions(self):
+        rc, st = self._run_seq([
+            {"hook_event_name": "Stop", "session_id": "abc"},
+            {"hook_event_name": "UserPromptSubmit", "session_id": "abc"},
+        ])
+        self.assertEqual(st["status"]["abc"]["state"], "working")
+
+    def test_malformed_stdin_is_noop(self):
+        rc, st = self._run_seq(["{not json"])
+        self.assertEqual(rc, 0)
+
+    def test_unknown_event_no_write(self):
+        rc, st = self._run_seq([{"hook_event_name": "Bogus",
+                                 "session_id": "abc"}])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("abc", st.get("status", {}))
+
+    def test_missing_session_id_noop(self):
+        rc, st = self._run_seq([{"hook_event_name": "Notification"}])
+        self.assertEqual(rc, 0)
+        self.assertEqual(st.get("status", {}), {})
 
 
 if __name__ == "__main__":
