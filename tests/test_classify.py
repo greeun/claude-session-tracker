@@ -47,6 +47,35 @@ class TestClassifyStatus(unittest.TestCase):
                                reg={"status": "idle"}),
             tk.STATUS_IDLE)
 
+    def test_reg_waiting_is_waiting(self):
+        # Claude Code 2.x registry natively reports status="waiting"
+        # (waitingFor="permission prompt"/"selection"/...). Must surface as
+        # WAITING even with no hook overlay. Regression: previously WORKING.
+        self.assertEqual(
+            tk.classify_status(done=False, alive=True, overlay=None,
+                               reg={"status": "waiting"}),
+            tk.STATUS_WAITING)
+
+    def test_overlay_wins_over_reg_waiting(self):
+        # hook overlay must still take precedence over the registry fallback
+        self.assertEqual(
+            tk.classify_status(done=False, alive=True,
+                               overlay={"state": "working"},
+                               reg={"status": "waiting"}),
+            tk.STATUS_WORKING)
+
+    def test_not_alive_beats_reg_waiting(self):
+        self.assertEqual(
+            tk.classify_status(done=False, alive=False, overlay=None,
+                               reg={"status": "waiting"}),
+            tk.STATUS_ENDED)
+
+    def test_done_beats_reg_waiting(self):
+        self.assertEqual(
+            tk.classify_status(done=True, alive=True, overlay=None,
+                               reg={"status": "waiting"}),
+            tk.STATUS_DONE)
+
     def test_overlay_waiting(self):
         self.assertEqual(
             tk.classify_status(done=False, alive=True,

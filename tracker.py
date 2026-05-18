@@ -12,7 +12,7 @@ Data sources:
 """
 from __future__ import annotations
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 import argparse
 import json
@@ -693,6 +693,11 @@ def classify_status(*, done: bool, alive: bool,
         return _STATE_GLYPH.get(state, STATUS_WORKING)
     if reg_status == "busy":
         return STATUS_WORKING
+    if reg_status == "waiting":
+        # Claude Code 2.x registry natively flags blocked-on-user state
+        # (waitingFor="permission prompt"/"selection"/...). Surface it even
+        # with no hook overlay installed.
+        return STATUS_WAITING
     if reg_status == "idle":
         return STATUS_IDLE
     return STATUS_WORKING  # legacy: alive but no signal

@@ -64,17 +64,23 @@ cst install-hook --settings /경로/settings.json   # 기본 경로가 아닐 �
 cst uninstall-hook            # 제거 (다른 UserPromptSubmit 훅은 유지)
 ```
 
-### 정확한 라이브 상태 (선택, 권장)
+### 라이브 상태 정확도
 
-`cst install-hook` 은 Claude Code의 5가지 라이프사이클 훅
-(`UserPromptSubmit`, `Notification`, `PermissionRequest`, `Stop`, `SessionEnd`)
-도 연결하여 cst가 **당신의 입력 대기** (`!`)와 **완료** (`◦`/`○`)를 구분할 수
-있게 합니다. 훅 없이는 `~/.claude/sessions` 레지스트리만 사용해 working(`●`)과
-idle(`◦`)만 구분 가능합니다. `cst install-hook` 한 번 실행하면 됩니다(멱등;
-외부 훅 보존). 제거 시 `cst uninstall-hook`. cmux 안에서도: cmux가 `--settings`
-로 자체 Claude 훅을 주입하지만, Claude Code가 `~/.claude/settings.json`과 합산
-로드하므로 cst 훅도 정상 실행되어 충돌 없음.
-참고: 레지스트리가 마지막으로 기록된 훅 이벤트보다 최신 idle 활동을 보고하면, 고착 방지를 위해 오래된 `!`가 자동으로 `◦`로 정정될 수 있습니다.
+cst는 **당신의 입력 대기** (`!`)를 Claude Code 자체 레지스트리
+(`~/.claude/sessions/<pid>.json` 의 `status: "waiting"`,
+`waitingFor: "permission prompt"/"selection"/...`)에서 **별도 설정 없이 기본값으로**
+판정합니다(Claude Code 2.x). 레지스트리는 working(`●`)·idle(`◦`)도 주며, 죽은
+PID는 `○`.
+
+`cst install-hook` (선택)은 Claude Code의 5가지 라이프사이클 훅
+(`UserPromptSubmit`, `Notification`, `PermissionRequest`, `Stop`, `SessionEnd`)을
+**정밀 레이어**로 얹습니다 — `state.json` 오버레이로 더 빠르고 세밀한 전이와
+깔끔한 완료(`◦`) 신호. **`!` 표시에 필수는 아닙니다.** 한 번 실행하면 됩니다
+(멱등; 외부 훅 보존). 제거 시 `cst uninstall-hook`. cmux 안에서도: cmux가
+`--settings`로 자체 Claude 훅을 주입하지만, Claude Code가
+`~/.claude/settings.json`과 합산 로드하므로 cst 훅도 정상 실행되어 충돌 없음.
+참고: *훅 설치 시*, 레지스트리가 마지막 기록 훅 이벤트보다 최신 idle 활동을
+보고하면 고착 방지를 위해 오래된 `!`가 자동으로 `◦`로 정정될 수 있습니다.
 
 `install-hook` 은 멱등이며(재실행 시 "no change"), 예전 형태
 `~/.claude/hooks/cst-done.py` 도 자동 이전합니다. `csm hook activity` 같은
@@ -111,7 +117,7 @@ STAT 컬럼에 1칸 글리프로 표시. 우선순위: **✓ > ● > ! > ◦ > �
 | 글리프 | 라벨 | 의미 |
 |:---:|:---|:---|
 | **●** | working (작업중) | Claude가 현재 출력을 생성하는 중. |
-| **!** | waiting (대기중) | Claude가 당신의 입력 또는 권한 결정을 기다리는 중 — 시간이 새는 곳. `cst install-hook` 설치 시 정확히 감지됨. |
+| **!** | waiting (대기중) | Claude가 당신의 입력 또는 권한 결정을 기다리는 중 — 시간이 새는 곳. Claude Code 레지스트리에서 기본값으로 감지; `cst install-hook`는 정밀도를 더함. |
 | **◦** | idle (유휴) | 턴이 끝났고 프로세스는 아직 살아 있음. |
 | **○** | ended (종료됨) | 프로세스가 없음 (정상 종료 또는 등록된 적 없음). 트랜스크립트는 그대로 읽을 수 있음. |
 | **✓** | done (완료) | 사용자가 명시적으로 끝났다고 표시. TUI의 `D`/`Ctrl-D` 또는 `cst done <id>`. `~/.cache/claude-session-tracker/state.json`에 영구 저장. |

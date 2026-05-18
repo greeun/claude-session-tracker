@@ -40,7 +40,8 @@ injected `HOOKS_JSON`, wrapper lines 455–475):
   | `Stop` | turn complete (idle) |
   | `SessionEnd` | process exited (covers Ctrl+C where Stop doesn't fire) |
 
-**Conclusion:** the only reliable source for "finished (Stop) vs waiting
+**Conclusion (design-time belief — ⚠ partially SUPERSEDED, see Addendum
+2026-05-19):** the only reliable source for "finished (Stop) vs waiting
 (Notification/PermissionRequest)" is Claude Code's own lifecycle hooks. Neither
 the registry `status` field (only `busy`/`idle`) nor jsonl heuristics can split
 it reliably.
@@ -178,6 +179,43 @@ pure logic only:
 
 TUI / terminal-spawn paths remain manual (`python3 tracker.py --tui`), per
 existing project practice.
+
+## Out of scope
+
+## Addendum — post-merge live validation (2026-05-19)
+
+A live validation against the actually-installed Claude Code **2.1.143**
+falsified a load-bearing premise of the design-time Conclusion above:
+
+- The `~/.claude/sessions/<pid>.json` registry **natively reports
+  `status:"waiting"` with `waitingFor:"permission prompt"`** (and the binary
+  carries `selection`/`plan approval`/`user input`/`tool use` as further
+  `waitingFor` values). The registry is **not** limited to `busy`/`idle`.
+- Therefore the headline `!` waiting state is obtainable **with no hooks
+  installed**, directly from the registry cst already reads. Hooks are a
+  *precision layer* (faster/finer transitions, cleaner finished signal), not
+  a prerequisite for `!`.
+- Bug found & fixed (v0.6.1): `classify_status`'s no-overlay registry branch
+  did not handle `reg_status == "waiting"` and fell through to
+  `STATUS_WORKING` — i.e. a session Claude Code flagged as waiting was shown
+  as `● working` for every user without `cst install-hook`. Fixed by adding
+  `if reg_status == "waiting": return STATUS_WAITING` (overlay/`done`/
+  not-alive priority unaffected; self-heal unaffected — it only acts inside
+  the overlay path and only when `reg_status == "idle"`).
+- Self-heal `!`→`◦` false-eat risk (flagged as a design caveat) is much
+  smaller than feared: a genuinely-waiting session has registry
+  `status:"waiting"` (not `idle`), so the self-heal guard `reg_status ==
+  "idle"` does not hold during real waits.
+- Validation also confirmed (real 2.1.143 binary / live registry): all five
+  wired hook events incl. `PermissionRequest` are genuine first-class hooks;
+  registry sessionId == the `~/.claude/projects/**/<id>.jsonl` id (cmux
+  coexistence id-alignment holds); on exit (Ctrl+C×2 or `exit`) the registry
+  file is removed and cst shows `○ ended` via the pid `kill -0` check
+  regardless of any stale registry/overlay.
+
+Not yet validated: that real Claude Code emits these hook payloads at
+runtime (events proven to exist; needs a 1-minute interactive user test).
+Deferred (own scope): slimming the now-largely-optional hook subsystem.
 
 ## Out of scope
 

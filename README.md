@@ -64,18 +64,26 @@ cst install-hook --settings /path/to/settings.json   # non-default location
 cst uninstall-hook            # remove it (keeps other UserPromptSubmit hooks)
 ```
 
-### Accurate live status (optional, recommended)
+### Live status accuracy
 
-`cst install-hook` also wires five Claude Code lifecycle hooks
+cst resolves **waiting for you** (`!`) **out of the box** from Claude Code's
+own `~/.claude/sessions/<pid>.json` registry (`status: "waiting"`,
+`waitingFor: "permission prompt"/"selection"/...`) on Claude Code 2.x — no
+setup required. The registry also yields working (`●`) and idle (`◦`); a dead
+PID is `○`.
+
+`cst install-hook` (optional) wires five Claude Code lifecycle hooks
 (`UserPromptSubmit`, `Notification`, `PermissionRequest`, `Stop`, `SessionEnd`)
-so cst can distinguish **waiting for you** (`!`) from **finished** (`◦`/`○`).
-Without the hook, cst falls back to the `~/.claude/sessions` registry which
-can only resolve working (`●`) vs idle (`◦`). Run `cst install-hook` once
-(idempotent; preserves foreign hooks); `cst uninstall-hook` to remove. Inside
-cmux: cmux injects its own Claude hooks via `--settings`; Claude Code merges
-them additively with `~/.claude/settings.json`, so cst's hooks still fire and
-key off the same session id — no conflict.
-Note: if the registry reports newer idle activity than the last recorded hook event, a stale `!` may self-heal to `◦` to avoid a stuck state.
+as a **precision layer** on top: faster/finer transitions and a cleaner
+finished (`◦`) signal via an overlay in `state.json`. It is **not required for
+`!`**. Run `cst install-hook` once (idempotent; preserves foreign hooks);
+`cst uninstall-hook` to remove. Inside cmux: cmux injects its own Claude hooks
+via `--settings`; Claude Code merges them additively with
+`~/.claude/settings.json`, so cst's hooks still fire and key off the same
+session id — no conflict.
+Note: *with hooks installed*, if the registry reports newer idle activity than
+the last recorded hook event, a stale `!` may self-heal to `◦` to avoid a
+stuck state.
 
 `install-hook` is idempotent (re-running reports "no change") and auto-migrates
 the legacy `~/.claude/hooks/cst-done.py` form. Other hooks (e.g.
@@ -113,7 +121,7 @@ Compact one-column glyphs in the STAT column. Priority: **✓ > ● > ! > ◦ > 
 | Glyph | Label | Meaning |
 |:---:|:---|:---|
 | **●** | working | Claude is actively producing output. |
-| **!** | waiting | Claude is waiting for your input or a permission decision — this is where time leaks. Requires `cst install-hook` for accurate detection. |
+| **!** | waiting | Claude is waiting for your input or a permission decision — this is where time leaks. Detected from the Claude Code registry out of the box; `cst install-hook` adds precision. |
 | **◦** | idle | Turn finished, process still alive. |
 | **○** | ended | Process is gone (clean exit) or was never registered. Transcript remains readable. |
 | **✓** | done | You explicitly marked it done (`D` / `Ctrl-D` in TUI or `cst done <id>`). Persists in `~/.cache/claude-session-tracker/state.json`. |

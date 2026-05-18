@@ -11,7 +11,8 @@ five states (priority: `✓ > ● > ! > ◦ > ○`):
 
 - **●** working — Claude is actively producing output.
 - **!** waiting — Claude is waiting for your input or a permission decision
-  (this is where time leaks; hook-driven, requires `cst install-hook`).
+  (this is where time leaks; from the Claude Code registry by default,
+  `cst install-hook` adds precision).
 - **◦** idle — turn finished, process still alive.
 - **○** ended — process is gone (or was never registered).
 - **✓** done — user explicitly marked the session finished (`D`/`Ctrl-D`
@@ -68,18 +69,24 @@ hooks (e.g. `csm hook activity`) are preserved. Code changes take effect
 immediately (the hook re-runs `cst`); only settings.json changes need a
 `/hooks`-open or restart to reload.
 
-### Accurate live status (optional, recommended)
+### Live status accuracy
 
-`cst install-hook` also wires five Claude Code lifecycle hooks
+cst resolves **waiting for you** (`!`) **by default** from Claude Code's
+`~/.claude/sessions/<pid>.json` registry (`status:"waiting"`,
+`waitingFor:"permission prompt"/"selection"/...`) on Claude Code 2.x — no
+setup. The registry also gives working (`●`)/idle (`◦`); a dead PID is `○`.
+
+`cst install-hook` (optional) wires five lifecycle hooks
 (`UserPromptSubmit`, `Notification`, `PermissionRequest`, `Stop`,
-`SessionEnd`) that let cst distinguish **waiting for you** (`!`) from
-**finished** (`◦`/`○`). Without the hook, cst falls back to the
-`~/.claude/sessions` registry which can only resolve working (`●`) vs idle
-(`◦`). Run `cst install-hook` once (idempotent; preserves foreign hooks);
+`SessionEnd`) as a **precision layer** (faster/finer transitions, cleaner
+finished signal via a `state.json` overlay) — **not required for `!`**. Run
+`cst install-hook` once (idempotent; preserves foreign hooks);
 `cst uninstall-hook` to remove. Inside cmux: cmux injects its own Claude
 hooks via `--settings`; Claude Code merges them additively with
 `~/.claude/settings.json`, so cst's hooks still fire — no conflict.
-Note: if the registry reports newer idle activity than the last recorded hook event, a stale `!` may self-heal to `◦` to avoid a stuck state.
+Note: *with hooks installed*, if the registry reports newer idle activity
+than the last recorded hook event, a stale `!` may self-heal to `◦` to avoid
+a stuck state.
 
 ## TUI keybindings
 
