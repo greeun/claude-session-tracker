@@ -1772,6 +1772,8 @@ def _preview_modal(stdscr, target: SessionMeta, status: str) -> None:
     lines.append((truncate_display(f"Session  {target.session_id}", inner_w), header_attr))
     lines.append((truncate_display(f"Status   {status_label(status)}", inner_w), 0))
     lines.append((truncate_display(f"Cwd      {shorten_path(target.cwd)}", inner_w), cwd_attr))
+    if target.git_branch:
+        lines.append((truncate_display(f"Branch   {target.git_branch}", inner_w), cwd_attr))
     lines.append((truncate_display(
         f"Started  {fmt_ts(target.first_ts)}    Last  {fmt_ts(target.last_ts)}    Msgs  {target.msg_count}",
         inner_w), dim_attr))
@@ -1903,6 +1905,8 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
         curses.init_pair(5, curses.COLOR_RED, -1)                    # danger
         curses.init_pair(6, curses.COLOR_MAGENTA, -1)                # mark / done
         curses.init_pair(7, curses.COLOR_WHITE, -1)                  # dim for ended
+        curses.init_pair(8, curses.COLOR_RED, -1)                    # waiting
+        curses.init_pair(9, curses.COLOR_CYAN, -1)                   # idle
     except curses.error:
         pass
     # Default ESCDELAY is 1000ms — too slow; users see a 1s lag between
@@ -1917,6 +1921,8 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
 
     sessions = sessions_ref  # mutable list we can swap contents on rescan
     live, _registered = scan_live_sessions()
+    registry = scan_registry_status()
+    overlay = status_overlay()
     done = done_ids()
 
     query = ""
@@ -1935,11 +1941,15 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
         launch_cwd = ""
 
     def status_attr(st: str):
-        if st == STATUS_ACTIVE:
-            return curses.color_pair(3) | curses.A_BOLD
+        if st == STATUS_WORKING:
+            return curses.color_pair(3) | curses.A_BOLD   # green
+        if st == STATUS_WAITING:
+            return curses.color_pair(8) | curses.A_BOLD   # red — needs you
         if st == STATUS_DONE:
-            return curses.color_pair(6) | curses.A_BOLD
-        return curses.color_pair(7) | curses.A_DIM
+            return curses.color_pair(6) | curses.A_BOLD   # magenta
+        if st == STATUS_IDLE:
+            return curses.color_pair(9)                    # cyan
+        return curses.color_pair(7) | curses.A_DIM         # ended (dim)
 
     def filtered() -> list[SessionMeta]:
         if search_hits is not None:
@@ -2390,7 +2400,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             if idx >= len(items):
                 break
             s = items[idx]
-            st = resolve_status(s.session_id, live, done)
+            st = resolve_status(s.session_id, live, done, registry, overlay)
             ts = fmt_ts(s.last_ts)
             sid = s.session_id[:8]
             is_sel = idx == sel
@@ -2401,7 +2411,10 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             else:
                 tail_raw = s.first_user_msg or "(no user msg)"
             msg_cell = pad_display(truncate_display(" ".join(tail_raw.split()), msg_w), msg_w)
-            proj_cell = truncate_display_tail(shorten_path(s.cwd), proj_w)
+            proj_full = shorten_path(s.cwd)
+            if s.git_branch:
+                proj_full = f"{proj_full}  ⎇{s.git_branch}"
+            proj_cell = truncate_display_tail(proj_full, proj_w)
 
             line_before_status = f"{mark}{idx + 1:>{num_w}} "
             line_after_status = (
@@ -2572,6 +2585,8 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                 fresh = load_all_sessions(cwd_filter=cwd_filter, days=days, progress=False)
                 sessions[:] = fresh
                 live, _registered = scan_live_sessions()
+                registry = scan_registry_status()
+                overlay = status_overlay()
                 done = done_ids()
                 sel = min(sel, max(0, len(sessions) - 1))
                 top = max(0, min(top, max(0, len(sessions) - 1)))
@@ -2673,7 +2688,8 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
         elif ch in (ord('v'), ord('V')):
             if items:
                 target = items[sel]
-                st = resolve_status(target.session_id, live, done)
+                st = resolve_status(target.session_id, live, done,
+                                    registry, overlay)
                 _preview_modal(stdscr, target, st)
         elif ch in (ord('e'), ord('E')):
             if items:
@@ -2726,6 +2742,8 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             fresh = load_all_sessions(cwd_filter=cwd_filter, days=days, progress=False)
             sessions[:] = fresh
             live, _registered = scan_live_sessions()
+            registry = scan_registry_status()
+            overlay = status_overlay()
             done = done_ids()
             sel = min(sel, max(0, len(sessions) - 1))
             top = max(0, min(top, max(0, len(sessions) - 1)))
