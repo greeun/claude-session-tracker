@@ -64,7 +64,9 @@ class TestTruncateDisplay(unittest.TestCase):
         out = tk.truncate_display("가나다라", 5)
         self.assertTrue(out.endswith("…"))
         self.assertLessEqual(tk.display_width(out), 5)
-        self.assertTrue(all(ord(c) for c in out))
+        # body (sans ellipsis) must be an exact prefix of the original —
+        # proves no half/broken CJK glyph and no spurious characters
+        self.assertTrue("가나다라".startswith(out[:-1]))
 
     def test_empty_string(self):
         self.assertEqual(tk.truncate_display("", 5), "")

@@ -50,6 +50,7 @@ class TestBuildExportText(unittest.TestCase):
             t = _meta(_transcript(d))
             out = tk._build_export_text(t, tk.STATUS_ENDED)
             self.assertIn(f"Session:  {_SID}", out)
+            self.assertIn("Status:", out)
             self.assertIn("Cwd:      /work/proj", out)
             self.assertIn("hello world", out)
             self.assertIn("hi there", out)
