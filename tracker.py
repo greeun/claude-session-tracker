@@ -1118,11 +1118,15 @@ def cmd_show(args: argparse.Namespace) -> int:
         print(f"(no session matching {args.session_id!r})", file=sys.stderr)
         return 1
     live, _ = scan_live_sessions()
+    registry = scan_registry_status()
+    overlay = status_overlay()
     done = done_ids()
-    st = resolve_status(target.session_id, live, done)
+    st = resolve_status(target.session_id, live, done, registry, overlay)
     print(f"Session:  {target.session_id}")
     print(f"Status:   {status_label(st)}")
     print(f"Cwd:      {target.cwd}")
+    if target.git_branch:
+        print(f"Branch:   {target.git_branch}")
     print(f"Started:  {fmt_ts(target.first_ts)}")
     print(f"Last:     {fmt_ts(target.last_ts)}")
     print(f"Messages: {target.msg_count}")
@@ -1152,6 +1156,8 @@ def _build_export_text(target: "SessionMeta", st: str) -> str:
     lines.append(f"Session:  {target.session_id}")
     lines.append(f"Status:   {status_label(st)}")
     lines.append(f"Cwd:      {target.cwd}")
+    if target.git_branch:
+        lines.append(f"Branch:   {target.git_branch}")
     lines.append(f"Started:  {fmt_ts(target.first_ts)}")
     lines.append(f"Last:     {fmt_ts(target.last_ts)}")
     lines.append(f"Messages: {target.msg_count}")
@@ -1178,6 +1184,8 @@ def _build_export_md(target: "SessionMeta", st: str) -> str:
     lines.append(f"**Started:** {fmt_ts(target.first_ts)}  ")
     lines.append(f"**Last:** {fmt_ts(target.last_ts)}  ")
     lines.append(f"**Cwd:** {shorten_path(target.cwd)}  ")
+    if target.git_branch:
+        lines.append(f"**Branch:** {target.git_branch}  ")
     lines.append(f"**Messages:** {target.msg_count}  ")
     lines.append("")
     lines.append("---")
@@ -1198,8 +1206,10 @@ def _build_export_md(target: "SessionMeta", st: str) -> str:
 
 def export_session(target: "SessionMeta", fmt: str, out: str | None) -> Path:
     live, _ = scan_live_sessions()
+    registry = scan_registry_status()
+    overlay = status_overlay()
     done = done_ids()
-    st = resolve_status(target.session_id, live, done)
+    st = resolve_status(target.session_id, live, done, registry, overlay)
 
     if fmt == "txt":
         content = _build_export_text(target, st)
@@ -1346,10 +1356,12 @@ def cmd_live(args: argparse.Namespace) -> int:
     if not rows:
         print("(no live sessions)")
         return 0
-    print(f"{'PID':>7}  {'ALIVE':<6}  {'KIND':<11}  {'STARTED':<17}  {'SESSION':<10}  PROJECT")
+    print(f"{'PID':>7}  {'STATUS':<7}  {'KIND':<11}  {'STARTED':<17}  {'SESSION':<10}  PROJECT")
     print("-" * 100)
+    reg = scan_registry_status()
     for pid, sid, cwd, started, alive, kind in rows:
-        print(f"{pid:>7}  {'●live' if alive else '✗dead':<6}  {kind:<11}  "
+        rs = (reg.get(sid) or {}).get("status") or ("live" if alive else "dead")
+        print(f"{pid:>7}  {rs:<7}  {kind:<11}  "
               f"{started:<17}  {sid[:8]:<10}  {shorten_path(cwd)}")
     return 0
 
