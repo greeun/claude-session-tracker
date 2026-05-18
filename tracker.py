@@ -37,20 +37,39 @@ _CACHE_SCHEMA = 2
 STATE_PATH = CACHE_DIR / "state.json"
 
 # Compact glyphs shown in tables (display width 1 each).
-STATUS_ACTIVE = "●"   # 세션사용중 — live process in ~/.claude/sessions/
-STATUS_ENDED = "○"    # 세션종료  — process gone or never registered
-STATUS_DONE = "✓"     # 작업종료  — user marked finished via D / cst done
+STATUS_WORKING = "●"   # actively producing (hook working / registry busy)
+STATUS_WAITING = "!"   # waiting for input/permission — the time-leak state
+STATUS_IDLE    = "◦"   # turn finished, process alive, not waiting
+STATUS_ENDED   = "○"   # process gone or never registered
+STATUS_DONE    = "✓"   # user marked finished via D / cst done
+STATUS_ACTIVE  = STATUS_WORKING  # back-compat alias (legacy references)
 STATUS_WIDTH = 2       # glyph padded to "ST" header width (2 display cols)
 
 # Full-text labels used in help / stats / CLI headers.
-LABEL_ACTIVE = "live"
-LABEL_ENDED = "ended"
-LABEL_DONE = "done"
+LABEL_WORKING = "working"
+LABEL_WAITING = "waiting"
+LABEL_IDLE    = "idle"
+LABEL_ENDED   = "ended"
+LABEL_DONE    = "done"
+LABEL_ACTIVE  = LABEL_WORKING  # back-compat alias
 
 STATUS_LABELS: dict[str, str] = {
-    STATUS_ACTIVE: LABEL_ACTIVE,
-    STATUS_ENDED: LABEL_ENDED,
-    STATUS_DONE: LABEL_DONE,
+    STATUS_WORKING: LABEL_WORKING,
+    STATUS_WAITING: LABEL_WAITING,
+    STATUS_IDLE:    LABEL_IDLE,
+    STATUS_ENDED:   LABEL_ENDED,
+    STATUS_DONE:    LABEL_DONE,
+}
+
+# Ordered list of all status glyphs (for counts / filters / stats).
+STATUS_ALL = (STATUS_WORKING, STATUS_WAITING, STATUS_IDLE,
+              STATUS_ENDED, STATUS_DONE)
+
+# state.json overlay state-name -> glyph
+_STATE_GLYPH = {
+    "working": STATUS_WORKING,
+    "waiting": STATUS_WAITING,
+    "idle":    STATUS_IDLE,
 }
 
 
@@ -585,6 +604,45 @@ def resolve_status(session_id: str, live: set[str], done: set[str]) -> str:
     if session_id in live:
         return STATUS_ACTIVE
     return STATUS_ENDED
+
+
+def _iso_to_ms(iso) -> int | None:
+    """ISO-8601 string -> epoch milliseconds, or None if unparseable."""
+    dt = parse_ts(iso) if iso else None
+    if dt is None:
+        return None
+    return int(dt.timestamp() * 1000)
+
+
+def classify_status(*, done: bool, alive: bool,
+                     overlay: dict | None,
+                     reg: dict | None) -> str:
+    """Pure status decision. See spec 'Resolution priority'.
+
+    overlay: state.json status entry for this session, e.g.
+             {"state": "waiting", "event": "Notification", "ts": "<iso>"} or None
+    reg:     registry record for this session, e.g.
+             {"status": "idle", "updatedAt": <ms>} or None
+    """
+    if done:
+        return STATUS_DONE
+    if not alive:
+        return STATUS_ENDED
+    reg_status = (reg or {}).get("status")
+    reg_ms = (reg or {}).get("updatedAt")
+    if overlay:
+        state = overlay.get("state")
+        if state in ("working", "waiting") and reg_status == "idle":
+            ov_ms = _iso_to_ms(overlay.get("ts"))
+            if (reg_ms is not None and ov_ms is not None
+                    and reg_ms > ov_ms):
+                return STATUS_IDLE
+        return _STATE_GLYPH.get(state, STATUS_WORKING)
+    if reg_status == "busy":
+        return STATUS_WORKING
+    if reg_status == "idle":
+        return STATUS_IDLE
+    return STATUS_WORKING  # legacy: alive but no signal
 
 
 # ---------- session data model ----------
