@@ -192,6 +192,7 @@ class TestHookInstall(unittest.TestCase):
         tmp.write('{"hooks":{"UserPromptSubmit":[{"matcher":"",'
                   '"hooks":[{"type":"command","command":"foreign"}]}]}}')
         tmp.close()
+        self.addCleanup(pathlib.Path(tmp.name).unlink, missing_ok=True)
         ns = tracker.argparse.Namespace(settings=tmp.name)
         self.assertEqual(tracker.cmd_install_hook(ns), 0)
         data = _json.loads(pathlib.Path(tmp.name).read_text())
@@ -211,7 +212,6 @@ class TestHookInstall(unittest.TestCase):
         self.assertIn("foreign", cmds2)
         self.assertNotIn("cst prompt-hook", cmds2)
         self.assertNotIn("cst status-hook", cmds2)
-        pathlib.Path(tmp.name).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
