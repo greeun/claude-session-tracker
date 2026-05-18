@@ -75,5 +75,29 @@ class TestClassifyStatus(unittest.TestCase):
             tracker.STATUS_WORKING)
 
 
+class TestResolveStatusWrapper(unittest.TestCase):
+    def test_delegates_with_maps(self):
+        live = {"s1"}
+        done = set()
+        registry = {"s1": {"status": "idle", "updatedAt": 1779062400001}}
+        overlay = {"s1": {"state": "working", "ts": "2026-05-18T00:00:00+00:00"}}
+        # stale working + newer registry idle -> idle
+        self.assertEqual(
+            tracker.resolve_status("s1", live, done, registry, overlay),
+            tracker.STATUS_IDLE)
+
+    def test_backcompat_three_args(self):
+        # legacy callers: alive + no maps -> working
+        self.assertEqual(
+            tracker.resolve_status("s1", {"s1"}, set()),
+            tracker.STATUS_WORKING)
+        self.assertEqual(
+            tracker.resolve_status("s1", set(), set()),
+            tracker.STATUS_ENDED)
+        self.assertEqual(
+            tracker.resolve_status("s1", set(), {"s1"}),
+            tracker.STATUS_DONE)
+
+
 if __name__ == "__main__":
     unittest.main()

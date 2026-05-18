@@ -531,6 +531,30 @@ def scan_live_sessions() -> tuple[set[str], set[str]]:
     return live, registered
 
 
+def scan_registry_status() -> dict[str, dict]:
+    """sessionId -> {"status": str|None, "updatedAt": int|None} from the
+    ~/.claude/sessions registry (Claude Code's own busy/idle signal)."""
+    out: dict[str, dict] = {}
+    if not SESSIONS_REGISTRY_DIR.is_dir():
+        return out
+    for f in SESSIONS_REGISTRY_DIR.glob("*.json"):
+        try:
+            with f.open("r", encoding="utf-8") as fp:
+                data = json.load(fp)
+        except (OSError, json.JSONDecodeError):
+            continue
+        sid = data.get("sessionId")
+        if not sid:
+            continue
+        st = data.get("status")
+        up = data.get("updatedAt")
+        out[sid] = {
+            "status": st if isinstance(st, str) else None,
+            "updatedAt": up if isinstance(up, (int, float)) else None,
+        }
+    return out
+
+
 def get_live_session_info(session_id: str) -> dict | None:
     """Return the registry record (pid, cwd, ideName, …) for a live session."""
     if not SESSIONS_REGISTRY_DIR.is_dir():
@@ -598,12 +622,35 @@ def set_done(session_id: str, value: bool) -> None:
     save_state(state)
 
 
-def resolve_status(session_id: str, live: set[str], done: set[str]) -> str:
-    if session_id in done:
-        return STATUS_DONE
-    if session_id in live:
-        return STATUS_ACTIVE
-    return STATUS_ENDED
+def status_overlay() -> dict:
+    """state.json hook-driven status overlay: sid -> {state,event,ts}."""
+    return load_state().get("status") or {}
+
+
+def set_status(session_id: str, state: str | None, event: str) -> None:
+    """Record (or clear, when state is None) a session's hook status."""
+    st = load_state()
+    bucket = st.setdefault("status", {})
+    if state is None:
+        bucket.pop(session_id, None)
+    else:
+        bucket[session_id] = {
+            "state": state,
+            "event": event,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+    save_state(st)
+
+
+def resolve_status(session_id: str, live: set[str], done: set[str],
+                   registry: dict | None = None,
+                   overlay: dict | None = None) -> str:
+    return classify_status(
+        done=session_id in done,
+        alive=session_id in live,
+        overlay=(overlay or {}).get(session_id),
+        reg=(registry or {}).get(session_id),
+    )
 
 
 def _iso_to_ms(iso: str | None) -> int | None:
