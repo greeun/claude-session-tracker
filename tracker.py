@@ -606,7 +606,7 @@ def resolve_status(session_id: str, live: set[str], done: set[str]) -> str:
     return STATUS_ENDED
 
 
-def _iso_to_ms(iso) -> int | None:
+def _iso_to_ms(iso: str | None) -> int | None:
     """ISO-8601 string -> epoch milliseconds, or None if unparseable."""
     dt = parse_ts(iso) if iso else None
     if dt is None:
@@ -615,8 +615,8 @@ def _iso_to_ms(iso) -> int | None:
 
 
 def classify_status(*, done: bool, alive: bool,
-                     overlay: dict | None,
-                     reg: dict | None) -> str:
+                       overlay: dict | None,
+                       reg: dict | None) -> str:
     """Pure status decision. See spec 'Resolution priority'.
 
     overlay: state.json status entry for this session, e.g.
