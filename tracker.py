@@ -1418,6 +1418,8 @@ def cmd_prompt_hook(args: argparse.Namespace) -> int:
         f"{note}")
 
 
+# ---------- status-hook (lifecycle: working/waiting/idle, 0 tokens) ----------
+#
 # `cst status-hook` is wired into ~/.claude/settings.json by `cst install-hook`
 # under several Claude Code lifecycle events. It reads the hook JSON on stdin,
 # maps hook_event_name -> a status, and records it into state.json["status"].
@@ -1440,7 +1442,10 @@ def hook_event_to_state(event: str) -> str:
 
 
 def cmd_status_hook(args: argparse.Namespace) -> int:
-    raw = sys.stdin.read()
+    try:
+        raw = sys.stdin.read()
+    except OSError:
+        return 0
     try:
         data = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError:
@@ -3676,7 +3681,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "status-hook",
         help="lifecycle hook: record working/waiting/idle into state.json")
     p_shook.add_argument("event", nargs="?", default=None,
-                         help="optional event override (else read from stdin)")
+                         help="event name (fallback when stdin has no "
+                              "hook_event_name)")
     p_shook.set_defaults(func=cmd_status_hook)
 
     p_ihook = sub.add_parser(
