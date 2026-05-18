@@ -952,16 +952,21 @@ def load_all_sessions(
 def cmd_list(args: argparse.Namespace) -> int:
     sessions = load_all_sessions(cwd_filter=args.cwd, days=args.days, progress=True)
     live, _ = scan_live_sessions()
+    registry = scan_registry_status()
+    overlay = status_overlay()
     done = done_ids()
     if args.status:
         wanted = {
-            "active": STATUS_ACTIVE,
+            "active": STATUS_WORKING, "working": STATUS_WORKING,
+            "waiting": STATUS_WAITING,
+            "idle": STATUS_IDLE,
             "ended": STATUS_ENDED,
             "done": STATUS_DONE,
         }.get(args.status.lower())
         if wanted:
             sessions = [s for s in sessions
-                        if resolve_status(s.session_id, live, done) == wanted]
+                        if resolve_status(s.session_id, live, done,
+                                           registry, overlay) == wanted]
     if args.limit:
         sessions = sessions[: args.limit]
     if not sessions:
@@ -983,7 +988,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     print(header)
     print("-" * max(110, min(200, len(header) + 20)))
     for idx, s in enumerate(sessions, 1):
-        st = resolve_status(s.session_id, live, done)
+        st = resolve_status(s.session_id, live, done, registry, overlay)
         sid = s.session_id[:8]
         ts = fmt_ts(s.last_ts)
         first = truncate(s.first_user_msg, 60) or "(no user message)"
@@ -997,15 +1002,13 @@ def cmd_list(args: argparse.Namespace) -> int:
             f"{pad_display(truncate_display(first, 60), 60)}  "
             f"{proj}"
         )
-    counts = {STATUS_ACTIVE: 0, STATUS_ENDED: 0, STATUS_DONE: 0}
+    counts = {g: 0 for g in STATUS_ALL}
     for s in sessions:
-        counts[resolve_status(s.session_id, live, done)] += 1
-    print(
-        f"\n{len(sessions)} session(s)  "
-        f"[{status_label(STATUS_ACTIVE)}:{counts[STATUS_ACTIVE]}  "
-        f"{status_label(STATUS_ENDED)}:{counts[STATUS_ENDED]}  "
-        f"{status_label(STATUS_DONE)}:{counts[STATUS_DONE]}]"
-    )
+        counts[resolve_status(s.session_id, live, done,
+                              registry, overlay)] += 1
+    summary = "  ".join(f"{status_label(g)}:{counts[g]}"
+                        for g in STATUS_ALL if counts[g])
+    print(f"\n{len(sessions)} session(s)  [{summary}]")
     return 0
 
 
@@ -3544,16 +3547,18 @@ def cmd_restore(args: argparse.Namespace) -> int:
 def cmd_stats(args: argparse.Namespace) -> int:
     sessions = load_all_sessions()
     live, _ = scan_live_sessions()
+    registry = scan_registry_status()
+    overlay = status_overlay()
     done = done_ids()
     total_msgs = sum(s.msg_count for s in sessions)
     print(f"Total sessions:  {len(sessions)}")
     print(f"Total messages:  {total_msgs}")
-    active = sum(1 for s in sessions if s.session_id in live and s.session_id not in done)
-    ended = sum(1 for s in sessions if s.session_id not in live and s.session_id not in done)
-    done_n = sum(1 for s in sessions if s.session_id in done)
-    print(f"  {status_label(STATUS_ACTIVE)}: {active}")
-    print(f"  {status_label(STATUS_ENDED)}: {ended}")
-    print(f"  {status_label(STATUS_DONE)}: {done_n}")
+    counts = {g: 0 for g in STATUS_ALL}
+    for s in sessions:
+        counts[resolve_status(s.session_id, live, done,
+                              registry, overlay)] += 1
+    for g in STATUS_ALL:
+        print(f"  {status_label(g)}: {counts[g]}")
     if not sessions:
         return 0
     by_cwd: dict[str, tuple[int, int, datetime | None]] = {}
@@ -3615,7 +3620,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_list.add_argument("--cwd", type=str, default=None, help="filter by cwd prefix")
     p_list.add_argument("--days", type=int, default=None, help="only last N days")
     p_list.add_argument("--status", type=str, default=None,
-                        choices=("active", "ended", "done"),
+                        choices=("working", "waiting", "idle", "ended",
+                                 "done", "active"),
                         help="filter by status")
     p_list.set_defaults(func=cmd_list)
 
