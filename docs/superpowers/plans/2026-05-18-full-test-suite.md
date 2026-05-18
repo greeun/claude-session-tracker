@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add unittest coverage for every non-TUI logical unit of `tracker.py` (display, state, session loading, text, export, CLI), split into focused per-area test files.
+**Goal:** Add unittest coverage for every non-TUI logical unit of `tracker.py` v0.6.0 (display, text, done/status state, 5-state classification, session loading, export, CLI), split into focused per-area test files.
 
-**Architecture:** These are characterization tests against *already-working* code — the spec was verified line-by-line against `tracker.py`, so each test is expected to PASS on first run. Each file imports `tracker.py` by path via the existing `load_tracker()` pattern (no pytest, no conftest). Tests that touch the filesystem reassign `tracker.py` module globals to a `tempfile.TemporaryDirectory` in `setUp` and restore them in `tearDown`.
+**Architecture:** These are characterization tests against *already-working* code — the spec was re-verified line-by-line against the 0.6.0 branch `tracker.py`, so each test is expected to PASS on first run. Each file imports `tracker.py` by path via the existing `load_tracker()` pattern (no pytest, no conftest). Tests that touch the filesystem reassign `tracker.py` module globals to a `tempfile.TemporaryDirectory` in `setUp` and restore them in `tearDown`. The 0.6.0 flagship logic (`classify_status` 5-state machine) gets its own pure-function file, `test_classify.py`.
 
 **Tech Stack:** Python 3.10+ stdlib only (`unittest`, `tempfile`, `importlib.util`, `pathlib`, `unicodedata`, `argparse`, `os`, `json`, `re`).
 
@@ -19,13 +19,14 @@ tests/
 ├── test_orphan_relocate.py    # EXISTING — untouched
 ├── test_display.py            # NEW — display_width, pad_display, truncate_display(_tail), shorten_path
 ├── test_text.py               # NEW — extract_text, parse_ts, fmt_ts, _is_system_wrapper_msg, truncate
-├── test_state.py              # NEW — resolve_status, load/save_state, done_ids, mark_done, set_done
+├── test_state.py              # NEW — load/save_state, done_ids, mark_done, set_done, status_overlay, set_status, scan_registry_status
+├── test_classify.py           # NEW — classify_status, resolve_status, _iso_to_ms (0.6.0 5-state)
 ├── test_session.py            # NEW — iter_jsonl, encode_cwd, load_session_meta, load_all_sessions, _load/_save_cache
-├── test_export.py             # NEW — _build_export_text, _build_export_md, export_session
+├── test_export.py             # NEW — _build_export_text, _build_export_md (w/ git_branch), export_session
 └── test_cli.py                # NEW — cmd_done, cmd_undone
 ```
 
-Each NEW file is independent. `test_display.py` and `test_text.py` test pure functions (no global isolation needed). `test_state.py`, `test_session.py`, `test_export.py`, `test_cli.py` reassign module globals and need `setUp`/`tearDown`.
+Each NEW file is independent. `test_display.py`, `test_text.py`, and `test_classify.py` test pure functions (no global isolation needed). `test_state.py`, `test_session.py`, `test_export.py`, `test_cli.py` reassign module globals and need `setUp`/`tearDown`.
 
 **Run the whole suite:**
 ```bash
@@ -322,12 +323,12 @@ git commit -m "test: add text utility tests (extract_text, parse_ts, fmt_ts, wra
 
 ---
 
-### Task 3: test_state.py — status & done-flag overlay
+### Task 3: test_state.py — done-flag + status overlay + registry scan
 
 **Files:**
 - Create: `tests/test_state.py`
 
-**Isolation note:** `save_state` calls `CACHE_DIR.mkdir(...)` and writes `STATE_PATH.with_suffix(".tmp")`, then `tmp.replace(STATE_PATH)`. `setUp` must point BOTH `tk.CACHE_DIR` and `tk.STATE_PATH` into a tempdir (keeping `STATE_PATH = CACHE_DIR / "state.json"`), and `tearDown` must restore the originals.
+**Isolation note:** `save_state` calls `CACHE_DIR.mkdir(...)` and writes `STATE_PATH.with_suffix(".tmp")`, then `tmp.replace(STATE_PATH)`. `setUp` must point BOTH `tk.CACHE_DIR` and `tk.STATE_PATH` into a tempdir (keeping `STATE_PATH = CACHE_DIR / "state.json"`), and `tearDown` must restore the originals. `scan_registry_status` reads `SESSIONS_REGISTRY_DIR` — its test class uses a second mixin that also overrides `tk.SESSIONS_REGISTRY_DIR`. (Status-resolution logic `resolve_status`/`classify_status` lives in Task 4 / `test_classify.py` — extracted as a pure function in 0.6.0.)
 
 - [ ] **Step 1: Write the test file**
 
@@ -351,20 +352,6 @@ def load_tracker():
 
 
 tk = load_tracker()
-
-
-class TestResolveStatus(unittest.TestCase):
-    def test_done_wins(self):
-        self.assertEqual(tk.resolve_status("s", set(), {"s"}), tk.STATUS_DONE)
-
-    def test_active_when_live_only(self):
-        self.assertEqual(tk.resolve_status("s", {"s"}, set()), tk.STATUS_ACTIVE)
-
-    def test_ended_when_neither(self):
-        self.assertEqual(tk.resolve_status("s", set(), set()), tk.STATUS_ENDED)
-
-    def test_done_beats_live(self):
-        self.assertEqual(tk.resolve_status("s", {"s"}, {"s"}), tk.STATUS_DONE)
 
 
 class _StateIsolation(unittest.TestCase):
@@ -423,6 +410,71 @@ class TestDoneFlag(_StateIsolation):
         self.assertNotIn("never-seen", tk.done_ids())
 
 
+class TestStatusOverlay(_StateIsolation):
+    def test_set_status_then_overlay(self):
+        tk.set_status("s", "waiting", "Notification")
+        ov = tk.status_overlay()
+        self.assertEqual(ov["s"]["state"], "waiting")
+        self.assertEqual(ov["s"]["event"], "Notification")
+        self.assertIn("ts", ov["s"])
+
+    def test_set_status_none_clears(self):
+        tk.set_status("s", "working", "UserPromptSubmit")
+        tk.set_status("s", None, "Stop")
+        self.assertNotIn("s", tk.status_overlay())
+
+    def test_no_status_bucket_is_empty(self):
+        self.assertEqual(tk.status_overlay(), {})
+
+    def test_done_and_status_buckets_independent(self):
+        tk.set_done("s", True)
+        tk.set_status("s", "waiting", "Notification")
+        self.assertIn("s", tk.done_ids())
+        self.assertIn("s", tk.status_overlay())
+
+
+class _RegIsolation(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig_reg = tk.SESSIONS_REGISTRY_DIR
+        tk.SESSIONS_REGISTRY_DIR = Path(self._tmp.name) / "sessions"
+
+    def tearDown(self):
+        tk.SESSIONS_REGISTRY_DIR = self._orig_reg
+        self._tmp.cleanup()
+
+    def _reg(self, name, payload):
+        tk.SESSIONS_REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
+        (tk.SESSIONS_REGISTRY_DIR / name).write_text(
+            json.dumps(payload), encoding="utf-8")
+
+
+class TestScanRegistryStatus(_RegIsolation):
+    def test_normal_record_mapped(self):
+        self._reg("a.json", {"sessionId": "s1", "status": "idle",
+                              "updatedAt": 1700000000000})
+        out = tk.scan_registry_status()
+        self.assertEqual(out["s1"],
+                         {"status": "idle", "updatedAt": 1700000000000})
+
+    def test_non_int_updatedat_and_non_str_status_normalized(self):
+        self._reg("b.json", {"sessionId": "s2", "status": 5,
+                             "updatedAt": "nope"})
+        out = tk.scan_registry_status()
+        self.assertEqual(out["s2"], {"status": None, "updatedAt": None})
+
+    def test_corrupt_and_missing_sessionid_skipped(self):
+        tk.SESSIONS_REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
+        (tk.SESSIONS_REGISTRY_DIR / "bad.json").write_text(
+            "{not json", encoding="utf-8")
+        self._reg("nosid.json", {"status": "idle"})
+        self.assertEqual(tk.scan_registry_status(), {})
+
+    def test_missing_registry_dir_returns_empty(self):
+        # setUp points at a dir that does not exist yet
+        self.assertEqual(tk.scan_registry_status(), {})
+
+
 if __name__ == "__main__":
     unittest.main()
 ```
@@ -434,20 +486,177 @@ Run:
 cd /Users/uni4love/project/workspace/211-withwiz/claude-utils/claude-skills/claude-session-tracker
 python3 -m unittest tests.test_state -v
 ```
-Expected: `OK`. Behavior verified against `tracker.py:535-587`.
+Expected: `OK`. Behavior verified against `tracker.py:534-648` (state IO, done flag, `status_overlay`/`set_status`, `scan_registry_status`).
 
-If FAIL: fix the test (re-read the function), not `tracker.py`. Confirm `setUp` correctly reassigns both globals and that no real `~/.cache` file was touched.
+If FAIL: fix the test (re-read the function), not `tracker.py`. Confirm `setUp` reassigns the globals and no real `~/.cache` / `~/.claude/sessions` file was touched.
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add tests/test_state.py
-git commit -m "test: add status/done-flag tests (resolve_status, state IO, done_ids)"
+git commit -m "test: add done-flag, status-overlay & registry-scan tests"
 ```
 
 ---
 
-### Task 4: test_session.py — session loading & cache
+### Task 4: test_classify.py — 5-state classification (0.6.0 flagship)
+
+**Files:**
+- Create: `tests/test_classify.py`
+
+**No isolation needed:** `classify_status`, `resolve_status`, `_iso_to_ms` are pure functions. `classify_status` is keyword-only. Decision priority: **DONE > ENDED(not alive) > overlay > registry > legacy WORKING**.
+
+- [ ] **Step 1: Write the test file**
+
+```python
+import importlib.util
+import sys
+import unittest
+from pathlib import Path
+
+_REPO = Path(__file__).resolve().parents[1]
+
+
+def load_tracker():
+    spec = importlib.util.spec_from_file_location("tracker_under_test", _REPO / "tracker.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["tracker_under_test"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+tk = load_tracker()
+
+_ISO = "2026-05-18T00:00:00Z"
+
+
+class TestClassifyStatus(unittest.TestCase):
+    def test_done_beats_everything(self):
+        self.assertEqual(
+            tk.classify_status(done=True, alive=False, overlay=None, reg=None),
+            tk.STATUS_DONE)
+
+    def test_not_alive_is_ended(self):
+        self.assertEqual(
+            tk.classify_status(done=False, alive=False, overlay=None, reg=None),
+            tk.STATUS_ENDED)
+
+    def test_alive_no_signal_is_working(self):
+        self.assertEqual(
+            tk.classify_status(done=False, alive=True, overlay=None, reg=None),
+            tk.STATUS_WORKING)
+
+    def test_reg_busy_is_working(self):
+        self.assertEqual(
+            tk.classify_status(done=False, alive=True, overlay=None,
+                               reg={"status": "busy"}),
+            tk.STATUS_WORKING)
+
+    def test_reg_idle_is_idle(self):
+        self.assertEqual(
+            tk.classify_status(done=False, alive=True, overlay=None,
+                               reg={"status": "idle"}),
+            tk.STATUS_IDLE)
+
+    def test_overlay_waiting(self):
+        self.assertEqual(
+            tk.classify_status(done=False, alive=True,
+                               overlay={"state": "waiting", "ts": _ISO},
+                               reg=None),
+            tk.STATUS_WAITING)
+
+    def test_overlay_working(self):
+        self.assertEqual(
+            tk.classify_status(done=False, alive=True,
+                               overlay={"state": "working"}, reg=None),
+            tk.STATUS_WORKING)
+
+    def test_overlay_idle(self):
+        self.assertEqual(
+            tk.classify_status(done=False, alive=True,
+                               overlay={"state": "idle"}, reg=None),
+            tk.STATUS_IDLE)
+
+    def test_overlay_unknown_state_defaults_to_working(self):
+        self.assertEqual(
+            tk.classify_status(done=False, alive=True,
+                               overlay={"state": "bogus"}, reg=None),
+            tk.STATUS_WORKING)
+
+    def test_stale_overlay_yields_idle_when_registry_newer(self):
+        ov_ms = tk._iso_to_ms(_ISO)
+        out = tk.classify_status(
+            done=False, alive=True,
+            overlay={"state": "waiting", "ts": _ISO},
+            reg={"status": "idle", "updatedAt": ov_ms + 5000})
+        self.assertEqual(out, tk.STATUS_IDLE)
+
+    def test_fresh_overlay_wins_when_overlay_newer(self):
+        ov_ms = tk._iso_to_ms(_ISO)
+        out = tk.classify_status(
+            done=False, alive=True,
+            overlay={"state": "waiting", "ts": _ISO},
+            reg={"status": "idle", "updatedAt": ov_ms - 5000})
+        self.assertEqual(out, tk.STATUS_WAITING)
+
+
+class TestResolveStatusWrapper(unittest.TestCase):
+    def test_done_set(self):
+        self.assertEqual(tk.resolve_status("s", set(), {"s"}), tk.STATUS_DONE)
+
+    def test_three_arg_back_compat_alive_only(self):
+        self.assertEqual(tk.resolve_status("s", {"s"}, set()),
+                         tk.STATUS_WORKING)
+
+    def test_registry_keyed_by_sid(self):
+        out = tk.resolve_status("s", {"s"}, set(),
+                                {"s": {"status": "idle"}}, {})
+        self.assertEqual(out, tk.STATUS_IDLE)
+
+    def test_overlay_keyed_by_sid(self):
+        out = tk.resolve_status("s", {"s"}, set(), {},
+                                {"s": {"state": "waiting", "ts": _ISO}})
+        self.assertEqual(out, tk.STATUS_WAITING)
+
+
+class TestIsoToMs(unittest.TestCase):
+    def test_iso_to_epoch_ms(self):
+        self.assertEqual(tk._iso_to_ms(_ISO),
+                         int(tk.parse_ts(_ISO).timestamp() * 1000))
+
+    def test_none_and_empty_return_none(self):
+        self.assertIsNone(tk._iso_to_ms(None))
+        self.assertIsNone(tk._iso_to_ms(""))
+
+    def test_unparseable_returns_none(self):
+        self.assertIsNone(tk._iso_to_ms("not-a-timestamp"))
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run the file, expect PASS**
+
+Run:
+```bash
+cd /Users/uni4love/project/workspace/211-withwiz/claude-utils/claude-skills/claude-session-tracker
+python3 -m unittest tests.test_classify -v
+```
+Expected: `OK`. Behavior verified against `tracker.py:651-698` (`resolve_status`, `_iso_to_ms`, `classify_status`) and the `_STATE_GLYPH` map at `:69-73`.
+
+If FAIL: fix the test (re-read `classify_status`), not `tracker.py`. Note `classify_status` is keyword-only — positional calls raise `TypeError`. The stale/fresh ms comparison uses `tk._iso_to_ms` itself to stay deterministic across timezones.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add tests/test_classify.py
+git commit -m "test: add 5-state classification tests (classify_status, resolve_status, _iso_to_ms)"
+```
+
+---
+
+### Task 5: test_session.py — session loading & cache
 
 **Files:**
 - Create: `tests/test_session.py`
@@ -672,12 +881,12 @@ git commit -m "test: add session-loading & cache tests (iter_jsonl, encode_cwd, 
 
 ---
 
-### Task 5: test_export.py — transcript export
+### Task 6: test_export.py — transcript export
 
 **Files:**
 - Create: `tests/test_export.py`
 
-**Isolation note:** `export_session` calls `scan_live_sessions()` (reads `SESSIONS_REGISTRY_DIR` — returns empty if not a dir) and `done_ids()` (reads `STATE_PATH`). Point `SESSIONS_REGISTRY_DIR` at a non-existent tempdir path and isolate `CACHE_DIR`/`STATE_PATH`. `_build_export_*` re-reads `target.path` via `iter_jsonl`, so the transcript must be a real file.
+**Isolation note:** 0.6.0 `export_session` calls `scan_live_sessions()` + `scan_registry_status()` (both read `SESSIONS_REGISTRY_DIR` — empty if not a dir) and `status_overlay()` + `done_ids()` (both read `STATE_PATH` via `load_state`). Pointing `SESSIONS_REGISTRY_DIR` at a non-existent tempdir path and isolating `CACHE_DIR`/`STATE_PATH` covers all four (no extra global needed). `_build_export_*` re-reads `target.path` via `iter_jsonl`, so the transcript must be a real file. 0.6.0 also adds a conditional `Branch:` / `**Branch:**` line when `target.git_branch` is set.
 
 - [ ] **Step 1: Write the test file**
 
@@ -720,9 +929,9 @@ def _transcript(d):
     return p
 
 
-def _meta(path, cwd="/work/proj"):
+def _meta(path, cwd="/work/proj", branch=""):
     return tk.SessionMeta(
-        session_id=_SID, path=path, cwd=cwd,
+        session_id=_SID, path=path, cwd=cwd, git_branch=branch,
         first_ts=datetime(2026, 5, 18, 1, 2, 3, tzinfo=timezone.utc),
         last_ts=datetime(2026, 5, 18, 1, 2, 5, tzinfo=timezone.utc),
         msg_count=2)
@@ -741,6 +950,18 @@ class TestBuildExportText(unittest.TestCase):
             self.assertIn("🧑", out)
             self.assertIn("🤖", out)
 
+    def test_branch_line_present_when_set(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = _meta(_transcript(d), branch="feat/x")
+            out = tk._build_export_text(t, tk.STATUS_ENDED)
+            self.assertIn("Branch:   feat/x", out)
+
+    def test_branch_line_absent_when_unset(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = _meta(_transcript(d))               # branch="" default
+            out = tk._build_export_text(t, tk.STATUS_ENDED)
+            self.assertNotIn("Branch:", out)
+
 
 class TestBuildExportMd(unittest.TestCase):
     def test_markdown_header_and_shortened_cwd(self):
@@ -750,6 +971,12 @@ class TestBuildExportMd(unittest.TestCase):
             self.assertTrue(out.startswith("# Session: "))
             self.assertIn("\n---\n", out)
             self.assertIn("~/proj", out)        # shorten_path applied in md
+
+    def test_branch_line_present_when_set(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = _meta(_transcript(d), branch="feat/x")
+            out = tk._build_export_md(t, tk.STATUS_DONE)
+            self.assertIn("**Branch:** feat/x", out)
 
 
 class _ExportIsolation(unittest.TestCase):
@@ -808,20 +1035,20 @@ Run:
 cd /Users/uni4love/project/workspace/211-withwiz/claude-utils/claude-skills/claude-session-tracker
 python3 -m unittest tests.test_export -v
 ```
-Expected: `OK`. Behavior verified against `tracker.py:1036-1107`.
+Expected: `OK`. Behavior verified against `tracker.py:1156-1230` (`_build_export_text` w/ Branch line :1161-1162, `_build_export_md` :1189-1190, `export_session` :1209-1230).
 
-If FAIL: fix the test (re-read the function), not `tracker.py`. Note `_build_export_text` uses `"Cwd:      "` (raw cwd, 6 spaces of padding) while `_build_export_md` uses `shorten_path`.
+If FAIL: fix the test (re-read the function), not `tracker.py`. Note `_build_export_text` uses `"Cwd:      "` (raw cwd, 6 spaces of padding) while `_build_export_md` uses `shorten_path`; the `Branch:` line only appears when `git_branch` is truthy.
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add tests/test_export.py
-git commit -m "test: add export tests (_build_export_text/md, export_session)"
+git commit -m "test: add export tests (_build_export_text/md w/ git_branch, export_session)"
 ```
 
 ---
 
-### Task 6: test_cli.py — cmd_done / cmd_undone
+### Task 7: test_cli.py — cmd_done / cmd_undone
 
 **Files:**
 - Create: `tests/test_cli.py`
@@ -922,7 +1149,7 @@ Run:
 cd /Users/uni4love/project/workspace/211-withwiz/claude-utils/claude-skills/claude-session-tracker
 python3 -m unittest tests.test_cli -v
 ```
-Expected: `OK`. Behavior verified against `tracker.py:1186-1203` and `:3392-3408`.
+Expected: `OK`. Behavior verified against `tracker.py:1312-1329` (`cmd_done`/`cmd_undone`) and `:3626-3642` (`find_session`).
 
 If FAIL: fix the test (re-read the function), not `tracker.py`. If `cmd_done` unexpectedly returns 1 on the existing-session case, confirm the fake `.jsonl` has a `type:"user"` event (otherwise `load_session_meta` → `None` → `find_session` → `None`).
 
@@ -935,7 +1162,7 @@ git commit -m "test: add CLI tests (cmd_done, cmd_undone)"
 
 ---
 
-### Task 7: Full-suite verification
+### Task 8: Full-suite verification
 
 **Files:** none (verification only)
 
@@ -946,7 +1173,7 @@ Run:
 cd /Users/uni4love/project/workspace/211-withwiz/claude-utils/claude-skills/claude-session-tracker
 python3 -m unittest discover -s tests -p "test_*.py" -v
 ```
-Expected: `OK` with the combined count from all 7 files (existing `test_orphan_relocate` + 6 new). Zero failures, zero errors.
+Expected: `OK` with the combined count from all 8 files (existing `test_orphan_relocate` + 7 new: display, text, state, classify, session, export, cli). Zero failures, zero errors.
 
 - [ ] **Step 2: Confirm no real state files were mutated**
 
@@ -968,8 +1195,8 @@ git commit -m "docs: finalize full test suite plan" --allow-empty
 
 ## Self-Review
 
-**Spec coverage:** Every spec table maps to a task — test_display.py→T1, test_text.py→T2, test_state.py→T3, test_session.py→T4 (incl. `_load_cache`/`_save_cache` TestCache), test_export.py→T5, test_cli.py→T6. Constraints (TUI/live-process/external-program exclusion, global isolation) are honored: no curses, no `scan_live_sessions`/`_pid_alive` assertions on real processes, no `mdfind`/`fd` calls; every FS-touching test isolates globals in `setUp`/`tearDown`.
+**Spec coverage:** Every spec table maps to a task — test_display.py→T1, test_text.py→T2, test_state.py→T3 (state IO + `status_overlay`/`set_status` + `scan_registry_status`), test_classify.py→T4 (`classify_status` 5-state incl. stale-overlay, `resolve_status` wrapper, `_iso_to_ms`), test_session.py→T5 (incl. `_load_cache`/`_save_cache` TestCache), test_export.py→T6 (incl. `git_branch` Branch line), test_cli.py→T7, full-suite→T8. Constraints (TUI/live-process/external-program exclusion, global isolation) are honored: no curses, no `scan_live_sessions`/`_pid_alive` assertions on real processes, no `mdfind`/`fd` calls; every FS-touching test isolates globals in `setUp`/`tearDown`.
 
 **Placeholder scan:** No TBD/TODO; every code step contains the full, runnable test file; every run step has the exact command and expected `OK`.
 
-**Type consistency:** `tk.STATUS_DONE/ACTIVE/ENDED`, `tk.SessionMeta(session_id=, path=, cwd=, first_ts=, last_ts=, msg_count=)`, `tk.HOME`, `tk._CACHE_SCHEMA`, `argparse.Namespace(session_id=...)`, and global names (`PROJECTS_DIR`, `SESSIONS_REGISTRY_DIR`, `CACHE_DIR`, `CACHE_PATH`, `STATE_PATH`) match `tracker.py` exactly as read during spec verification.
+**Type consistency:** `tk.STATUS_DONE/WORKING/WAITING/IDLE/ENDED` (0.6.0 5-state; `STATUS_ACTIVE` is a back-compat alias of `STATUS_WORKING` and is *not* asserted in new code), `tk.SessionMeta(session_id=, path=, cwd=, git_branch=, first_ts=, last_ts=, msg_count=)`, `tk.classify_status(*, done=, alive=, overlay=, reg=)` (keyword-only), `tk.resolve_status(sid, live, done, registry=None, overlay=None)`, `tk._iso_to_ms`, `tk.HOME`, `tk._CACHE_SCHEMA`, `argparse.Namespace(session_id=...)`, and global names (`PROJECTS_DIR`, `SESSIONS_REGISTRY_DIR`, `CACHE_DIR`, `CACHE_PATH`, `STATE_PATH`) match the 0.6.0 `tracker.py` exactly as read during the 2차 재검증.

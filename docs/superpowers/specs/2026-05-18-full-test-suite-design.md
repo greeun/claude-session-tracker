@@ -1,8 +1,10 @@
 # 풀 테스트 스위트 설계 — claude-session-tracker
 
 **날짜:** 2026-05-18  
-**대상:** `tracker.py` (3,564줄, stdlib-only, Python 3.10+)  
+**대상:** `tracker.py` v0.6.0 (3,807줄, stdlib-only, Python 3.10+) — 브랜치 `feat/cst-waiting-status-and-branch`, 캐시 스키마 3, **5-state 상태 시스템**
 **기존 테스트:** `tests/test_orphan_relocate.py` (473줄, unittest)
+
+> **0.6.0 재검증 메모:** 본 스펙은 처음 `main`(구버전 3-state) 기준으로 작성됐으나, 작업 브랜치가 0.6.0(5-state)로 분기했음을 발견하여 현재 코드 전체와 재대조했다. 대부분 함수는 미변경(back-compat alias 덕에 기존 케이스 통과). 핵심 변경: 상태 결정 로직이 새 순수 함수 `classify_status(*, done, alive, overlay, reg)`로 분리(WORKING/WAITING/IDLE/ENDED/DONE), `resolve_status`는 이를 감싸는 얇은 래퍼(`registry`/`overlay` 선택 인자 추가), 내보내기에 `git_branch` 줄 추가, state.json에 hook-driven `status` 오버레이 버킷 추가(`status_overlay`/`set_status`), 레지스트리 상태 스캐너 `scan_registry_status` 추가.
 
 ---
 
@@ -16,12 +18,13 @@ TUI를 제외한 모든 중요 로직에 대한 단위 테스트를 작성한다
 
 ```
 tests/
-├── test_orphan_relocate.py    # 기존 유지 (relocate, fingerprint, dir-gather, classify)
+├── test_orphan_relocate.py    # 기존 유지 (relocate, fingerprint, dir-gather, candidate-classify)
 ├── test_display.py            # 디스플레이 유틸리티
-├── test_state.py              # 상태/done-flag 관리
+├── test_state.py              # done-flag + state.json status 오버레이 + 레지스트리 스캔
+├── test_classify.py           # 5-state 분류 (classify_status / resolve_status / _iso_to_ms) ★0.6.0
 ├── test_session.py            # 세션 로딩, encode_cwd, 캐시
 ├── test_text.py               # 텍스트 처리 유틸
-├── test_export.py             # 내보내기 (text/md/file)
+├── test_export.py             # 내보내기 (text/md/file, git_branch 포함)
 └── test_cli.py                # CLI 커맨드 (done/undone)
 ```
 
@@ -79,18 +82,16 @@ pytest 의존성 없이 `python -m unittest discover`로 실행 가능해야 하
 
 ---
 
-## test_state.py — 상태/Done-Flag 관리
+## test_state.py — done-flag + state.json status 오버레이 + 레지스트리 스캔
 
-대상 함수: `resolve_status`, `load_state`, `save_state`, `done_ids`, `mark_done`, `set_done`
+대상 함수: `load_state`, `save_state`, `done_ids`, `mark_done`, `set_done`, `status_overlay`, `set_status`, `scan_registry_status`
 
-`save_state`는 `CACHE_DIR.mkdir(...)`를 호출하고 `STATE_PATH.with_suffix(".tmp")`에 임시 파일을 쓴 뒤 `STATE_PATH`로 교체한다. 따라서 격리를 위해 `setUp`에서 `tk.CACHE_DIR`, `tk.STATE_PATH` 두 전역변수를 모두 tempdir로 가리키게 하고 `tearDown`에서 원복한다 (`STATE_PATH = CACHE_DIR / "state.json"` 관계 유지).
+(상태 결정 로직 `resolve_status`/`classify_status`는 test_classify.py로 분리 — 0.6.0에서 별도 순수 함수로 추출됐기 때문)
+
+`save_state`는 `CACHE_DIR.mkdir(...)`를 호출하고 `STATE_PATH.with_suffix(".tmp")`에 임시 파일을 쓴 뒤 `STATE_PATH`로 교체한다. 따라서 격리를 위해 `setUp`에서 `tk.CACHE_DIR`, `tk.STATE_PATH` 두 전역변수를 모두 tempdir로 가리키게 하고 `tearDown`에서 원복한다 (`STATE_PATH = CACHE_DIR / "state.json"` 관계 유지). `scan_registry_status`는 `SESSIONS_REGISTRY_DIR`을 읽으므로 해당 테스트만 별도 mixin으로 `tk.SESSIONS_REGISTRY_DIR`도 tempdir로 오버라이드한다.
 
 | 클래스 | 테스트 | 검증 |
 |---|---|---|
-| `TestResolveStatus` | done 최우선 | done set에 있으면 항상 `✓` (STATUS_DONE) |
-| | active 두 번째 | live set에만 있으면 `●` (STATUS_ACTIVE) |
-| | ended 기본값 | 둘 다 없으면 `○` (STATUS_ENDED) |
-| | done+live 동시 | done이 우선 → `✓` |
 | `TestStateIO` | `save_state` → `load_state` 왕복 | 저장한 dict와 동일하게 로드 |
 | | 손상된 JSON 파일 | 예외 없이 `{}` 폴백 |
 | | `CACHE_DIR` 미존재 → 자동 생성 | `save_state` 후 파일 존재 |
@@ -99,6 +100,52 @@ pytest 의존성 없이 `python -m unittest discover`로 실행 가능해야 하
 | | `set_done(id, False)` → `done_ids` 미포함 | ID가 set에서 제거됨 |
 | | `mark_done` 토글 동작 | 첫 호출 `True`(done), 재호출 `False`(해제) |
 | | 없는 세션 `set_done(False)` | 오류 없이 정상 완료 (noop) |
+| `TestStatusOverlay` | `set_status(s,"waiting","Notification")` → `status_overlay()` | `[s]=={state:waiting,event:Notification,ts:<iso>}` |
+| | `set_status(s, None, "Stop")` 클리어 | `status_overlay()`에 s 미포함 |
+| | status 버킷 없음 | `status_overlay() == {}` |
+| | done과 status 버킷 공존 | 서로 독립 (set_done이 status 버킷 안 건드림) |
+| `TestScanRegistryStatus` | 정상 레지스트리 json | `{sid:{status,updatedAt}}` 매핑 |
+| | 비-int updatedAt / 비-str status | 각각 `None`으로 정규화 |
+| | 손상 json / sessionId 없음 | 스킵 (예외 없음) |
+| | `SESSIONS_REGISTRY_DIR` 미존재 | `{}` 반환 |
+
+---
+
+## test_classify.py — 5-state 분류 로직 ★0.6.0 핵심
+
+대상 함수: `classify_status` (순수 함수, 키워드 전용), `resolve_status` (래퍼), `_iso_to_ms`
+
+전부 순수 함수라 전역 격리 불필요. 결정 우선순위: **DONE > ENDED(=not alive) > overlay > registry > legacy(WORKING)**.
+
+`classify_status(*, done, alive, overlay, reg)` 분기:
+- `done=True` → `STATUS_DONE` (alive 무관)
+- `not alive` → `STATUS_ENDED`
+- `overlay` 존재 시: `state in ("working","waiting")` **그리고** `reg.status=="idle"` **그리고** `reg.updatedAt(ms) > _iso_to_ms(overlay.ts)` → `STATUS_IDLE` (레지스트리가 더 최신 → 오버레이 stale); 아니면 `_STATE_GLYPH.get(state, STATUS_WORKING)`
+- overlay 없음 + `reg.status=="busy"` → `STATUS_WORKING`
+- overlay 없음 + `reg.status=="idle"` → `STATUS_IDLE`
+- 그 외 (alive·신호 없음) → `STATUS_WORKING` (legacy)
+
+| 클래스 | 테스트 | 검증 |
+|---|---|---|
+| `TestClassifyStatus` | done이 모든 것 우선 | `done=True, alive=False` → `STATUS_DONE` |
+| | not alive | `done=False, alive=False` → `STATUS_ENDED` |
+| | alive·신호 없음 (legacy) | `overlay=None, reg=None` → `STATUS_WORKING` |
+| | reg busy | `reg={"status":"busy"}` → `STATUS_WORKING` |
+| | reg idle | `reg={"status":"idle"}` → `STATUS_IDLE` |
+| | overlay waiting | `overlay={"state":"waiting","ts":<iso>}` → `STATUS_WAITING` |
+| | overlay working | `overlay={"state":"working"}` → `STATUS_WORKING` |
+| | overlay idle | `overlay={"state":"idle"}` → `STATUS_IDLE` |
+| | overlay 미지 state | `overlay={"state":"???"}` → `STATUS_WORKING` (default) |
+| | stale overlay (reg가 더 최신) | overlay waiting + reg idle, `reg_ms > ov_ms` → `STATUS_IDLE` |
+| | fresh overlay (overlay가 더 최신) | overlay waiting + reg idle, `reg_ms < ov_ms` → `STATUS_WAITING` |
+| `TestResolveStatusWrapper` | sid 키로 registry/overlay dict 전달 | `resolve_status("s",live,done,registry,overlay)`가 해당 sid 항목으로 classify 위임 |
+| | done set | `resolve_status("s", set(), {"s"})` → `STATUS_DONE` |
+| | registry 인자 생략 | 기존 3-인자 호출도 동작 (back-compat) |
+| `TestIsoToMs` | ISO → epoch ms | `_iso_to_ms(iso) == int(parse_ts(iso).timestamp()*1000)` |
+| | None / 빈 입력 | `None` |
+| | 파싱 불가 문자열 | `None` (예외 없음) |
+
+stale/fresh 케이스의 ms 비교는 하드코딩하지 말고 `tk._iso_to_ms(ts)`로 기준값을 구한 뒤 reg `updatedAt`을 ±오프셋하여 결정한다 (모듈 자신의 변환 사용 → 결정적).
 
 ---
 
@@ -163,17 +210,20 @@ pytest 의존성 없이 `python -m unittest discover`로 실행 가능해야 하
 
 대상 함수: `_build_export_text`, `_build_export_md`, `export_session`
 
-테스트용 `SessionMeta`는 최소 필드로 직접 생성하고, `path`는 tempdir의 실제 `.jsonl` 파일을 가리킨다 (`_build_export_*`가 `iter_jsonl(target.path)`를 다시 읽으므로). `export_session`은 내부에서 `scan_live_sessions()`/`done_ids()`를 호출하므로 `SESSIONS_REGISTRY_DIR`(미존재 시 빈 결과)·`STATE_PATH`를 tempdir로 격리한다.
+테스트용 `SessionMeta`는 최소 필드로 직접 생성하고, `path`는 tempdir의 실제 `.jsonl` 파일을 가리킨다 (`_build_export_*`가 `iter_jsonl(target.path)`를 다시 읽으므로). 0.6.0의 `export_session`은 내부에서 `scan_live_sessions()`·`scan_registry_status()`·`status_overlay()`·`done_ids()`를 호출한다 — 앞 둘은 `SESSIONS_REGISTRY_DIR`(미존재 시 빈 결과), 뒤 둘은 `STATE_PATH`(`load_state`)를 읽으므로 `tk.SESSIONS_REGISTRY_DIR`+`tk.CACHE_DIR`+`tk.STATE_PATH` 격리로 충분 (추가 전역 불필요).
 
 | 클래스 | 테스트 | 검증 |
 |---|---|---|
 | `TestBuildExportText` | 헤더에 session_id 포함 | `Session:  {id}` 라인 존재 |
 | | cwd / status 라인 포함 | `Cwd:` 줄에 raw cwd, `Status:` 줄 존재 |
+| | `git_branch` 있으면 `Branch:` 줄 | `Branch:   {branch}` 존재 |
+| | `git_branch` 없으면 `Branch:` 줄 없음 | `Branch:` 미포함 |
 | | user/assistant 메시지 본문 | 🧑/🤖 prefix 라인 + 텍스트 |
 | | 비 user/assistant 이벤트 스킵 | 해당 텍스트 미포함 |
 | `TestBuildExportMd` | `# Session:` 헤더 | 첫 줄이 `# Session:` |
 | | `---` 구분선 포함 | 구분선 존재 |
 | | Cwd는 `shorten_path` 적용 | 홈 경로 `~` 축약 |
+| | `git_branch` 있으면 `**Branch:**` 줄 | 존재 |
 | `TestExportSession` | `out`=디렉토리 → 자동 파일명 | `{id[:8]}-{date}.{ext}` 생성 |
 | | `out`=파일 경로 → 그 경로 | 지정 경로에 작성 |
 | | `fmt="md"` | `.md` 확장자 파일 |
@@ -206,4 +256,5 @@ pytest 의존성 없이 `python -m unittest discover`로 실행 가능해야 하
 - **라이브 프로세스 제외:** `scan_live_sessions`, `_pid_alive`는 실제 프로세스 의존성이 있으므로 단위 테스트 범위에서 제외한다.
 - **외부 프로그램 제외:** `mdfind`, `fd`, `open_in_new_terminal` 등 외부 프로그램 호출은 테스트하지 않는다.
 - **전역변수 격리:** 테스트는 `tracker.py`의 모듈 전역(`PROJECTS_DIR`, `SESSIONS_REGISTRY_DIR`, `CACHE_DIR`, `CACHE_PATH`, `STATE_PATH`)을 `setUp`에서 tempdir로 재할당하고 `tearDown`에서 원복하여 실제 `~/.claude`·`~/.cache`를 변경하지 않는다. `save_state`가 `CACHE_DIR.mkdir`을 호출하므로 `STATE_PATH`만이 아니라 `CACHE_DIR`도 함께 재할당해야 한다 (`STATE_PATH = CACHE_DIR / "state.json"` 관계 유지).
-- **재점검 반영:** 본 스펙은 `tracker.py` 실제 구현과 대조하여 다음을 정정했다 — `fmt_ts(None)→"?"`, `extract_text`는 tool_use를 `[tool_use:name]`로 포함, `shorten_path("")→"?"`, `encode_cwd`는 `[^A-Za-z0-9-]→-` 치환(URL 인코딩 아님), `load_all_sessions`에 status 파라미터 없음, days 필터는 `os.utime` 백데이트로 검증, 캐시 스키마는 `_load_cache` 직접 테스트.
+- **1차 재점검 (구버전):** `fmt_ts(None)→"?"`, `extract_text`는 tool_use를 `[tool_use:name]`로 포함, `shorten_path("")→"?"`, `encode_cwd`는 `[^A-Za-z0-9-]→-` 치환(URL 인코딩 아님), `load_all_sessions`에 status 파라미터 없음, days 필터는 `os.utime` 백데이트로 검증, 캐시 스키마는 `_load_cache` 직접 테스트.
+- **2차 재점검 (0.6.0 브랜치):** 작업 브랜치가 0.6.0(5-state, 캐시 스키마 3)으로 분기했음을 발견, 전 함수를 현재 코드와 재대조했다. 미변경 함수의 계획 테스트 코드는 그대로 유효(back-compat alias). 추가 커버: 신규 순수 함수 `classify_status`(5-state, stale-overlay 규칙 포함)·`_iso_to_ms`·`resolve_status`(registry/overlay 인자) → **test_classify.py 신설**; state.json `status` 오버레이(`status_overlay`/`set_status`)·`scan_registry_status` → test_state.py 보강; `git_branch` 내보내기 줄 → test_export.py 보강. `STATUS_ACTIVE`는 `STATUS_WORKING`의 별칭이므로 기존 단언은 통과하나, 신규 케이스는 의미에 맞는 5-state 글리프(`STATUS_WORKING/WAITING/IDLE/ENDED/DONE`)로 단언한다.
