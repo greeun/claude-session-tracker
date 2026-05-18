@@ -64,6 +64,17 @@ cst install-hook --settings /경로/settings.json   # 기본 경로가 아닐 �
 cst uninstall-hook            # 제거 (다른 UserPromptSubmit 훅은 유지)
 ```
 
+### 정확한 라이브 상태 (선택, 권장)
+
+`cst install-hook` 은 Claude Code의 5가지 라이프사이클 훅
+(`UserPromptSubmit`, `Notification`, `PermissionRequest`, `Stop`, `SessionEnd`)
+도 연결하여 cst가 **당신의 입력 대기** (`!`)와 **완료** (`◦`/`○`)를 구분할 수
+있게 합니다. 훅 없이는 `~/.claude/sessions` 레지스트리만 사용해 working(`●`)과
+idle(`◦`)만 구분 가능합니다. `cst install-hook` 한 번 실행하면 됩니다(멱등;
+외부 훅 보존). 제거 시 `cst uninstall-hook`. cmux 안에서도: cmux가 `--settings`
+로 자체 Claude 훅을 주입하지만, Claude Code가 `~/.claude/settings.json`과 합산
+로드하므로 cst 훅도 정상 실행되어 충돌 없음.
+
 `install-hook` 은 멱등이며(재실행 시 "no change"), 예전 형태
 `~/.claude/hooks/cst-done.py` 도 자동 이전합니다. `csm hook activity` 같은
 다른 훅은 보존됩니다. 수동 등록 시 동일한 항목:
@@ -94,13 +105,15 @@ cst stats                     # 요약 (프로젝트·상태 분포)
 
 ## 상태 글리프
 
-STAT 컬럼에 1칸 글리프로 표시. 우선순위: **✓ > ● > ○**.
+STAT 컬럼에 1칸 글리프로 표시. 우선순위: **✓ > ● > ! > ◦ > ○**.
 
 | 글리프 | 라벨 | 의미 |
 |:---:|:---|:---|
-| **●** | 세션사용중 | 이 session id로 Claude Code 프로세스가 **실제 실행 중**. `~/.claude/sessions/<pid>.json` + `kill -0 <pid>` 체크로 판정. |
-| **○** | 세션종료 | 프로세스가 없음 (정상 종료 또는 등록된 적 없음). 트랜스크립트는 그대로 읽을 수 있음. |
-| **✓** | 작업종료 | 사용자가 명시적으로 끝났다고 표시. TUI의 `D`/`Ctrl-D` 또는 `cst done <id>`. `~/.cache/claude-session-tracker/state.json`에 영구 저장. |
+| **●** | working (작업중) | Claude가 현재 출력을 생성하는 중. |
+| **!** | waiting (대기중) | Claude가 당신의 입력 또는 권한 결정을 기다리는 중 — 시간이 새는 곳. `cst install-hook` 설치 시 정확히 감지됨. |
+| **◦** | idle (유휴) | 턴이 끝났고 프로세스는 아직 살아 있음. |
+| **○** | ended (세션종료) | 프로세스가 없음 (정상 종료 또는 등록된 적 없음). 트랜스크립트는 그대로 읽을 수 있음. |
+| **✓** | done (작업종료) | 사용자가 명시적으로 끝났다고 표시. TUI의 `D`/`Ctrl-D` 또는 `cst done <id>`. `~/.cache/claude-session-tracker/state.json`에 영구 저장. |
 
 상태는 **매 명령 실행마다 새로 계산**됩니다. 백그라운드 데몬 없음.
 

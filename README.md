@@ -64,6 +64,18 @@ cst install-hook --settings /path/to/settings.json   # non-default location
 cst uninstall-hook            # remove it (keeps other UserPromptSubmit hooks)
 ```
 
+### Accurate live status (optional, recommended)
+
+`cst install-hook` also wires five Claude Code lifecycle hooks
+(`UserPromptSubmit`, `Notification`, `PermissionRequest`, `Stop`, `SessionEnd`)
+so cst can distinguish **waiting for you** (`!`) from **finished** (`◦`/`○`).
+Without the hook, cst falls back to the `~/.claude/sessions` registry which
+can only resolve working (`●`) vs idle (`◦`). Run `cst install-hook` once
+(idempotent; preserves foreign hooks); `cst uninstall-hook` to remove. Inside
+cmux: cmux injects its own Claude hooks via `--settings`; Claude Code merges
+them additively with `~/.claude/settings.json`, so cst's hooks still fire and
+key off the same session id — no conflict.
+
 `install-hook` is idempotent (re-running reports "no change") and auto-migrates
 the legacy `~/.claude/hooks/cst-done.py` form. Other hooks (e.g.
 `csm hook activity`) are kept. Equivalent manual entry:
@@ -95,13 +107,15 @@ cst stats                     # counts, top projects, status breakdown
 
 ## Status glyphs
 
-Compact one-column glyphs in the STAT column. Priority: **✓ > ● > ○**.
+Compact one-column glyphs in the STAT column. Priority: **✓ > ● > ! > ◦ > ○**.
 
 | Glyph | Label | Meaning |
 |:---:|:---|:---|
-| **●** | 세션사용중 | A Claude Code process is currently running with this session id. Detected via `~/.claude/sessions/<pid>.json` + `kill -0 <pid>`. |
-| **○** | 세션종료 | Process is gone (clean exit) or was never registered. Transcript remains readable. |
-| **✓** | 작업종료 | You explicitly marked it done (`D` / `Ctrl-D` in TUI or `cst done <id>`). Persists in `~/.cache/claude-session-tracker/state.json`. |
+| **●** | working | Claude is actively producing output. |
+| **!** | waiting | Claude is waiting for your input or a permission decision — this is where time leaks. Requires `cst install-hook` for accurate detection. |
+| **◦** | idle | Turn finished, process still alive. |
+| **○** | ended | Process is gone (clean exit) or was never registered. Transcript remains readable. |
+| **✓** | done | You explicitly marked it done (`D` / `Ctrl-D` in TUI or `cst done <id>`). Persists in `~/.cache/claude-session-tracker/state.json`. |
 
 Status is **computed fresh on every command invocation** — there is no background daemon. `cst list` always reflects reality at the moment it runs.
 

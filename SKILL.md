@@ -6,15 +6,17 @@ description: Track live/ended/done status of Claude Code sessions. List, search,
 # claude-session-tracker
 
 Fork of `claude-sessions` that adds **live status tracking** plus fzf-style
-filter UX and new-window session opening. Every session resolves to one of:
+filter UX and new-window session opening. Every session resolves to one of
+five states (priority: `✓ > ● > ! > ◦ > ○`):
 
-- **●** 세션사용중 — a Claude Code process is currently running with this
-  session id (derived from `~/.claude/sessions/<pid>.json` + a `kill -0`
-  PID check).
-- **○** 세션종료 — process is gone (or was never registered).
-- **✓** 작업종료 — user explicitly marked the session done (`D`/`Ctrl-D`
+- **●** working — Claude is actively producing output.
+- **!** waiting — Claude is waiting for your input or a permission decision
+  (this is where time leaks; hook-driven, requires `cst install-hook`).
+- **◦** idle — turn finished, process still alive.
+- **○** ended — process is gone (or was never registered).
+- **✓** done — user explicitly marked the session finished (`D`/`Ctrl-D`
   in TUI or `cst done <id>`). Persists in `~/.cache/claude-session-tracker/
-  state.json`. Priority: `✓ > ● > ○`.
+  state.json`.
 
 Main script: `tracker.py` (stdlib only). Installed as `~/.local/bin/cst`.
 
@@ -65,6 +67,18 @@ migrates the older `~/.claude/hooks/cst-done.py` form automatically; existing
 hooks (e.g. `csm hook activity`) are preserved. Code changes take effect
 immediately (the hook re-runs `cst`); only settings.json changes need a
 `/hooks`-open or restart to reload.
+
+### Accurate live status (optional, recommended)
+
+`cst install-hook` also wires five Claude Code lifecycle hooks
+(`UserPromptSubmit`, `Notification`, `PermissionRequest`, `Stop`,
+`SessionEnd`) that let cst distinguish **waiting for you** (`!`) from
+**finished** (`◦`/`○`). Without the hook, cst falls back to the
+`~/.claude/sessions` registry which can only resolve working (`●`) vs idle
+(`◦`). Run `cst install-hook` once (idempotent; preserves foreign hooks);
+`cst uninstall-hook` to remove. Inside cmux: cmux injects its own Claude
+hooks via `--settings`; Claude Code merges them additively with
+`~/.claude/settings.json`, so cst's hooks still fire — no conflict.
 
 ## TUI keybindings
 

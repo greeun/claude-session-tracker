@@ -12,7 +12,7 @@ Data sources:
 """
 from __future__ import annotations
 
-__version__ = "0.5.4"
+__version__ = "0.6.0"
 
 import argparse
 import json
@@ -33,7 +33,7 @@ CACHE_DIR = Path.home() / ".cache" / "claude-session-tracker"
 CACHE_PATH = CACHE_DIR / "index.json"
 # Bumped whenever the cached SessionMeta shape or extraction logic changes,
 # so stale entries are re-indexed instead of serving wrong snippets.
-_CACHE_SCHEMA = 2
+_CACHE_SCHEMA = 3
 STATE_PATH = CACHE_DIR / "state.json"
 
 # Compact glyphs shown in tables (display width 1 each).
@@ -1055,9 +1055,11 @@ def cmd_search(args: argparse.Namespace) -> int:
         print(f"(no matches for {args.query!r})")
         return 0
     live, _ = scan_live_sessions()
+    registry = scan_registry_status()
+    overlay = status_overlay()
     done = done_ids()
     for meta, matches in hits:
-        st = resolve_status(meta.session_id, live, done)
+        st = resolve_status(meta.session_id, live, done, registry, overlay)
         print(f"\n{status_label(st)}  {meta.session_id[:8]}  {fmt_ts(meta.last_ts)}  "
               f"{shorten_path(meta.cwd)}  ({len(matches)} hit(s))")
         for ts, role, snippet in matches[:3]:
