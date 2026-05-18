@@ -34,7 +34,7 @@ Main script: `tracker.py` (stdlib only). Installed as `~/.local/bin/cst`.
 ```bash
 cst                       # list (default): # + STAT + LAST + SESSION + MSGS + MESSAGE + PROJECT
 cst --tui                 # interactive TUI (same as `cst pick`)
-cst list --status active  # active / ended / done filter
+cst list --status working  # working|waiting|idle|ended|done (active = back-compat alias for working)
 cst search "<query>"      # full-text transcript search (OR via `|`, -i = ignore case)
 cst show <id>             # transcript with Status header
 cst resume <id> --print-only | bash
@@ -79,6 +79,7 @@ immediately (the hook re-runs `cst`); only settings.json changes need a
 `cst uninstall-hook` to remove. Inside cmux: cmux injects its own Claude
 hooks via `--settings`; Claude Code merges them additively with
 `~/.claude/settings.json`, so cst's hooks still fire — no conflict.
+Note: if the registry reports newer idle activity than the last recorded hook event, a stale `!` may self-heal to `◦` to avoid a stuck state.
 
 ## TUI keybindings
 

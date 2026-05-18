@@ -2321,14 +2321,21 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             f"  🔎 {search_query!r}→{len(search_hits)}"
             if search_hits is not None else ""
         )
-        live_count = sum(1 for s in items if s.session_id in live and s.session_id not in done)
-        done_count = sum(1 for s in items if s.session_id in done)
+        scounts = {g: 0 for g in STATUS_ALL}
+        for s in items:
+            scounts[resolve_status(s.session_id, live, done,
+                                   registry, overlay)] += 1
         hide_hint = "  [✓ hidden]" if hide_done else ""
         cwd_hint = f"  [📂 {shorten_path(launch_cwd)}]" if cwd_only else ""
         header = (
             f" claude-session-tracker v{__version__}  "
             f"{len(items)}/{len(sessions)}  "
-            f"●{live_count} ✓{done_count}{mark_hint}{search_hint}{hide_hint}{cwd_hint}"
+            f"{STATUS_WORKING}{scounts[STATUS_WORKING]} "
+            f"{STATUS_WAITING}{scounts[STATUS_WAITING]} "
+            f"{STATUS_IDLE}{scounts[STATUS_IDLE]} "
+            f"{STATUS_ENDED}{scounts[STATUS_ENDED]} "
+            f"{STATUS_DONE}{scounts[STATUS_DONE]}"
+            f"{mark_hint}{search_hint}{hide_hint}{cwd_hint}"
             "   ? help  Enter open  / filter  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit "
         )
         if search_mode:
@@ -2749,7 +2756,16 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             done = done_ids()
             sel = min(sel, max(0, len(sessions) - 1))
             top = max(0, min(top, max(0, len(sessions) - 1)))
-            toast = f"Rescanned: {len(sessions)} session(s)  ●{sum(1 for s in sessions if s.session_id in live)}  ✓{sum(1 for s in sessions if s.session_id in done)}"
+            _tc = {g: 0 for g in STATUS_ALL}
+            for s in sessions:
+                _tc[resolve_status(s.session_id, live, done,
+                                   registry, overlay)] += 1
+            toast = (f"Rescanned: {len(sessions)} session(s)  "
+                     f"{STATUS_WORKING}{_tc[STATUS_WORKING]} "
+                     f"{STATUS_WAITING}{_tc[STATUS_WAITING]} "
+                     f"{STATUS_IDLE}{_tc[STATUS_IDLE]} "
+                     f"{STATUS_ENDED}{_tc[STATUS_ENDED]} "
+                     f"{STATUS_DONE}{_tc[STATUS_DONE]}")
         elif ch in (curses.KEY_DC, 330):
             targets: list[SessionMeta]
             if marked:

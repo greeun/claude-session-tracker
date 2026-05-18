@@ -75,6 +75,7 @@ can only resolve working (`●`) vs idle (`◦`). Run `cst install-hook` once
 cmux: cmux injects its own Claude hooks via `--settings`; Claude Code merges
 them additively with `~/.claude/settings.json`, so cst's hooks still fire and
 key off the same session id — no conflict.
+Note: if the registry reports newer idle activity than the last recorded hook event, a stale `!` may self-heal to `◦` to avoid a stuck state.
 
 `install-hook` is idempotent (re-running reports "no change") and auto-migrates
 the legacy `~/.claude/hooks/cst-done.py` form. Other hooks (e.g.

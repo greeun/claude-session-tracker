@@ -74,6 +74,7 @@ idle(`◦`)만 구분 가능합니다. `cst install-hook` 한 번 실행하면 �
 외부 훅 보존). 제거 시 `cst uninstall-hook`. cmux 안에서도: cmux가 `--settings`
 로 자체 Claude 훅을 주입하지만, Claude Code가 `~/.claude/settings.json`과 합산
 로드하므로 cst 훅도 정상 실행되어 충돌 없음.
+참고: 레지스트리가 마지막으로 기록된 훅 이벤트보다 최신 idle 활동을 보고하면, 고착 방지를 위해 오래된 `!`가 자동으로 `◦`로 정정될 수 있습니다.
 
 `install-hook` 은 멱등이며(재실행 시 "no change"), 예전 형태
 `~/.claude/hooks/cst-done.py` 도 자동 이전합니다. `csm hook activity` 같은
