@@ -543,6 +543,8 @@ def scan_registry_status() -> dict[str, dict]:
                 data = json.load(fp)
         except (OSError, json.JSONDecodeError):
             continue
+        if not isinstance(data, dict):
+            continue
         sid = data.get("sessionId")
         if not sid:
             continue
@@ -624,13 +626,17 @@ def set_done(session_id: str, value: bool) -> None:
 
 def status_overlay() -> dict:
     """state.json hook-driven status overlay: sid -> {state,event,ts}."""
-    return load_state().get("status") or {}
+    val = load_state().get("status")
+    return val if isinstance(val, dict) else {}
 
 
 def set_status(session_id: str, state: str | None, event: str) -> None:
     """Record (or clear, when state is None) a session's hook status."""
     st = load_state()
-    bucket = st.setdefault("status", {})
+    bucket = st.get("status")
+    if not isinstance(bucket, dict):
+        bucket = {}
+        st["status"] = bucket
     if state is None:
         bucket.pop(session_id, None)
     else:
