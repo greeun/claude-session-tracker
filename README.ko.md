@@ -2,7 +2,7 @@
 
 로컬 Claude Code 세션을 **상태(라이브/종료/작업완료)와 함께** 브라우징·검색·재개·백업하는 도구. 셸에서 `cst`, curses TUI로 `cst --tui`.
 
-[`claude-sessions`](https://github.com/)의 포크로, `~/.claude/sessions/<pid>.json` 라이브 프로세스 레지스트리를 이용한 STATUS 컬럼, 사용자 주도 "작업종료" 플래그, fzf 스타일 필터링을 추가했습니다. Python stdlib만 사용 — 외부 의존성 없음.
+[`claude-sessions`](https://github.com/)의 포크로, `~/.claude/sessions/<pid>.json` 라이브 프로세스 레지스트리를 이용한 STATUS 컬럼, 사용자 주도 "done(완료)" 플래그, fzf 스타일 필터링을 추가했습니다. Python stdlib만 사용 — 외부 의존성 없음.
 
 ---
 
@@ -48,9 +48,9 @@ cst install-hook
 
 | 입력 | 동작 |
 |:--|:--|
-| `done!` | **현재** 세션을 ✓ 작업종료 (훅 payload의 `session_id` 사용) |
+| `done!` | **현재** 세션을 ✓ done 으로 표시 (훅 payload의 `session_id` 사용) |
 | `done! <id>` | 해당 세션 마크 (8자 prefix 가능) |
-| `undone! [id]` | 작업종료 해제 |
+| `undone! [id]` | done 플래그 해제 |
 | `/done`, `/undone` | 레거시 — 여전히 인식되지만, 맨 앞 `/` 는 Claude Code 슬래시 커맨드 팔레트를 띄워 제출을 막는 경우가 많음. bang 형태 권장. |
 
 트리거는 프롬프트 **전체** 여야 합니다 (`done!` 또는 `done! <id>`). "I am
@@ -97,7 +97,7 @@ cst                           # CLI 기본 목록 — # + STAT + MESSAGE + PROJE
 cst --tui                     # 인터랙티브 TUI (cst pick과 동일)
 cst live                      # 지금 실행중인 Claude Code 프로세스만
 cst search "인증 리팩토링"    # 모든 세션 트랜스크립트 본문 검색
-cst done <id>                 # 세션을 작업종료로 표시
+cst done <id>                 # 세션을 done 으로 표시
 cst stats                     # 요약 (프로젝트·상태 분포)
 ```
 
@@ -112,8 +112,8 @@ STAT 컬럼에 1칸 글리프로 표시. 우선순위: **✓ > ● > ! > ◦ > �
 | **●** | working (작업중) | Claude가 현재 출력을 생성하는 중. |
 | **!** | waiting (대기중) | Claude가 당신의 입력 또는 권한 결정을 기다리는 중 — 시간이 새는 곳. `cst install-hook` 설치 시 정확히 감지됨. |
 | **◦** | idle (유휴) | 턴이 끝났고 프로세스는 아직 살아 있음. |
-| **○** | ended (세션종료) | 프로세스가 없음 (정상 종료 또는 등록된 적 없음). 트랜스크립트는 그대로 읽을 수 있음. |
-| **✓** | done (작업종료) | 사용자가 명시적으로 끝났다고 표시. TUI의 `D`/`Ctrl-D` 또는 `cst done <id>`. `~/.cache/claude-session-tracker/state.json`에 영구 저장. |
+| **○** | ended (종료됨) | 프로세스가 없음 (정상 종료 또는 등록된 적 없음). 트랜스크립트는 그대로 읽을 수 있음. |
+| **✓** | done (완료) | 사용자가 명시적으로 끝났다고 표시. TUI의 `D`/`Ctrl-D` 또는 `cst done <id>`. `~/.cache/claude-session-tracker/state.json`에 영구 저장. |
 
 상태는 **매 명령 실행마다 새로 계산**됩니다. 백그라운드 데몬 없음.
 
@@ -161,11 +161,11 @@ cst show 960faaa8 --max-chars 500 --with-subagents
 cst resume 960faaa8 --print-only | bash
 ```
 
-### `cst done <id>` / `cst undone <id>` — 작업종료 플래그
+### `cst done <id>` / `cst undone <id>` — done 플래그
 
 ```bash
-cst done 06d116f7   # ✓ Marked 작업종료
-cst undone 06d116f7 # ✓ Cleared 작업종료
+cst done 06d116f7   # ✓ Marked done
+cst undone 06d116f7 # ✓ Cleared done
 ```
 
 ### `cst live [--all]` — 라이브 프로세스 레지스트리
@@ -199,9 +199,11 @@ cst relocate 960faaa8 ~/project/real-folder -y
 ```
 Total sessions:  563
 Total messages:  70778
-  ● 세션사용중: 3
-  ○ 세션종료: 560
-  ✓ 작업종료: 0
+  ● working: 1
+  ! waiting: 2
+  ◦ idle: 8
+  ○ ended: 540
+  ✓ done: 12
 ```
 
 ### `cst subagents <parent-id>` — Task 서브에이전트 목록
@@ -224,7 +226,7 @@ fzf 스타일 필터와 상태 글리프, 액션 키를 갖춘 curses 선택기.
 | **`v`** / **`V`** | **포커스된 세션 미리보기** 모달 (트랜스크립트/cwd/타임스탬프, 읽기 전용). 모달 내부: `↑↓` 스크롤 · `PgUp/PgDn` 페이지 · `g/G` 처음/끝 · `q/Esc/v` 닫기 |
 | `Space` | 현재 행 마크 토글 |
 | `Ctrl-X` | 모든 마크 초기화 |
-| **`D`** 또는 **`Ctrl-D`** | 현재 행 **작업종료** 토글 (영구 저장) |
+| **`D`** 또는 **`Ctrl-D`** | 현재 행 **done** 토글 (영구 저장) |
 | **`H`** | ✓ 숨김 토글 (Ctrl-H는 Backspace와 충돌해서 지원 안 함) |
 | **`R`** 또는 **`Ctrl-R`** | 세션 목록 + 라이브 프로세스 레지스트리 재스캔 |
 | `Del` / `Fn+Delete` | 마크된/현재 세션 삭제 (확인 모달) |
@@ -244,7 +246,7 @@ fzf 스타일 필터와 상태 글리프, 액션 키를 갖춘 curses 선택기.
 | `↑↓` / `Ctrl-P Ctrl-N` / `PgUp PgDn` / `Home End` | 필터링 **중에도** 선택 이동 |
 | `Backspace` / `Ctrl-U` | 수정 / 비우기 |
 | **`Enter`** | **필터 확정 + 검색 모드 종료** (필터는 유지 — 이후 ↑↓, Enter, D로 조작) |
-| `Ctrl-D` | 현재 행 작업종료 토글 (검색 모드 유지) |
+| `Ctrl-D` | 현재 행 done 토글 (검색 모드 유지) |
 | `Ctrl-R` | rescan (검색 모드 유지) |
 | `Tab` | 현재 쿼리로 **본문 전체 검색(full-text)**까지 확대 |
 | `Esc` | 쿼리 지우고 검색 모드 종료 |
@@ -256,7 +258,7 @@ fzf 스타일 필터와 상태 글리프, 액션 키를 갖춘 curses 선택기.
 ```
 
 - `12/563` — 보이는 행 / 전체 세션 수
-- `●3 ✓0` — 현재 뷰의 라이브/작업종료 개수
+- `●3 ✓0` — 현재 뷰의 working/done 개수
 - `[✓ 숨김]` — hide 토글이 켜졌을 때만 표시
 
 ### 프롬프트 줄 (헤더 아래)
@@ -303,7 +305,7 @@ TUI에서 `Enter`를 누르면 **현재 쓰는 터미널 앱과 동일한 앱의
 | `~/.claude/projects/**/*.jsonl` | 세션 트랜스크립트 (Claude Code 원본) | **아니오** — 작업 이력 |
 | `~/.claude/sessions/<pid>.json` | Claude Code의 라이브 프로세스 레지스트리 (읽기 전용) | 건드리지 말 것 |
 | `~/.cache/claude-session-tracker/index.json` | mtime/size 무효화 인덱싱 캐시 | 예 (다음 실행 시 재생성) |
-| `~/.cache/claude-session-tracker/state.json` | 작업종료 플래그 `{"done": {"<sid>": "<iso-ts>"}}` | 예 (모든 ✓ 표시가 초기화됨) |
+| `~/.cache/claude-session-tracker/state.json` | done 플래그 `{"done": {"<sid>": "<iso-ts>"}}` | 예 (모든 ✓ 표시가 초기화됨) |
 
 ---
 
@@ -323,7 +325,7 @@ cst --tui
 # /     → 키워드 입력 (실시간 필터)
 # Enter → 필터 확정, 검색 모드 종료 (필터 유지)
 # ↑↓    → 필터된 목록에서 이동
-# D     → 각 행에 작업종료 토글
+# D     → 각 행에 done 토글
 # H     → ✓ 숨김 토글 (완료한 것 제외하고 보기)
 # R     → 재스캔
 ```
@@ -360,7 +362,7 @@ cst relocate <id> ~/project/actual-folder -y
 
 - **#** 번호 컬럼 + **STAT** 글리프 컬럼 + **PROJECT** 컬럼을 매 행에 표시
 - **`done`**, **`undone`**, **`live`** 서브커맨드
-- TUI 키: **`D`/`Ctrl-D`** (작업종료 토글) · **`H`** (숨김 토글) · **`R`/`Ctrl-R`** (rescan) · **`?`** (help)
+- TUI 키: **`D`/`Ctrl-D`** (done 토글) · **`H`** (숨김 토글) · **`R`/`Ctrl-R`** (rescan) · **`?`** (help)
 - fzf 스타일 `/` — 타이핑하며 동시에 이동, 필터 확정 후 다양한 액션
 - Unicode (**한글**/일본어/중국어) 검색 입력 지원
 - Enter가 **현재와 같은 터미널 앱의 새 창**(iTerm/WezTerm/Ghostty/kitty/Alacritty/Terminal)에서 세션을 열고 **포그라운드로 끌어옴** (기존 `claude-sessions`는 TUI 프로세스를 `claude`로 교체)
@@ -373,7 +375,7 @@ cst relocate <id> ~/project/actual-folder -y
 |---|---|---|
 | 역할 | **동시 실행 중**인 세션의 작업 매니저 | **모든** 세션(라이브+과거) 아카이브 브라우저 |
 | 플랫폼 | macOS 전용 | 크로스 플랫폼 (stdlib만) |
-| 데이터 | 별도 레지스트리 (제목/우선순위/태그/노트) | 원본 jsonl + 최소 overlay (작업종료 플래그) |
+| 데이터 | 별도 레지스트리 (제목/우선순위/태그/노트) | 원본 jsonl + 최소 overlay (done 플래그) |
 | 주요 기능 | 윈도우 포커스 · 우선순위 · stale 리뷰 · watch TUI · 훅 · statusline | list / search / resume / backup / restore / relocate / 상태 글리프 |
 | 범위 | 지금 동시에 처리 중인 세션 | 이력 전체 수백 개 |
 

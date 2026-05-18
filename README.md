@@ -48,9 +48,9 @@ Requires `~/.local/bin` in `PATH`, and Python 3.10+.
 
 | You type | Effect |
 |:--|:--|
-| `done!` | mark **this** session ✓ 작업종료 (uses the hook's `session_id`) |
+| `done!` | mark **this** session ✓ done (uses the hook's `session_id`) |
 | `done! <id>` | mark that session (8-char prefix OK) |
-| `undone! [id]` | clear the 작업종료 flag |
+| `undone! [id]` | clear the done flag |
 | `/done`, `/undone` | legacy aliases — still matched, but a leading `/` opens Claude Code's slash-command palette and usually blocks submission. Prefer the bang forms. |
 
 The trigger must be the **entire** prompt (`done!` or `done! <id>`) — sentences
@@ -99,7 +99,7 @@ cst                           # CLI list (default) — # + STAT + MESSAGE + PROJ
 cst --tui                     # interactive TUI (same as `cst pick`)
 cst live                      # only sessions with a live Claude Code process
 cst search "auth refactor"    # full-text search across every transcript
-cst done <id>                 # mark a session as 작업종료
+cst done <id>                 # mark a session as done
 cst stats                     # counts, top projects, status breakdown
 ```
 
@@ -163,11 +163,11 @@ Header includes **Status**, cwd, first/last timestamps, message count, subagent 
 cst resume 960faaa8 --print-only | bash
 ```
 
-### `cst done <id>` / `cst undone <id>` — 작업종료 flag
+### `cst done <id>` / `cst undone <id>` — done flag
 
 ```bash
-cst done 06d116f7   # ✓ Marked 작업종료
-cst undone 06d116f7 # ✓ Cleared 작업종료
+cst done 06d116f7   # ✓ Marked done
+cst undone 06d116f7 # ✓ Cleared done
 ```
 
 ### `cst live [--all]` — live process registry
@@ -201,9 +201,11 @@ cst relocate 960faaa8 ~/project/real-folder -y
 ```
 Total sessions:  563
 Total messages:  70778
-  ● 세션사용중: 3
-  ○ 세션종료: 560
-  ✓ 작업종료: 0
+  ● working: 1
+  ! waiting: 2
+  ◦ idle: 8
+  ○ ended: 540
+  ✓ done: 12
 ```
 
 ### `cst subagents <parent-id>` — Task-tool subagents
@@ -226,7 +228,7 @@ A curses picker with fzf-style filter, status glyphs, and action keys. **Two mod
 | **`v`** / **`V`** | **Preview the focused session** in a read-only modal (transcript, cwd, timestamps). Inside: `↑↓` scroll · `PgUp/PgDn` page · `g/G` top/bottom · `q/Esc/v` close |
 | `Space` | Toggle mark on current row |
 | `Ctrl-X` | Clear all marks |
-| **`D`** or **`Ctrl-D`** | Toggle **작업종료** on current row (persists) |
+| **`D`** or **`Ctrl-D`** | Toggle **done** on current row (persists) |
 | **`H`** | Toggle hide: show/hide ✓ rows (no Ctrl-H alias — that's Backspace) |
 | **`R`** or **`Ctrl-R`** | Rescan sessions + live-process registry |
 | `Del` / `Fn+Delete` | Delete marked/current session(s) (with confirmation) |
@@ -246,7 +248,7 @@ A cursor appears on the prompt line. Live filtering happens as you type.
 | `↑↓` / `Ctrl-P Ctrl-N` / `PgUp PgDn` / `Home End` | Move selection **while filtering** |
 | `Backspace` / `Ctrl-U` | Edit / wipe the query |
 | **`Enter`** | **Commit filter, exit search mode** (filter stays applied — use ↑↓, Enter, D in normal mode) |
-| `Ctrl-D` | Toggle 작업종료 on current row (stays in search mode) |
+| `Ctrl-D` | Toggle done on current row (stays in search mode) |
 | `Ctrl-R` | Rescan (stays in search mode) |
 | `Tab` | Escalate to full-text transcript search for the current query |
 | `Esc` | Clear query and exit search mode |
@@ -305,7 +307,7 @@ Pressing `Enter` in the TUI spawns `claude --resume <sid>` in a **new window of 
 | `~/.claude/projects/**/*.jsonl` | Session transcripts (Claude Code's own data) | **No** — your history |
 | `~/.claude/sessions/<pid>.json` | Claude Code's live-process registry (read-only) | Leave alone |
 | `~/.cache/claude-session-tracker/index.json` | mtime/size-invalidated indexing cache | Yes — regenerates on next run |
-| `~/.cache/claude-session-tracker/state.json` | Your 작업종료 flags: `{"done": {"<sid>": "<iso-ts>"}}` | Yes — clears all "done" marks |
+| `~/.cache/claude-session-tracker/state.json` | Your done flags: `{"done": {"<sid>": "<iso-ts>"}}` | Yes — clears all "done" marks |
 
 ---
 
@@ -325,7 +327,7 @@ cst --tui
 # /      → type keyword to filter (live metadata match)
 # Enter  → commit filter (exit search mode, keep filter)
 # ↑↓     → walk the filtered list
-# D      → toggle 작업종료 on each as you go
+# D      → toggle done on each as you go
 # H      → hide ✓ rows (so you see only what's left)
 # R      → rescan
 ```

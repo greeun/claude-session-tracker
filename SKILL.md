@@ -23,7 +23,7 @@ Main script: `tracker.py` (stdlib only). Installed as `~/.local/bin/cst`.
 ## When to Use
 
 - "세션 상태 보여줘" / "지금 열려있는 세션만 보여줘"
-- "이 세션 작업 끝났다고 표시" / "작업종료 마크"
+- "이 세션 작업 끝났다고 표시" / "done 마크"
 - "끝낸 세션은 목록에서 숨기고 싶어"
 - "세션 검색해서 새 창에서 이어서 작업"
 - Anything from `claude-sessions` — list / search / show / resume / backup /
@@ -38,8 +38,8 @@ cst list --status active  # active / ended / done filter
 cst search "<query>"      # full-text transcript search (OR via `|`, -i = ignore case)
 cst show <id>             # transcript with Status header
 cst resume <id> --print-only | bash
-cst done <id>             # toggle-on 작업종료
-cst undone <id>           # clear 작업종료
+cst done <id>             # toggle-on done
+cst undone <id>           # clear done
 cst live [--all]          # live Claude Code processes (--all shows stale registry entries)
 cst install-hook          # wire the 0-token done! hook into ~/.claude/settings.json
 cst uninstall-hook        # remove it (other UserPromptSubmit hooks preserved)
@@ -52,7 +52,7 @@ cst backup / restore / relocate / stats / subagents   # (same as claude-sessions
 `cst install-hook` adds a `UserPromptSubmit` hook (`cst prompt-hook`) to
 `~/.claude/settings.json`. Inside any Claude Code session the user can then type:
 
-- `done!` → mark the **current** session ✓ 작업종료 (uses the hook payload's
+- `done!` → mark the **current** session ✓ done (uses the hook payload's
   `session_id`)
 - `done! <id>` → mark that session · `undone! [id]` → clear the flag
 - legacy `/done` / `/undone` are still accepted, but a leading `/` opens
@@ -92,7 +92,7 @@ hooks via `--settings`; Claude Code merges them additively with
   avoid new-shell PATH issues. On failure the new window stays open with an
   error message.
 - `Space` toggle mark · `Ctrl-X` clear marks · `Del` delete marked/current
-- **`D` or `Ctrl-D`** — toggle 작업종료
+- **`D` or `Ctrl-D`** — toggle done
 - **`H`** — hide ✓ rows (no Ctrl-H alias — Backspace collision)
 - **`C`** — toggle: only sessions under the TUI launch cwd (prefix match on the
   session's recorded cwd; NFC-normalized so Korean paths match)
@@ -105,7 +105,7 @@ hooks via `--settings`; Claude Code merges them additively with
   (한글/일본어/중국어 works).
 - `↑↓ Ctrl-P/N PgUp/Dn Home/End` — move selection while filtering
 - `Backspace / Ctrl-U` — edit / wipe
-- `Ctrl-D` — toggle 작업종료 (stays in search mode)
+- `Ctrl-D` — toggle done (stays in search mode)
 - `Ctrl-R` — rescan (stays in search mode)
 - **`Enter`** — commit filter, exit search mode (filter stays applied;
   use ↑↓ + Enter in normal mode to open)
@@ -153,11 +153,12 @@ relocate with cwd rewrite, interactive delete, multi-select marks.
   append-only).
 - `~/.claude/sessions/<pid>.json` — Claude Code's live-process registry.
   Each running process writes `{pid, sessionId, cwd, startedAt, version,
-  kind, entrypoint}`. `cst` scans these and runs `kill -0 <pid>` to decide
-  세션사용중 vs 세션종료.
+  kind, entrypoint}`. `cst` scans these and runs `kill -0 <pid>` to get an
+  `alive` boolean: not-alive → `○` ended; alive feeds the 5-state classifier
+  (working/waiting/idle resolved from the hook overlay, else the registry).
 - `~/.cache/claude-session-tracker/index.json` — mtime/size-invalidated
   indexing cache. Safe to delete.
-- `~/.cache/claude-session-tracker/state.json` — user-driven 작업종료
+- `~/.cache/claude-session-tracker/state.json` — user-driven done
   flags. Safe to delete (just clears all ✓ marks).
 
 ## Do not
