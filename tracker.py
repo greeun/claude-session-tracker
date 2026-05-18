@@ -1371,12 +1371,29 @@ SETTINGS_PATH_DEFAULT = Path.home() / ".claude" / "settings.json"
 PROMPT_HOOK_RE = re.compile(
     r"^(?:(done|undone)!|/(done|undone))(?:\s+(\S+))?\s*$")
 
+STATUS_HOOK_CMD = "cst status-hook"
+# Events wired by install-hook. PreToolUse/SessionStart intentionally omitted
+# (write amplification / false-working); the mapper still understands them.
+STATUS_HOOK_EVENTS = ("UserPromptSubmit", "Notification",
+                      "PermissionRequest", "Stop", "SessionEnd")
+
+
+def _our_hook_specs() -> dict[str, list[tuple[str, int]]]:
+    """event -> list of (command, timeout) entries cst manages."""
+    specs: dict[str, list[tuple[str, int]]] = {}
+    specs.setdefault(HOOK_EVENT, []).append((HOOK_CMD, 25))  # prompt-hook
+    for ev in STATUS_HOOK_EVENTS:
+        specs.setdefault(ev, []).append((STATUS_HOOK_CMD, 10))
+    return specs
+
 
 def _is_our_hook_cmd(cmd: str) -> bool:
-    """True for the current command and the legacy temp-file form, so
+    """True for our hook commands and the legacy temp-file form, so
     install-hook can migrate older setups idempotently."""
     c = (cmd or "").strip()
-    return c.endswith("cst prompt-hook") or "cst-done.py" in c
+    return (c.endswith("cst prompt-hook")
+            or c.endswith("cst status-hook")
+            or "cst-done.py" in c)
 
 
 def cmd_prompt_hook(args: argparse.Namespace) -> int:
@@ -1502,26 +1519,29 @@ def cmd_install_hook(args: argparse.Namespace) -> int:
         return 1
     work, _ = _load_settings(path)            # independent copy to mutate
     hooks = work.setdefault("hooks", {})
-    lst = hooks.get(HOOK_EVENT, [])
-    if not isinstance(lst, list):
-        print(f"(hooks.{HOOK_EVENT} is not a list — aborting)", file=sys.stderr)
-        return 1
-    kept, removed = _strip_our_entries(lst)
-    kept.append({
-        "matcher": "",
-        "hooks": [{"type": "command", "command": HOOK_CMD, "timeout": 25}],
-    })
-    hooks[HOOK_EVENT] = kept
+    specs = _our_hook_specs()
+    other_total = 0
+    for event, cmds in specs.items():
+        lst = hooks.get(event, [])
+        if not isinstance(lst, list):
+            print(f"(hooks.{event} is not a list — aborting)", file=sys.stderr)
+            return 1
+        kept, _removed = _strip_our_entries(lst)
+        other_total += len(kept)
+        for cmd, to in cmds:
+            kept.append({
+                "matcher": "",
+                "hooks": [{"type": "command", "command": cmd, "timeout": to}],
+            })
+        hooks[event] = kept
     if json.dumps(before, sort_keys=True) == json.dumps(work, sort_keys=True):
-        print(f"✓ already installed — {HOOK_EVENT}: {HOOK_CMD} (no change)")
+        print("✓ already installed (no change)")
         return 0
     _write_settings(path, work)
-    migrated = (f" (migrated {removed} prior entr"
-                f"{'y' if removed == 1 else 'ies'})") if removed else ""
-    other = len(kept) - 1
     print(f"✓ installed → {path}\n"
-          f"  {HOOK_EVENT}: {HOOK_CMD}{migrated}\n"
-          f"  {other} other {HOOK_EVENT} hook(s) preserved.\n"
+          f"  events: {', '.join(specs)}\n"
+          f"  ({other_total} foreign hook entr"
+          f"{'y' if other_total == 1 else 'ies'} preserved)\n"
           f"  Open /hooks once (or restart) if it doesn't fire immediately.")
     return 0
 
@@ -1532,18 +1552,22 @@ def cmd_uninstall_hook(args: argparse.Namespace) -> int:
     if data is None:
         print(err, file=sys.stderr)
         return 1
-    lst = (data.get("hooks") or {}).get(HOOK_EVENT)
-    if not isinstance(lst, list):
-        print(f"✓ not installed — no {HOOK_EVENT} hooks to remove")
-        return 0
-    kept, removed = _strip_our_entries(lst)
-    if removed == 0:
+    hooks = data.get("hooks") or {}
+    total_removed = 0
+    for event in _our_hook_specs():
+        lst = hooks.get(event)
+        if not isinstance(lst, list):
+            continue
+        kept, removed = _strip_our_entries(lst)
+        total_removed += removed
+        if removed:
+            hooks[event] = kept
+    if total_removed == 0:
         print("✓ not installed — nothing to remove")
         return 0
-    data["hooks"][HOOK_EVENT] = kept
     _write_settings(path, data)
-    print(f"✓ uninstalled from {path} "
-          f"(removed {removed}; {len(kept)} other {HOOK_EVENT} hook(s) kept)")
+    print(f"✓ uninstalled from {path} (removed {total_removed} cst entr"
+          f"{'y' if total_removed == 1 else 'ies'}; foreign hooks kept)")
     return 0
 
 

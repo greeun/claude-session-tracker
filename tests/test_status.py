@@ -173,5 +173,46 @@ class TestStatusHookCmd(unittest.TestCase):
         self.assertEqual(st.get("status", {}), {})
 
 
+class TestHookInstall(unittest.TestCase):
+    def test_specs_cover_events(self):
+        specs = tracker._our_hook_specs()
+        self.assertIn(("cst prompt-hook", 25), specs["UserPromptSubmit"])
+        self.assertIn(("cst status-hook", 10), specs["UserPromptSubmit"])
+        for ev in ("Notification", "PermissionRequest", "Stop", "SessionEnd"):
+            self.assertIn(("cst status-hook", 10), specs[ev])
+
+    def test_is_our_hook_cmd(self):
+        self.assertTrue(tracker._is_our_hook_cmd("cst prompt-hook"))
+        self.assertTrue(tracker._is_our_hook_cmd("/path/cst status-hook"))
+        self.assertTrue(tracker._is_our_hook_cmd("python cst-done.py"))
+        self.assertFalse(tracker._is_our_hook_cmd("some-other-tool"))
+
+    def test_install_then_uninstall_roundtrip(self):
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        tmp.write('{"hooks":{"UserPromptSubmit":[{"matcher":"",'
+                  '"hooks":[{"type":"command","command":"foreign"}]}]}}')
+        tmp.close()
+        ns = tracker.argparse.Namespace(settings=tmp.name)
+        self.assertEqual(tracker.cmd_install_hook(ns), 0)
+        data = _json.loads(pathlib.Path(tmp.name).read_text())
+        cmds = [h["command"]
+                for e in data["hooks"]["UserPromptSubmit"]
+                for h in e["hooks"]]
+        self.assertIn("foreign", cmds)            # preserved
+        self.assertIn("cst prompt-hook", cmds)
+        self.assertIn("cst status-hook", cmds)
+        self.assertIn("Stop", data["hooks"])
+        self.assertEqual(tracker.cmd_install_hook(ns), 0)  # idempotent
+        self.assertEqual(tracker.cmd_uninstall_hook(ns), 0)
+        data2 = _json.loads(pathlib.Path(tmp.name).read_text())
+        cmds2 = [h["command"]
+                 for e in data2["hooks"].get("UserPromptSubmit", [])
+                 for h in e["hooks"]]
+        self.assertIn("foreign", cmds2)
+        self.assertNotIn("cst prompt-hook", cmds2)
+        self.assertNotIn("cst status-hook", cmds2)
+        pathlib.Path(tmp.name).unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
     unittest.main()
