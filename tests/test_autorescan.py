@@ -103,40 +103,13 @@ class TestWaitingIds(unittest.TestCase):
             tk.waiting_ids(sessions, live, done, registry, {}), set())
 
 
-class TestAlarmBody(unittest.TestCase):
-    def test_single(self):
-        self.assertEqual(
-            tk._alarm_body({"abcdef1234"}),
-            "1 session(s) waiting for you: abcdef12")
-
-    def test_three(self):
-        b = tk._alarm_body({"aaaaaaaa1", "bbbbbbbb1", "cccccccc1"})
-        self.assertEqual(b, "3 session(s) waiting for you: aaaaaaaa, bbbbbbbb, cccccccc")
-
-    def test_more_than_three_truncates(self):
-        ids = {f"id{i:06d}" for i in range(6)}
-        b = tk._alarm_body(ids)
-        self.assertTrue(b.startswith("6 session(s) waiting for you: "))
-        self.assertIn("id000000, id000001, id000002", b)
-        self.assertIn("+3 more", b)
-
-    def test_deterministic_order(self):
-        self.assertEqual(tk._alarm_body({"zzzzzzzz", "aaaaaaaa"}),
-                         tk._alarm_body({"aaaaaaaa", "zzzzzzzz"}))
-
-
-class TestOsascriptArgv(unittest.TestCase):
-    def test_structure(self):
-        argv = tk._osascript_argv("hello")
-        self.assertEqual(argv[0], "osascript")
-        self.assertEqual(argv[1], "-e")
-        self.assertEqual(argv[2],
-                         'display notification "hello" with title "cst"')
-
-    def test_escapes_quotes_and_backslash(self):
-        argv = tk._osascript_argv('a"b\\c')
-        self.assertEqual(argv[2],
-                         'display notification "a\\"b\\\\c" with title "cst"')
+# NOTE: TestAlarmBody / TestOsascriptArgv were removed. The macOS desktop
+# notification (_alarm_body / _osascript_argv / _notify_macos) was
+# deliberately deleted: a plain `osascript -e 'display notification'` is
+# owned by Script Editor, so clicking the banner launched Script Editor and
+# there is no stdlib way to change the click owner. The waiting-edge signal
+# is now curses.beep() + a sticky toast in the TUI loop. Testing the removed
+# functions would assert the bug must exist, so those cases are gone.
 
 
 if __name__ == "__main__":
