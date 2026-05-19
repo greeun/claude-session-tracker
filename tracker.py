@@ -1801,7 +1801,7 @@ HELP_LINES = [
     "",
     "Note: plain letters do NOT filter in normal mode — press `/` first.",
     "",
-    "Press any key to close…",
+    "  ↑↓ scroll · PgUp/PgDn page · g/G top/bottom · q/Esc/Enter close",
 ]
 
 
@@ -1949,6 +1949,31 @@ def _preview_modal(stdscr, target: SessionMeta, status: str) -> None:
     stdscr.refresh()
 
 
+def _help_scroll(key: int, offset: int, total: int, view_h: int,
+                 keys: tuple) -> tuple[int, bool]:
+    """Pure scroll/close logic for the help modal — no curses import, so it
+    is unit-testable. `keys` = (UP, DOWN, PPAGE, NPAGE, HOME, END) curses
+    codes. Returns (clamped_offset, should_close)."""
+    UP, DOWN, PPAGE, NPAGE, HOME, END = keys
+    maxoff = max(0, total - view_h)
+    step = max(1, view_h - 1)            # pager-style page with 1-line overlap
+    if key in (27, ord('q'), ord('Q'), 10, 13, ord('?')):
+        return max(0, min(offset, maxoff)), True
+    if key in (UP, 16, ord('k')):
+        offset -= 1
+    elif key in (DOWN, 14, ord('j')):
+        offset += 1
+    elif key == PPAGE:
+        offset -= step
+    elif key in (NPAGE, 32):             # PgDn / Space
+        offset += step
+    elif key in (HOME, ord('g')):
+        offset = 0
+    elif key in (END, ord('G')):
+        offset = maxoff
+    return max(0, min(offset, maxoff)), False
+
+
 def _show_help_modal(stdscr):
     import curses
     h, w = stdscr.getmaxyx()
@@ -1956,20 +1981,42 @@ def _show_help_modal(stdscr):
     box_h = min(len(HELP_LINES) + 4, max(10, h - 2))
     y0 = max(0, (h - box_h) // 2)
     x0 = max(0, (w - box_w) // 2)
-    win = curses.newwin(box_h, box_w, y0, x0)
-    win.keypad(True)
     try:
-        win.box()
-        for i, line in enumerate(HELP_LINES[: box_h - 2]):
+        win = curses.newwin(box_h, box_w, y0, x0)
+    except curses.error:
+        return
+    win.keypad(True)
+    view_h = max(1, box_h - 2)
+    total = len(HELP_LINES)
+    offset = 0
+    keys = (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE,
+            curses.KEY_NPAGE, curses.KEY_HOME, curses.KEY_END)
+    try:
+        while True:
+            win.erase()
+            win.box()
+            for i, line in enumerate(HELP_LINES[offset: offset + view_h]):
+                try:
+                    attr = curses.A_BOLD if line and not line.startswith(" ") and line[-1] != "…" else curses.A_NORMAL
+                    if line == HELP_LINES[0]:
+                        attr = curses.color_pair(2) | curses.A_BOLD
+                    win.addnstr(1 + i, 2, line, box_w - 4, attr)
+                except curses.error:
+                    pass
             try:
-                attr = curses.A_BOLD if line and not line.startswith(" ") and line[-1] != "…" else curses.A_NORMAL
-                if line == HELP_LINES[0]:
-                    attr = curses.color_pair(2) | curses.A_BOLD
-                win.addnstr(1 + i, 2, line, box_w - 4, attr)
+                if offset > 0:
+                    win.addnstr(0, max(2, box_w - 11), " ▲ more ", 9,
+                                curses.A_DIM)
+                if offset + view_h < total:
+                    win.addnstr(box_h - 1, max(2, box_w - 11), " ▼ more ", 9,
+                                curses.A_DIM)
             except curses.error:
                 pass
-        win.refresh()
-        win.getch()
+            win.refresh()
+            offset, close = _help_scroll(win.getch(), offset, total,
+                                         view_h, keys)
+            if close:
+                break
     finally:
         del win
         stdscr.touchwin()
