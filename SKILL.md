@@ -105,6 +105,7 @@ a stuck state.
 - **`C`** — toggle: only sessions under the TUI launch cwd (prefix match on the
   session's recorded cwd; NFC-normalized so Korean paths match)
 - **`R` or `Ctrl-R`** — rescan
+- **`a` or `A`** — auto-rescan interval popup (default ON 10s; beep + macOS notification when a session enters ! waiting)
 - `?` — help modal · `/` — enter search mode · `Esc` — clear/quit
 
 **Search mode (`/` prompt)** — fzf-style, all text input lives here:

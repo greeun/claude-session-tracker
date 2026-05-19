@@ -240,6 +240,7 @@ A curses picker with fzf-style filter, status glyphs, and action keys. **Two mod
 | **`D`** or **`Ctrl-D`** | Toggle **done** on current row (persists) |
 | **`H`** | Toggle hide: show/hide ✓ rows (no Ctrl-H alias — that's Backspace) |
 | **`R`** or **`Ctrl-R`** | Rescan sessions + live-process registry |
+| **`a`** or **`A`** | Auto-rescan interval popup (Off / 5 / 10 / 30 / 60 / 120s; default ON 10s, persisted; beeps + macOS notification when a session enters ! waiting) |
 | `Del` / `Fn+Delete` | Delete marked/current session(s) (with confirmation) |
 | `?` | Help modal |
 | `/` | Enter search mode (see below) |
