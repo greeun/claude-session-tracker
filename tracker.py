@@ -703,6 +703,46 @@ def classify_status(*, done: bool, alive: bool,
     return STATUS_WORKING  # legacy: alive but no signal
 
 
+# ---- auto-rescan (TUI) config + transition helpers ----
+AUTO_RESCAN_PRESETS = (5, 10, 30, 60, 120)        # selectable seconds
+AUTO_RESCAN_DEFAULT_INTERVAL = 10
+AUTO_RESCAN_TICK_MS = 1000                         # getch idle heartbeat (ms)
+
+
+def load_auto_rescan() -> tuple[bool, int]:
+    """(enabled, interval_seconds) from state.json. Safe defaults
+    (True, 10) on missing / corrupt / out-of-range."""
+    cfg = load_state().get("auto_rescan")
+    if not isinstance(cfg, dict):
+        return True, AUTO_RESCAN_DEFAULT_INTERVAL
+    enabled = cfg.get("enabled")
+    interval = cfg.get("interval")
+    if not isinstance(enabled, bool):
+        enabled = True
+    if not isinstance(interval, int) or interval not in AUTO_RESCAN_PRESETS:
+        interval = AUTO_RESCAN_DEFAULT_INTERVAL
+    return enabled, interval
+
+
+def save_auto_rescan(enabled: bool, interval: int) -> None:
+    st = load_state()
+    st["auto_rescan"] = {"enabled": bool(enabled), "interval": int(interval)}
+    save_state(st)
+
+
+def newly_waiting(prev: set[str], cur: set[str]) -> set[str]:
+    """Session ids that transitioned INTO waiting since the last snapshot."""
+    return cur - prev
+
+
+def waiting_ids(sessions, live: set[str], done: set[str],
+                registry: dict, overlay: dict) -> set[str]:
+    """Session ids currently resolving to STATUS_WAITING."""
+    return {s.session_id for s in sessions
+            if resolve_status(s.session_id, live, done, registry, overlay)
+            == STATUS_WAITING}
+
+
 # ---------- session data model ----------
 
 @dataclass
