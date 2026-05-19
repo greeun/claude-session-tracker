@@ -1976,11 +1976,11 @@ def _show_help_modal(stdscr):
 
 @dataclass
 class RescanResult:
-    live: set
-    registry: dict
-    overlay: dict
-    done: set
-    waiting: set
+    live: set[str]
+    registry: dict[str, dict]
+    overlay: dict[str, dict]
+    done: set[str]
+    waiting: set[str]
 
 
 def _do_rescan(cwd_filter, days, sessions) -> RescanResult:
