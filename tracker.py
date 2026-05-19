@@ -1984,10 +1984,13 @@ def _auto_rescan_modal(stdscr, enabled: bool, interval: int):
         (i for i, (_, v) in enumerate(rows) if v == interval), 1)
     h, w = stdscr.getmaxyx()
     box_w = min(40, max(24, w - 4))
-    box_h = len(rows) + 4
+    box_h = min(len(rows) + 4, max(5, h - 2))
     y0 = max(0, (h - box_h) // 2)
     x0 = max(0, (w - box_w) // 2)
-    win = curses.newwin(box_h, box_w, y0, x0)
+    try:
+        win = curses.newwin(box_h, box_w, y0, x0)
+    except curses.error:
+        return None
     win.keypad(True)
     try:
         while True:
@@ -2476,24 +2479,28 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
     while True:
         if (auto_enabled and auto_interval > 0 and not search_mode
                 and time.monotonic() - last_rescan >= auto_interval):
-            _r = _do_rescan(cwd_filter, days, sessions)
-            live, registry, overlay, done = (_r.live, _r.registry,
-                                             _r.overlay, _r.done)
-            _new = newly_waiting(waiting_seen, _r.waiting)
-            waiting_seen = _r.waiting
             last_rescan = time.monotonic()
-            sel = min(sel, max(0, len(sessions) - 1))
-            top = max(0, min(top, max(0, len(sessions) - 1)))
-            if _new:
-                try:
-                    curses.beep()
-                except curses.error:
-                    pass
-                _ids = sorted(i[:8] for i in _new)
-                n = len(_new)
-                toast = (f"⚠ {n} now waiting: " + ", ".join(_ids[:3])
-                         + ("" if n <= 3 else f" +{n-3}"))
-                _notify_macos(_alarm_body(_new))
+            try:
+                _r = _do_rescan(cwd_filter, days, sessions)
+            except Exception:
+                _r = None
+            if _r is not None:
+                live, registry, overlay, done = (_r.live, _r.registry,
+                                                 _r.overlay, _r.done)
+                _new = newly_waiting(waiting_seen, _r.waiting)
+                waiting_seen = _r.waiting
+                sel = min(sel, max(0, len(sessions) - 1))
+                top = max(0, min(top, max(0, len(sessions) - 1)))
+                if _new:
+                    try:
+                        curses.beep()
+                    except curses.error:
+                        pass
+                    _ids = sorted(i[:8] for i in _new)
+                    n = len(_new)
+                    toast = (f"⚠ {n} now waiting: " + ", ".join(_ids[:3])
+                             + ("" if n <= 3 else f" +{n-3}"))
+                    _notify_macos(_alarm_body(_new))
         stdscr.erase()
         h, w = stdscr.getmaxyx()
         items = filtered()
