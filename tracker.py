@@ -77,6 +77,11 @@ def status_label(st: str) -> str:
     return f"{st} {STATUS_LABELS.get(st, '')}".rstrip()
 
 
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║ ADAPTER LAYER — OS/terminal integration. Domain-aware (knows resume    ║
+# ║ commands & session alarms) but isolated from data model / rendering.   ║
+# ╚══════════════════════════════════════════════════════════════════════╝
+
 # ---------- terminal-window spawning ----------
 
 def _applescript_escape(s: str) -> str:
@@ -414,6 +419,12 @@ def open_in_new_terminal(cwd: str, session_id: str,
     return False, f"unsupported platform: {sys.platform}"
 
 
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║ UTIL LAYER — domain-agnostic, reusable helpers (string/width/time/IO). ║
+# ║ Contract: nothing here may reference SessionMeta, status glyphs,       ║
+# ║ caches, or argparse. Safe to lift into a module verbatim.              ║
+# ╚══════════════════════════════════════════════════════════════════════╝
+
 # ---------- display width helpers (Korean/East-Asian-aware) ----------
 
 def display_width(s: str) -> int:
@@ -525,6 +536,11 @@ def truncate(s: str, n: int) -> str:
     s = " ".join(s.split())
     return s if len(s) <= n else s[: n - 1] + "…"
 
+
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║ CORE LAYER — domain model & state: live/registry/overlay/done, status  ║
+# ║ resolution, SessionMeta, loading/cache. No printing, no argparse.      ║
+# ╚══════════════════════════════════════════════════════════════════════╝
 
 # ---------- live process registry ----------
 
@@ -690,6 +706,34 @@ def resolve_status(session_id: str, live: set[str], done: set[str],
         overlay=(overlay or {}).get(session_id),
         reg=(registry or {}).get(session_id),
     )
+
+
+@dataclass
+class StatusContext:
+    """Bundles the four status sources (live / done / registry / overlay) so
+    commands resolve status without re-deriving the quad in every function.
+    Replaces the repeated scan_live_sessions/scan_registry_status/
+    status_overlay/done_ids boilerplate across the CLI and TUI."""
+    live: set[str]
+    done: set[str]
+    registry: dict
+    overlay: dict
+
+    @classmethod
+    def capture(cls) -> "StatusContext":
+        live, _ = scan_live_sessions()
+        return cls(live=live, done=done_ids(),
+                   registry=scan_registry_status(), overlay=status_overlay())
+
+    def resolve(self, session_id: str) -> str:
+        return resolve_status(session_id, self.live, self.done,
+                              self.registry, self.overlay)
+
+    def counts(self, sessions) -> dict:
+        c = {g: 0 for g in STATUS_ALL}
+        for s in sessions:
+            c[self.resolve(s.session_id)] += 1
+        return c
 
 
 def _iso_to_ms(iso: str | None) -> int | None:
@@ -1027,14 +1071,17 @@ def load_all_sessions(
     return out
 
 
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║ CLI LAYER — thin orchestration: parse args → call CORE → render/print. ║
+# ║ Commands should not re-derive status context or re-scan transcripts;   ║
+# ║ use the shared CORE helpers (StatusContext, require_session, …).       ║
+# ╚══════════════════════════════════════════════════════════════════════╝
+
 # ---------- CLI: list ----------
 
 def cmd_list(args: argparse.Namespace) -> int:
     sessions = load_all_sessions(cwd_filter=args.cwd, days=args.days, progress=True)
-    live, _ = scan_live_sessions()
-    registry = scan_registry_status()
-    overlay = status_overlay()
-    done = done_ids()
+    ctx = StatusContext.capture()
     if args.status:
         wanted = {
             "active": STATUS_WORKING, "working": STATUS_WORKING,
@@ -1045,8 +1092,7 @@ def cmd_list(args: argparse.Namespace) -> int:
         }.get(args.status.lower())
         if wanted:
             sessions = [s for s in sessions
-                        if resolve_status(s.session_id, live, done,
-                                           registry, overlay) == wanted]
+                        if ctx.resolve(s.session_id) == wanted]
     if args.limit:
         sessions = sessions[: args.limit]
     if not sessions:
@@ -1068,7 +1114,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     print(header)
     print("-" * max(110, min(200, len(header) + 20)))
     for idx, s in enumerate(sessions, 1):
-        st = resolve_status(s.session_id, live, done, registry, overlay)
+        st = ctx.resolve(s.session_id)
         sid = s.session_id[:8]
         ts = fmt_ts(s.last_ts)
         first = truncate(s.first_user_msg, 60) or "(no user message)"
@@ -1082,10 +1128,7 @@ def cmd_list(args: argparse.Namespace) -> int:
             f"{pad_display(truncate_display(first, 60), 60)}  "
             f"{proj}"
         )
-    counts = {g: 0 for g in STATUS_ALL}
-    for s in sessions:
-        counts[resolve_status(s.session_id, live, done,
-                              registry, overlay)] += 1
+    counts = ctx.counts(sessions)
     summary = "  ".join(f"{status_label(g)}:{counts[g]}"
                         for g in STATUS_ALL if counts[g])
     print(f"\n{len(sessions)} session(s)  [{summary}]")
@@ -1134,12 +1177,9 @@ def cmd_search(args: argparse.Namespace) -> int:
     if not hits:
         print(f"(no matches for {args.query!r})")
         return 0
-    live, _ = scan_live_sessions()
-    registry = scan_registry_status()
-    overlay = status_overlay()
-    done = done_ids()
+    ctx = StatusContext.capture()
     for meta, matches in hits:
-        st = resolve_status(meta.session_id, live, done, registry, overlay)
+        st = ctx.resolve(meta.session_id)
         print(f"\n{status_label(st)}  {meta.session_id[:8]}  {fmt_ts(meta.last_ts)}  "
               f"{shorten_path(meta.cwd)}  ({len(matches)} hit(s))")
         for ts, role, snippet in matches[:3]:
@@ -1174,8 +1214,11 @@ def list_subagents(parent_path: Path) -> list[tuple[Path, dict]]:
     return out
 
 
-def _print_transcript(path: Path, max_chars: int, indent: str = "") -> int:
-    count = 0
+def iter_messages(path: Path) -> "Iterator[tuple[str, str, str]]":
+    """Shared transcript-iteration contract: yield (etype, ts_str, text) for
+    each user/assistant message with non-empty text. Every renderer (tty /
+    txt / md) consumes this so the filter/extract logic lives in one place;
+    only the per-format header & message styling differ downstream."""
     for evt in iter_jsonl(path):
         etype = evt.get("type")
         if etype not in ("user", "assistant"):
@@ -1184,6 +1227,12 @@ def _print_transcript(path: Path, max_chars: int, indent: str = "") -> int:
         text = extract_text((evt.get("message") or {}).get("content")).strip()
         if not text:
             continue
+        yield etype, ts, text
+
+
+def _print_transcript(path: Path, max_chars: int, indent: str = "") -> int:
+    count = 0
+    for etype, ts, text in iter_messages(path):
         if len(text) > max_chars:
             text = text[:max_chars] + f"… (+{len(text) - max_chars} chars)"
         prefix = "🧑" if etype == "user" else "🤖"
@@ -1195,15 +1244,11 @@ def _print_transcript(path: Path, max_chars: int, indent: str = "") -> int:
 
 
 def cmd_show(args: argparse.Namespace) -> int:
-    target = find_session(args.session_id)
-    if not target:
-        print(f"(no session matching {args.session_id!r})", file=sys.stderr)
+    target = require_session(args.session_id)
+    if target is None:
         return 1
-    live, _ = scan_live_sessions()
-    registry = scan_registry_status()
-    overlay = status_overlay()
-    done = done_ids()
-    st = resolve_status(target.session_id, live, done, registry, overlay)
+    ctx = StatusContext.capture()
+    st = ctx.resolve(target.session_id)
     print(f"Session:  {target.session_id}")
     print(f"Status:   {status_label(st)}")
     print(f"Cwd:      {target.cwd}")
@@ -1244,14 +1289,7 @@ def _build_export_text(target: "SessionMeta", st: str) -> str:
     lines.append(f"Last:     {fmt_ts(target.last_ts)}")
     lines.append(f"Messages: {target.msg_count}")
     lines.append("-" * 80)
-    for evt in iter_jsonl(target.path):
-        etype = evt.get("type")
-        if etype not in ("user", "assistant"):
-            continue
-        ts = fmt_ts(parse_ts(evt.get("timestamp")))
-        text = extract_text((evt.get("message") or {}).get("content")).strip()
-        if not text:
-            continue
+    for etype, ts, text in iter_messages(target.path):
         prefix = "🧑" if etype == "user" else "🤖"
         lines.append(f"\n{prefix} [{ts}]")
         lines.extend(text.splitlines() or [""])
@@ -1271,14 +1309,7 @@ def _build_export_md(target: "SessionMeta", st: str) -> str:
     lines.append(f"**Messages:** {target.msg_count}  ")
     lines.append("")
     lines.append("---")
-    for evt in iter_jsonl(target.path):
-        etype = evt.get("type")
-        if etype not in ("user", "assistant"):
-            continue
-        ts = fmt_ts(parse_ts(evt.get("timestamp")))
-        text = extract_text((evt.get("message") or {}).get("content")).strip()
-        if not text:
-            continue
+    for etype, ts, text in iter_messages(target.path):
         prefix = "🧑 User" if etype == "user" else "🤖 Assistant"
         lines.append(f"\n## {prefix} [{ts}]")
         lines.append("")
@@ -1287,11 +1318,7 @@ def _build_export_md(target: "SessionMeta", st: str) -> str:
 
 
 def export_session(target: "SessionMeta", fmt: str, out: str | None) -> Path:
-    live, _ = scan_live_sessions()
-    registry = scan_registry_status()
-    overlay = status_overlay()
-    done = done_ids()
-    st = resolve_status(target.session_id, live, done, registry, overlay)
+    st = StatusContext.capture().resolve(target.session_id)
 
     if fmt == "txt":
         content = _build_export_text(target, st)
@@ -1314,9 +1341,8 @@ def export_session(target: "SessionMeta", fmt: str, out: str | None) -> Path:
 
 
 def cmd_export(args: argparse.Namespace) -> int:
-    target = find_session(args.session_id)
-    if not target:
-        print(f"(no session matching {args.session_id!r})", file=sys.stderr)
+    target = require_session(args.session_id)
+    if target is None:
         return 1
     dest = export_session(target, args.format, args.out)
     print(f"Exported: {dest}")
@@ -1324,9 +1350,8 @@ def cmd_export(args: argparse.Namespace) -> int:
 
 
 def cmd_subagents(args: argparse.Namespace) -> int:
-    target = find_session(args.session_id)
-    if not target:
-        print(f"(no session matching {args.session_id!r})", file=sys.stderr)
+    target = require_session(args.session_id)
+    if target is None:
         return 1
     subs = list_subagents(target.path)
     if not subs:
@@ -1365,9 +1390,8 @@ def cmd_subagents(args: argparse.Namespace) -> int:
 
 
 def cmd_resume(args: argparse.Namespace) -> int:
-    target = find_session(args.session_id)
-    if not target:
-        print(f"(no session matching {args.session_id!r})", file=sys.stderr)
+    target = require_session(args.session_id)
+    if target is None:
         return 1
     cwd = target.cwd or "."
     skip_flag = " --dangerously-skip-permissions" if getattr(args, "skip_perm", False) else ""
@@ -1390,9 +1414,8 @@ def cmd_resume(args: argparse.Namespace) -> int:
 # ---------- CLI: done / undone / live ----------
 
 def cmd_done(args: argparse.Namespace) -> int:
-    target = find_session(args.session_id)
-    if not target:
-        print(f"(no session matching {args.session_id!r})", file=sys.stderr)
+    target = require_session(args.session_id)
+    if target is None:
         return 1
     set_done(target.session_id, True)
     print(f"✓ Marked done: {target.session_id[:8]}  {shorten_path(target.cwd)}")
@@ -1400,9 +1423,8 @@ def cmd_done(args: argparse.Namespace) -> int:
 
 
 def cmd_undone(args: argparse.Namespace) -> int:
-    target = find_session(args.session_id)
-    if not target:
-        print(f"(no session matching {args.session_id!r})", file=sys.stderr)
+    target = require_session(args.session_id)
+    if target is None:
         return 1
     set_done(target.session_id, False)
     print(f"✓ Cleared done: {target.session_id[:8]}  {shorten_path(target.cwd)}")
@@ -3463,10 +3485,19 @@ def relocate_session(target: "SessionMeta", new_cwd: str, *,
                           )._with_warnings(sub_warn, orig_warn)
 
 
+def confirm(prompt: str) -> bool:
+    """Interactive y/N gate shared by relocate / backup / restore. Returns
+    True iff the user typed y/yes; otherwise prints 'Aborted.' and returns
+    False. Callers still own the `if not args.yes:` guard and dry-run path."""
+    if input(prompt).strip().lower() in ("y", "yes"):
+        return True
+    print("Aborted.")
+    return False
+
+
 def cmd_relocate(args: argparse.Namespace) -> int:
-    target = find_session(args.session_id)
-    if not target:
-        print(f"(no session matching {args.session_id!r})", file=sys.stderr)
+    target = require_session(args.session_id)
+    if target is None:
         return 1
 
     preview = relocate_session(target, args.new_cwd,
@@ -3499,9 +3530,7 @@ def cmd_relocate(args: argparse.Namespace) -> int:
         return 0
 
     if not args.yes:
-        reply = input("Proceed? [y/N] ").strip().lower()
-        if reply not in ("y", "yes"):
-            print("Aborted.")
+        if not confirm("Proceed? [y/N] "):
             return 0
 
     result = relocate_session(target, args.new_cwd,
@@ -3578,9 +3607,7 @@ def cmd_backup(args: argparse.Namespace) -> int:
     if not args.yes:
         action = "archive and DELETE" if args.delete else "archive"
         print(f"Will {action} {len(old)} session(s) → {shorten_path(str(out_path))}")
-        reply = input("Proceed? [y/N] ").strip().lower()
-        if reply not in ("y", "yes"):
-            print("Aborted.")
+        if not confirm("Proceed? [y/N] "):
             return 0
 
     manifest = {
@@ -3751,9 +3778,8 @@ def cmd_restore(args: argparse.Namespace) -> int:
             return 0
 
         if not args.yes:
-            reply = input(f"Restore {len(plans)} file(s) to {shorten_path(str(dest_root))}? [y/N] ").strip().lower()
-            if reply not in ("y", "yes"):
-                print("Aborted.")
+            if not confirm(f"Restore {len(plans)} file(s) to "
+                           f"{shorten_path(str(dest_root))}? [y/N] "):
                 return 0
 
         written = 0
@@ -3803,17 +3829,11 @@ def cmd_restore(args: argparse.Namespace) -> int:
 
 def cmd_stats(args: argparse.Namespace) -> int:
     sessions = load_all_sessions()
-    live, _ = scan_live_sessions()
-    registry = scan_registry_status()
-    overlay = status_overlay()
-    done = done_ids()
+    ctx = StatusContext.capture()
     total_msgs = sum(s.msg_count for s in sessions)
     print(f"Total sessions:  {len(sessions)}")
     print(f"Total messages:  {total_msgs}")
-    counts = {g: 0 for g in STATUS_ALL}
-    for s in sessions:
-        counts[resolve_status(s.session_id, live, done,
-                              registry, overlay)] += 1
+    counts = ctx.counts(sessions)
     for g in STATUS_ALL:
         print(f"  {status_label(g)}: {counts[g]}")
     if not sessions:
@@ -3849,6 +3869,18 @@ def find_session(prefix: str) -> SessionMeta | None:
             print(f"  {m.stem}", file=sys.stderr)
         return None
     return load_session_meta(matches[0])
+
+
+def require_session(prefix: str) -> "SessionMeta | None":
+    """find_session + the standard not-found guard. Returns the resolved
+    session, or prints the miss message to stderr and returns None so the
+    caller can `return 1`. (find_session already prints its own message
+    for the ambiguous case; this preserves that two-line behavior.)"""
+    target = find_session(prefix)
+    if not target:
+        print(f"(no session matching {prefix!r})", file=sys.stderr)
+        return None
+    return target
 
 
 # ---------- argparse / main ----------
@@ -3997,18 +4029,14 @@ def main() -> int:
 
     skip_perm = bool(getattr(args, "skip_perm", False))
 
-    # --tui overrides; launches the picker regardless of subcommand
-    if getattr(args, "tui", False) and not getattr(args, "cmd", None):
-        ns = argparse.Namespace(cwd=None, days=None, func=cmd_pick,
-                                skip_perm=skip_perm)
-        return cmd_pick(ns)
-
+    # No subcommand: synthesize the default one FROM the parser so its
+    # defaults can never drift from the subparser definition (the old
+    # hand-built Namespaces silently broke when an arg was added). --tui
+    # (only when no subcommand) launches the picker; else show the list.
     if not getattr(args, "cmd", None):
-        # Default CLI behavior: show the list
-        ns = argparse.Namespace(
-            cwd=None, days=None, limit=30, status=None, func=cmd_list
-        )
-        return cmd_list(ns)
+        default_cmd = "pick" if getattr(args, "tui", False) else "list"
+        args = ap.parse_args([default_cmd])
+        args.skip_perm = skip_perm
     return args.func(args)
 
 
