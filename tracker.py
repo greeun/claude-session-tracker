@@ -735,6 +735,10 @@ class StatusContext:
             c[self.resolve(s.session_id)] += 1
         return c
 
+    def waiting(self, sessions) -> set:
+        return waiting_ids(sessions, self.live, self.done,
+                           self.registry, self.overlay)
+
 
 def _iso_to_ms(iso: str | None) -> int | None:
     """ISO-8601 string -> epoch milliseconds, or None if unparseable."""
@@ -2059,24 +2063,17 @@ def _auto_rescan_modal(stdscr, enabled: bool, interval: int):
 
 @dataclass
 class RescanResult:
-    live: set[str]
-    registry: dict[str, dict]
-    overlay: dict[str, dict]
-    done: set[str]
+    ctx: StatusContext
     waiting: set[str]
 
 
 def _do_rescan(cwd_filter, days, sessions) -> RescanResult:
-    """Reload sessions (in place) + live/registry/overlay/done. Shared by
-    the manual R key and the TUI auto-rescan tick."""
+    """Reload sessions (in place) + status context. Shared by the manual R
+    key and the TUI auto-rescan tick."""
     fresh = load_all_sessions(cwd_filter=cwd_filter, days=days, progress=False)
     sessions[:] = fresh
-    live, _registered = scan_live_sessions()
-    registry = scan_registry_status()
-    overlay = status_overlay()
-    done = done_ids()
-    return RescanResult(live, registry, overlay, done,
-                        waiting_ids(sessions, live, done, registry, overlay))
+    ctx = StatusContext.capture()
+    return RescanResult(ctx, ctx.waiting(sessions))
 
 
 def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
@@ -2108,13 +2105,10 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
     stdscr.keypad(True)
 
     sessions = sessions_ref  # mutable list we can swap contents on rescan
-    live, _registered = scan_live_sessions()
-    registry = scan_registry_status()
-    overlay = status_overlay()
-    done = done_ids()
+    ctx = StatusContext.capture()
     auto_enabled, auto_interval = load_auto_rescan()
     last_rescan = time.monotonic()
-    waiting_seen = waiting_ids(sessions, live, done, registry, overlay)
+    waiting_seen = ctx.waiting(sessions)
 
     query = ""
     sel = 0
@@ -2150,7 +2144,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
         else:
             pool = sessions
         if hide_done:
-            pool = [s for s in pool if s.session_id not in done]
+            pool = [s for s in pool if s.session_id not in ctx.done]
         if cwd_only and launch_cwd:
             pool = [s for s in pool
                     if unicodedata.normalize("NFC", s.cwd or "").startswith(launch_cwd)]
@@ -2507,8 +2501,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             except Exception:
                 _r = None
             if _r is not None:
-                live, registry, overlay, done = (_r.live, _r.registry,
-                                                 _r.overlay, _r.done)
+                ctx = _r.ctx
                 _new = newly_waiting(waiting_seen, _r.waiting)
                 waiting_seen = _r.waiting
                 sel = min(sel, max(0, len(sessions) - 1))
@@ -2536,10 +2529,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             f"  🔎 {search_query!r}→{len(search_hits)}"
             if search_hits is not None else ""
         )
-        scounts = {g: 0 for g in STATUS_ALL}
-        for s in items:
-            scounts[resolve_status(s.session_id, live, done,
-                                   registry, overlay)] += 1
+        scounts = ctx.counts(items)
         hide_hint = "  [✓ hidden]" if hide_done else ""
         cwd_hint = f"  [📂 {shorten_path(launch_cwd)}]" if cwd_only else ""
         auto_hint = (f"  ⟳{auto_interval}s"
@@ -2627,7 +2617,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             if idx >= len(items):
                 break
             s = items[idx]
-            st = resolve_status(s.session_id, live, done, registry, overlay)
+            st = ctx.resolve(s.session_id)
             ts = fmt_ts(s.last_ts)
             sid = s.session_id[:8]
             is_sel = idx == sel
@@ -2814,13 +2804,12 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                 if items:
                     target_sid = items[sel].session_id
                     now_done = mark_done(target_sid)
-                    done = done_ids()
+                    ctx.done = done_ids()
                     toast = ("Marked done" if now_done
                              else "Cleared done") + f": {target_sid[:8]}"
             elif ch == 18:  # Ctrl-R — rescan (mirrors normal-mode R)
                 _r = _do_rescan(cwd_filter, days, sessions)
-                live, registry, overlay, done = (_r.live, _r.registry,
-                                                 _r.overlay, _r.done)
+                ctx = _r.ctx
                 waiting_seen = _r.waiting          # silent baseline reset
                 sel = min(sel, max(0, len(sessions) - 1))
                 top = max(0, min(top, max(0, len(sessions) - 1)))
@@ -2922,8 +2911,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
         elif ch in (ord('v'), ord('V')):
             if items:
                 target = items[sel]
-                st = resolve_status(target.session_id, live, done,
-                                    registry, overlay)
+                st = ctx.resolve(target.session_id)
                 _preview_modal(stdscr, target, st)
         elif ch in (ord('e'), ord('E')):
             if items:
@@ -2938,13 +2926,13 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                 target_sids = [s.session_id for s in sessions if s.session_id in marked]
                 for sid in target_sids:
                     set_done(sid, True)
-                done = done_ids()
+                ctx.done = done_ids()
                 marked.clear()
                 toast = f"Marked done: {len(target_sids)} session(s)"
             elif items:
                 target_sid = items[sel].session_id
                 now_done = mark_done(target_sid)
-                done = done_ids()
+                ctx.done = done_ids()
                 toast = ("Marked done" if now_done else "Cleared done") \
                         + f": {target_sid[:8]}"
         elif ch in (ord('a'), ord('A')):
@@ -2982,15 +2970,11 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             except curses.error:
                 pass
             _r = _do_rescan(cwd_filter, days, sessions)
-            live, registry, overlay, done = (_r.live, _r.registry,
-                                             _r.overlay, _r.done)
+            ctx = _r.ctx
             waiting_seen = _r.waiting          # manual: silent baseline reset
             sel = min(sel, max(0, len(sessions) - 1))
             top = max(0, min(top, max(0, len(sessions) - 1)))
-            _tc = {g: 0 for g in STATUS_ALL}
-            for s in sessions:
-                _tc[resolve_status(s.session_id, live, done,
-                                   registry, overlay)] += 1
+            _tc = ctx.counts(sessions)
             toast = (f"Rescanned: {len(sessions)} session(s)  "
                      f"{STATUS_WORKING}{_tc[STATUS_WORKING]} "
                      f"{STATUS_WAITING}{_tc[STATUS_WAITING]} "
@@ -3023,7 +3007,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                 for s in targets:
                     ds.pop(s.session_id, None)
                 save_state(state)
-                done = done_ids()
+                ctx.done = done_ids()
                 dead_ids = {s.session_id for s in targets}
                 sessions[:] = [s for s in sessions if s.session_id not in dead_ids]
                 marked -= dead_ids
