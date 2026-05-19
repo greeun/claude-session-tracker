@@ -2038,6 +2038,8 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
     top = 0
     marked: set[str] = set()
     toast: str = ""
+    toast_deadline = 0.0
+    _toast_shown = ""
     search_query: str = ""
     search_hits: dict[str, str] | None = None
     search_mode: bool = False  # True while typing inside the `/` prompt
@@ -2430,9 +2432,9 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                 except curses.error:
                     pass
                 _ids = sorted(i[:8] for i in _new)
-                toast = ("⚠ " + str(len(_new)) + " now waiting: "
-                         + ", ".join(_ids[:3])
-                         + ("" if len(_ids) <= 3 else f" +{len(_ids)-3}"))
+                n = len(_new)
+                toast = (f"⚠ {n} now waiting: " + ", ".join(_ids[:3])
+                         + ("" if n <= 3 else f" +{n-3}"))
                 _notify_macos(_alarm_body(_new))
         stdscr.erase()
         h, w = stdscr.getmaxyx()
@@ -2581,12 +2583,17 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
 
         # footer line
         if toast:
+            if toast != _toast_shown:
+                _toast_shown = toast
+                toast_deadline = time.monotonic() + 5.0
             try:
                 stdscr.addnstr(h - 1, 0, f" {toast} ".ljust(w - 1), w - 1,
                                curses.color_pair(5) | curses.A_BOLD)
             except curses.error:
                 pass
-            toast = ""
+            if time.monotonic() >= toast_deadline:
+                toast = ""
+                _toast_shown = ""
         elif items:
             s = items[sel]
             info_bits = [
@@ -2721,12 +2728,10 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                     toast = ("Marked done" if now_done
                              else "Cleared done") + f": {target_sid[:8]}"
             elif ch == 18:  # Ctrl-R — rescan (mirrors normal-mode R)
-                fresh = load_all_sessions(cwd_filter=cwd_filter, days=days, progress=False)
-                sessions[:] = fresh
-                live, _registered = scan_live_sessions()
-                registry = scan_registry_status()
-                overlay = status_overlay()
-                done = done_ids()
+                _r = _do_rescan(cwd_filter, days, sessions)
+                live, registry, overlay, done = (_r.live, _r.registry,
+                                                 _r.overlay, _r.done)
+                waiting_seen = _r.waiting          # silent baseline reset
                 sel = min(sel, max(0, len(sessions) - 1))
                 top = max(0, min(top, max(0, len(sessions) - 1)))
                 toast = f"Rescanned: {len(sessions)} session(s)"
