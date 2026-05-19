@@ -84,7 +84,10 @@ def _applescript_escape(s: str) -> str:
 
 
 def _alarm_body(new_ids: set[str]) -> str:
-    """Human notification body for sessions that just entered waiting."""
+    """Human notification body for sessions that just entered waiting.
+
+    Caller guarantees new_ids is non-empty (only invoked when there is a
+    not-! -> ! transition)."""
     ids = sorted(new_ids)
     n = len(ids)
     shown = ", ".join(i[:8] for i in ids[:3])

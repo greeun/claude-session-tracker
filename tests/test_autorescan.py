@@ -117,6 +117,7 @@ class TestAlarmBody(unittest.TestCase):
         ids = {f"id{i:06d}" for i in range(6)}
         b = tk._alarm_body(ids)
         self.assertTrue(b.startswith("6 session(s) waiting for you: "))
+        self.assertIn("id000000, id000001, id000002", b)
         self.assertIn("+3 more", b)
 
     def test_deterministic_order(self):
