@@ -1777,6 +1777,7 @@ HELP_LINES = [
     "      Esc                clear query and exit prompt",
     "",
     "Session actions (normal mode)",
+    "  a / A                  auto-rescan interval popup (Off/5/10/30/60/120s)",
     "  v / V                  preview the focused session (read-only modal)",
     "                         ↑↓ scroll · PgUp/PgDn page · g/G top/bottom · q/Esc/v close",
     "  e / E                  export focused session transcript to .md in cwd",
@@ -1968,6 +1969,63 @@ def _show_help_modal(stdscr):
                 pass
         win.refresh()
         win.getch()
+    finally:
+        del win
+        stdscr.touchwin()
+        stdscr.refresh()
+
+
+def _auto_rescan_modal(stdscr, enabled: bool, interval: int):
+    """Popup to pick the auto-rescan interval. Returns (enabled, interval)
+    on apply, or None on cancel."""
+    import curses
+    rows = [("Off", 0)] + [(f"{p}s", p) for p in AUTO_RESCAN_PRESETS]
+    cur = 0 if (not enabled or interval <= 0) else next(
+        (i for i, (_, v) in enumerate(rows) if v == interval), 1)
+    h, w = stdscr.getmaxyx()
+    box_w = min(40, max(24, w - 4))
+    box_h = len(rows) + 4
+    y0 = max(0, (h - box_h) // 2)
+    x0 = max(0, (w - box_w) // 2)
+    win = curses.newwin(box_h, box_w, y0, x0)
+    win.keypad(True)
+    try:
+        while True:
+            win.erase()
+            win.box()
+            try:
+                win.addnstr(0, 2, " auto-rescan ", box_w - 4,
+                            curses.color_pair(2) | curses.A_BOLD)
+                win.addnstr(1, 2, "↑↓/1-6  Enter apply  Esc cancel",
+                            box_w - 4, curses.A_DIM)
+            except curses.error:
+                pass
+            for i, (label, _v) in enumerate(rows):
+                mark = "▶ " if i == cur else "  "
+                attr = (curses.color_pair(1) if i == cur
+                        else curses.A_NORMAL)
+                try:
+                    win.addnstr(3 + i, 2, f"{mark}{label}", box_w - 4, attr)
+                except curses.error:
+                    pass
+            win.refresh()
+            k = win.getch()
+            if k in (27, ord('q')):                       # Esc / q
+                return None
+            if k in (curses.KEY_UP, 16):
+                cur = (cur - 1) % len(rows)
+            elif k in (curses.KEY_DOWN, 14):
+                cur = (cur + 1) % len(rows)
+            elif ord('1') <= k <= ord('6'):
+                idx = k - ord('1')
+                if idx < len(rows):
+                    cur = idx
+            elif k in (curses.KEY_ENTER, 10, 13):
+                label, v = rows[cur]
+                if v == 0:
+                    return (False, interval if interval > 0
+                            else AUTO_RESCAN_DEFAULT_INTERVAL)
+                return (True, v)
     finally:
         del win
         stdscr.touchwin()
@@ -2455,6 +2513,8 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                                    registry, overlay)] += 1
         hide_hint = "  [✓ hidden]" if hide_done else ""
         cwd_hint = f"  [📂 {shorten_path(launch_cwd)}]" if cwd_only else ""
+        auto_hint = (f"  ⟳{auto_interval}s"
+                     if (auto_enabled and auto_interval > 0) else "  ⟳off")
         header = (
             f" claude-session-tracker v{__version__}  "
             f"{len(items)}/{len(sessions)}  "
@@ -2463,8 +2523,9 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             f"{STATUS_IDLE}{scounts[STATUS_IDLE]} "
             f"{STATUS_ENDED}{scounts[STATUS_ENDED]} "
             f"{STATUS_DONE}{scounts[STATUS_DONE]}"
+            f"{auto_hint}"
             f"{mark_hint}{search_hint}{hide_hint}{cwd_hint}"
-            "   ? help  Enter open  / filter  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit "
+            "   ? help  Enter open  / filter  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit "
         )
         if search_mode:
             prompt = f"/ {query}"
@@ -2857,6 +2918,14 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                 done = done_ids()
                 toast = ("Marked done" if now_done else "Cleared done") \
                         + f": {target_sid[:8]}"
+        elif ch in (ord('a'), ord('A')):
+            _res = _auto_rescan_modal(stdscr, auto_enabled, auto_interval)
+            if _res is not None:
+                auto_enabled, auto_interval = _res
+                save_auto_rescan(auto_enabled, auto_interval)
+                last_rescan = time.monotonic()
+                toast = ("Auto-rescan: off" if not auto_enabled
+                         else f"Auto-rescan: every {auto_interval}s")
         elif ch in (ord('H'), ord('h')):
             # No Ctrl-H alias: Ctrl-H == ASCII 8 == Backspace on most terminals.
             hide_done = not hide_done
