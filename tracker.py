@@ -1999,6 +1999,7 @@ def _do_rescan(cwd_filter, days, sessions) -> RescanResult:
 def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
              days: int | None, skip_perm_default: bool = False):
     import curses
+    import time
     curses.curs_set(0)
     try:
         curses.use_default_colors()
@@ -2028,6 +2029,9 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
     registry = scan_registry_status()
     overlay = status_overlay()
     done = done_ids()
+    auto_enabled, auto_interval = load_auto_rescan()
+    last_rescan = time.monotonic()
+    waiting_seen = waiting_ids(sessions, live, done, registry, overlay)
 
     query = ""
     sel = 0
@@ -2410,6 +2414,26 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
         return ("cancel", None)
 
     while True:
+        if (auto_enabled and auto_interval > 0 and not search_mode
+                and time.monotonic() - last_rescan >= auto_interval):
+            _r = _do_rescan(cwd_filter, days, sessions)
+            live, registry, overlay, done = (_r.live, _r.registry,
+                                             _r.overlay, _r.done)
+            _new = newly_waiting(waiting_seen, _r.waiting)
+            waiting_seen = _r.waiting
+            last_rescan = time.monotonic()
+            sel = min(sel, max(0, len(sessions) - 1))
+            top = max(0, min(top, max(0, len(sessions) - 1)))
+            if _new:
+                try:
+                    curses.beep()
+                except curses.error:
+                    pass
+                _ids = sorted(i[:8] for i in _new)
+                toast = ("⚠ " + str(len(_new)) + " now waiting: "
+                         + ", ".join(_ids[:3])
+                         + ("" if len(_ids) <= 3 else f" +{len(_ids)-3}"))
+                _notify_macos(_alarm_body(_new))
         stdscr.erase()
         h, w = stdscr.getmaxyx()
         items = filtered()
@@ -2592,6 +2616,10 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
         # KEY_UP/KEY_DOWN ints. getch() + keypad(True) handles special keys
         # reliably, and for multi-byte text input (Korean etc.) we assemble
         # the UTF-8 sequence ourselves.
+        if auto_enabled and auto_interval > 0 and not search_mode:
+            stdscr.timeout(AUTO_RESCAN_TICK_MS)
+        else:
+            stdscr.timeout(-1)
         try:
             b = stdscr.getch()
         except curses.error:
@@ -2853,6 +2881,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             _r = _do_rescan(cwd_filter, days, sessions)
             live, registry, overlay, done = (_r.live, _r.registry,
                                              _r.overlay, _r.done)
+            waiting_seen = _r.waiting          # manual: silent baseline reset
             sel = min(sel, max(0, len(sessions) - 1))
             top = max(0, min(top, max(0, len(sessions) - 1)))
             _tc = {g: 0 for g in STATUS_ALL}
