@@ -725,6 +725,8 @@ def load_auto_rescan() -> tuple[bool, int]:
 
 
 def save_auto_rescan(enabled: bool, interval: int) -> None:
+    if interval not in AUTO_RESCAN_PRESETS:
+        interval = AUTO_RESCAN_DEFAULT_INTERVAL
     st = load_state()
     st["auto_rescan"] = {"enabled": bool(enabled), "interval": int(interval)}
     save_state(st)
@@ -735,7 +737,7 @@ def newly_waiting(prev: set[str], cur: set[str]) -> set[str]:
     return cur - prev
 
 
-def waiting_ids(sessions, live: set[str], done: set[str],
+def waiting_ids(sessions: list, live: set[str], done: set[str],
                 registry: dict, overlay: dict) -> set[str]:
     """Session ids currently resolving to STATUS_WAITING."""
     return {s.session_id for s in sessions

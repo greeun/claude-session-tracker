@@ -33,8 +33,8 @@ class TestLoadSaveAutoRescan(unittest.TestCase):
         p.write_text("{}")
         self.assertEqual(tk.load_auto_rescan(), (True, 10))
 
-    def test_default_when_missing_file(self):
-        self._tmp_state()  # empty file -> load_state returns {}
+    def test_default_when_empty_file(self):
+        self._tmp_state()  # empty content -> JSONDecodeError -> load_state returns {}
         self.assertEqual(tk.load_auto_rescan(), (True, 10))
 
     def test_corrupt_or_out_of_range_falls_back(self):
@@ -42,6 +42,8 @@ class TestLoadSaveAutoRescan(unittest.TestCase):
         p.write_text(json.dumps({"auto_rescan": {"enabled": "yes", "interval": 7}}))
         self.assertEqual(tk.load_auto_rescan(), (True, 10))
         p.write_text(json.dumps({"auto_rescan": "garbage"}))
+        self.assertEqual(tk.load_auto_rescan(), (True, 10))
+        p.write_text(json.dumps({"auto_rescan": {"enabled": True, "interval": True}}))
         self.assertEqual(tk.load_auto_rescan(), (True, 10))
 
     def test_valid_round_trip(self):
