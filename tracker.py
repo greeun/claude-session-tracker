@@ -87,38 +87,13 @@ def status_label(st: str) -> str:
 def _applescript_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
-
-def _alarm_body(new_ids: set[str]) -> str:
-    """Human notification body for sessions that just entered waiting.
-
-    Caller guarantees new_ids is non-empty (only invoked when there is a
-    not-! -> ! transition)."""
-    ids = sorted(new_ids)
-    n = len(ids)
-    shown = ", ".join(i[:8] for i in ids[:3])
-    more = "" if n <= 3 else f", +{n - 3} more"
-    return f"{n} session(s) waiting for you: {shown}{more}"
-
-
-def _osascript_argv(body: str) -> list[str]:
-    """argv for a macOS desktop notification (built, not executed)."""
-    script = (f'display notification "{_applescript_escape(body)}" '
-              f'with title "cst"')
-    return ["osascript", "-e", script]
-
-
-def _notify_macos(body: str) -> None:
-    """Best-effort macOS desktop notification. Never raises."""
-    if sys.platform != "darwin":
-        return
-    try:
-        import shutil
-        import subprocess
-        if not shutil.which("osascript"):
-            return
-        subprocess.run(_osascript_argv(body), capture_output=True, timeout=5)
-    except Exception:
-        pass
+# NOTE: a macOS desktop notification was deliberately removed here. Plain
+# `osascript -e 'display notification …'` is owned by Script Editor (osascript
+# has no notification-bearing bundle id), so clicking the banner launched
+# Script Editor. There is no stdlib way to change the click owner, and
+# terminal-notifier/PyObjC violate the zero-dependency constraint. The
+# waiting-edge signal is instead carried by curses.beep() + a sticky toast
+# in the TUI loop (see the `if _new:` block).
 
 
 def open_in_new_terminal(cwd: str, session_id: str,
@@ -2515,7 +2490,6 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                     n = len(_new)
                     toast = (f"⚠ {n} now waiting: " + ", ".join(_ids[:3])
                              + ("" if n <= 3 else f" +{n-3}"))
-                    _notify_macos(_alarm_body(_new))
         stdscr.erase()
         h, w = stdscr.getmaxyx()
         items = filtered()
