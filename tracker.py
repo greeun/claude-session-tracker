@@ -1974,6 +1974,28 @@ def _show_help_modal(stdscr):
         stdscr.refresh()
 
 
+@dataclass
+class RescanResult:
+    live: set
+    registry: dict
+    overlay: dict
+    done: set
+    waiting: set
+
+
+def _do_rescan(cwd_filter, days, sessions) -> RescanResult:
+    """Reload sessions (in place) + live/registry/overlay/done. Shared by
+    the manual R key and the TUI auto-rescan tick."""
+    fresh = load_all_sessions(cwd_filter=cwd_filter, days=days, progress=False)
+    sessions[:] = fresh
+    live, _registered = scan_live_sessions()
+    registry = scan_registry_status()
+    overlay = status_overlay()
+    done = done_ids()
+    return RescanResult(live, registry, overlay, done,
+                        waiting_ids(sessions, live, done, registry, overlay))
+
+
 def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
              days: int | None, skip_perm_default: bool = False):
     import curses
@@ -2828,12 +2850,9 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                 stdscr.refresh()
             except curses.error:
                 pass
-            fresh = load_all_sessions(cwd_filter=cwd_filter, days=days, progress=False)
-            sessions[:] = fresh
-            live, _registered = scan_live_sessions()
-            registry = scan_registry_status()
-            overlay = status_overlay()
-            done = done_ids()
+            _r = _do_rescan(cwd_filter, days, sessions)
+            live, registry, overlay, done = (_r.live, _r.registry,
+                                             _r.overlay, _r.done)
             sel = min(sel, max(0, len(sessions) - 1))
             top = max(0, min(top, max(0, len(sessions) - 1)))
             _tc = {g: 0 for g in STATUS_ALL}
