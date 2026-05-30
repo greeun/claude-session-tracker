@@ -1985,8 +1985,10 @@ def _preview_modal(stdscr, target: SessionMeta, status: str) -> None:
     searching = False                          # True while typing in the `/` prompt
     matches: list[tuple[int, int, int]] = []   # (line_idx, col_start, col_end)
     cur_match = -1
-    hl_attr = curses.A_REVERSE                 # all matches
-    cur_attr = curses.A_REVERSE | curses.A_BOLD  # the current match
+    # Distinct colors so the focused match stands out from the rest.
+    # A_REVERSE is kept so matches stay visible even on colorless terminals.
+    hl_attr = curses.color_pair(2) | curses.A_REVERSE              # all matches — yellow block
+    cur_attr = curses.color_pair(9) | curses.A_REVERSE | curses.A_BOLD  # current — cyan block
 
     def _recompute(new_top: int) -> tuple[int, int]:
         """Recompute matches for the current `query`, then pick and scroll to a
