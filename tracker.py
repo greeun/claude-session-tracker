@@ -1833,6 +1833,47 @@ def _wrap_display(s: str, width: int) -> list[str]:
     return out or [""]
 
 
+def _preview_find_matches(lines: list[tuple[str, int]],
+                          query: str) -> list[tuple[int, int, int]]:
+    """All case-insensitive *literal* substring matches across preview display
+    lines. Returns (line_idx, char_start, char_end) tuples in document order.
+    Offsets are CHARACTER indices into each line's text (not display columns).
+    Empty/whitespace query -> []. `re.escape` keeps the query literal (no regex
+    metacharacters, no `|`-OR) while giving correct offsets into the original
+    text regardless of case folding."""
+    if not query.strip():
+        return []
+    rx = re.compile(re.escape(query), re.IGNORECASE)
+    out: list[tuple[int, int, int]] = []
+    for li, (text, _attr) in enumerate(lines):
+        for m in rx.finditer(text):
+            out.append((li, m.start(), m.end()))
+    return out
+
+
+def _match_step(cur: int, total: int, forward: bool) -> int:
+    """Cyclic next/prev match index. total<=0 -> -1; cur<0 -> first (forward)
+    or last (backward) match."""
+    if total <= 0:
+        return -1
+    if cur < 0:
+        return 0 if forward else total - 1
+    return (cur + 1) % total if forward else (cur - 1) % total
+
+
+def _scroll_match_into_view(line_idx: int, top: int, view_h: int,
+                            max_top: int) -> int:
+    """Return a new `top` so `line_idx` is visible within [top, top+view_h-1],
+    clamped to [0, max_top]. Keeps `top` if the line is already visible."""
+    if view_h <= 0:
+        return max(0, min(top, max_top))
+    if line_idx < top:
+        top = line_idx
+    elif line_idx > top + view_h - 1:
+        top = line_idx - view_h + 1
+    return max(0, min(top, max_top))
+
+
 def _preview_modal(stdscr, target: SessionMeta, status: str) -> None:
     """Scrollable read-only preview of the focused session's transcript.
 
