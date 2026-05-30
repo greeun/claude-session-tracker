@@ -1781,6 +1781,8 @@ HELP_LINES = [
     "  a / A                  auto-rescan interval popup (Off/5/10/30/60/120s)",
     "  v / V                  preview the focused session (read-only modal)",
     "                         ↑↓ scroll · PgUp/PgDn page · g/G top/bottom · q/Esc/v close",
+    "                         / full-text search (literal, case-insensitive)",
+    "                         n / N next/prev match · Esc clear search then close",
     "  e / E                  export focused session transcript to .md in cwd",
     "  Space                  toggle mark on the current row",
     "  Ctrl-A                 toggle mark on ALL filtered rows (select all)",
