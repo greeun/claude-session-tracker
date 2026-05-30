@@ -1962,8 +1962,6 @@ def _preview_modal(stdscr, target: SessionMeta, status: str) -> None:
             prefix = "🧑 user" if etype == "user" else "🤖 assistant"
             attr = user_attr if etype == "user" else asst_attr
             lines.append((truncate_display(f"{prefix}  [{ts}]", inner_w), attr))
-            if len(text) > 1200:
-                text = text[:1200] + f"… (+{len(text) - 1200} chars)"
             for raw_ln in text.splitlines() or [""]:
                 for ln in _wrap_display(raw_ln, inner_w):
                     lines.append((ln, 0))
@@ -1976,8 +1974,27 @@ def _preview_modal(stdscr, target: SessionMeta, status: str) -> None:
         lines.append(("(no user/assistant messages)", dim_attr))
 
     list_h = box_h - 3  # 1 top border + 1 bottom border + 1 footer line
+    view_h = max(1, list_h - 1)  # visible content rows (last inner row = footer)
     max_top = max(0, len(lines) - list_h)
     top = 0
+
+    # --- in-modal full-text search state ---
+    query = ""
+    searching = False                          # True while typing in the `/` prompt
+    matches: list[tuple[int, int, int]] = []   # (line_idx, col_start, col_end)
+    cur_match = -1
+    hl_attr = curses.A_REVERSE                 # all matches
+    cur_attr = curses.A_REVERSE | curses.A_BOLD  # the current match
+
+    def _recompute(new_top: int) -> tuple[int, int]:
+        """Recompute matches for the current `query`, then pick and scroll to a
+        match. Returns (cur_match, top)."""
+        nonlocal matches
+        matches = _preview_find_matches(lines, query)
+        if not matches:
+            return -1, max(0, min(new_top, max_top))
+        nxt = next((i for i, (ml, _, _) in enumerate(matches) if ml >= new_top), 0)
+        return nxt, _scroll_match_into_view(matches[nxt][0], new_top, view_h, max_top)
 
     while True:
         try:
@@ -1998,30 +2015,92 @@ def _preview_modal(stdscr, target: SessionMeta, status: str) -> None:
                     win.addnstr(1 + i, 2, text, box_w - 4, attr)
                 except curses.error:
                     pass
+                # overlay search highlights for any matches on this line
+                for mi, (ml, cs, ce) in enumerate(matches):
+                    if ml != idx:
+                        continue
+                    col = 2 + display_width(text[:cs])
+                    if col >= box_w - 2:
+                        continue
+                    seg_attr = cur_attr if mi == cur_match else hl_attr
+                    try:
+                        win.addnstr(1 + i, col, text[cs:ce], box_w - 2 - col, seg_attr)
+                    except curses.error:
+                        pass
             pos = f" {min(top + list_h - 1, len(lines))}/{len(lines)} "
-            prompt = " ↑↓ scroll · PgUp/PgDn page · g/G top/bottom · q/Esc/v close "
+            if searching:
+                cnt = f"[{(cur_match + 1) if matches else 0}/{len(matches)}]"
+                prompt = f" /{query}▏  {cnt}  Enter find · Esc cancel "
+            elif query:
+                cnt = f"[{(cur_match + 1) if matches else 0}/{len(matches)}]"
+                prompt = f" /{query}  {cnt}  n/N next/prev · / edit · Esc clear "
+            else:
+                prompt = " ↑↓ scroll · PgUp/PgDn · g/G · / search · q/Esc/v close "
             try:
                 win.addnstr(box_h - 2, 2, prompt, box_w - 4 - len(pos) - 1, dim_attr)
                 win.addnstr(box_h - 2, max(2, box_w - 2 - len(pos)), pos, len(pos), dim_attr)
             except curses.error:
                 pass
             win.refresh()
-            k = win.getch()
+            ch, ch_str = _read_key(win)
         except KeyboardInterrupt:
             break
-        if k in (ord('q'), ord('Q'), 27, ord('v'), ord('V')):
+
+        if ch == -1 and ch_str is None:
+            continue
+
+        if searching:
+            # --- typing inside the `/` find prompt (incremental) ---
+            if ch in (10, 13):                       # Enter — confirm, keep highlights
+                searching = False
+            elif ch == 27:                           # Esc — cancel search
+                searching = False
+                query = ""
+                matches = []
+                cur_match = -1
+            elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                query = query[:-1]
+                cur_match, top = _recompute(top)
+            elif ch == 21:                           # Ctrl-U — wipe query
+                query = ""
+                cur_match, top = _recompute(top)
+            elif ch_str is not None and ch_str.isprintable():
+                query += ch_str
+                cur_match, top = _recompute(top)
+            # any other key ignored while typing
+            continue
+
+        # --- normal preview navigation ---
+        if ch in (ord('q'), ord('Q'), ord('v'), ord('V')):
             break
-        elif k in (curses.KEY_UP, 16):
+        elif ch == 27:                               # Esc — clear search, else close
+            if query:
+                query = ""
+                matches = []
+                cur_match = -1
+            else:
+                break
+        elif ch == ord('/'):                         # start / re-edit search
+            searching = True
+        elif ch == ord('n'):                         # next match
+            if matches:
+                cur_match = _match_step(cur_match, len(matches), True)
+                top = _scroll_match_into_view(matches[cur_match][0], top, view_h, max_top)
+        elif ch == ord('N'):                         # previous match
+            if matches:
+                cur_match = _match_step(cur_match, len(matches), False)
+                top = _scroll_match_into_view(matches[cur_match][0], top, view_h, max_top)
+        elif ch in (curses.KEY_UP, 16):
             top = max(0, top - 1)
-        elif k in (curses.KEY_DOWN, 14):
+        elif ch in (curses.KEY_DOWN, 14):
             top = min(max_top, top + 1)
-        elif k == curses.KEY_PPAGE:
+        elif ch == curses.KEY_PPAGE:
             top = max(0, top - (list_h - 1))
-        elif k == curses.KEY_NPAGE:
+        elif ch == curses.KEY_NPAGE:
             top = min(max_top, top + (list_h - 1))
-        elif k in (curses.KEY_HOME, ord('g')):
+        elif ch in (curses.KEY_HOME, ord('g')):
             top = 0
-        elif k in (curses.KEY_END, ord('G')):
+        elif ch in (curses.KEY_END, ord('G')):
             top = max_top
 
     del win
