@@ -20,7 +20,7 @@ opening. Every session resolves to one of five states
   in TUI, `cst done <id>`, or the `done!` prompt hook). Persists in
   `~/.cache/claude-session-tracker/state.json`.
 
-Main script: `tracker.py` (stdlib only, Python 3.10+, v1.0.0). Installed as
+Main script: `tracker.py` (stdlib only, Python 3.10+, v1.1.0). Installed as
 `~/.local/bin/cst`.
 
 ## When to Use

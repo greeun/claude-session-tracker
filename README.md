@@ -32,7 +32,7 @@ ln -sf ~/.claude/skills/claude-session-tracker/tracker.py ~/.local/bin/cst
 
 # 3. Verify
 cst --version
-# claude-session-tracker v1.0.0
+# claude-session-tracker v1.1.0
 
 # 4. (optional) wire the 0-token done!/undone! prompt hook + status precision layer
 cst install-hook
@@ -111,7 +111,7 @@ cst list [--limit 30] [--cwd PREFIX] [--days N]
 ```
 
 ```
-claude-session-tracker v1.0.0
+claude-session-tracker v1.1.0
   #  ST  LAST ACTIVITY     SESSION   MSGS  MESSAGE                   PROJECT
   1  ●   2026-05-24 01:17  960faaa8   261  claude-sessions 는…       ~/.claude/skills
   2  !   2026-05-24 01:16  06d116f7    34  proceed? (y/N)            ~/project/url-shortener
@@ -303,7 +303,7 @@ A cursor appears on the prompt line. Live filtering happens as you type.
 ### Header bar
 
 ```
- claude-session-tracker v1.0.0  12/563  ●3 !1 ◦0 ○558 ✓1  ⟳10s  [✓ hidden]  [📂 ~/project]   ? help  Enter open  / filter  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit
+ claude-session-tracker v1.1.0  12/563  ●3 !1 ◦0 ○558 ✓1  ⟳10s  [✓ hidden]  [📂 ~/project]   ? help  Enter open  / filter  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit
 ```
 
 - `12/563` — visible rows / total sessions
