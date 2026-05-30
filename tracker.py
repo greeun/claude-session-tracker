@@ -1874,6 +1874,41 @@ def _scroll_match_into_view(line_idx: int, top: int, view_h: int,
     return max(0, min(top, max_top))
 
 
+def _read_key(win) -> tuple[int, str | None]:
+    """Read one keypress from a curses window, assembling multi-byte UTF-8 so
+    Korean/CJK input works (mirrors the main TUI loop). Returns
+    (code, char_or_None): `code` is the curses key code (>=0x100 for special
+    keys) or the codepoint for single chars, else -1. `char_or_None` is the
+    decoded printable string when applicable."""
+    b = win.getch()
+    if b < 0:
+        return (-1, None)
+    if b >= 0x100:                       # special key (KEY_UP, KEY_BACKSPACE, ...)
+        return (b, None)
+    if b < 0x80:                         # ASCII / control char
+        return (b, chr(b) if 0x20 <= b < 0x7f else None)
+    # UTF-8 lead byte — read continuation bytes for this character.
+    if b & 0xE0 == 0xC0:
+        n_more = 1
+    elif b & 0xF0 == 0xE0:
+        n_more = 2
+    elif b & 0xF8 == 0xF0:
+        n_more = 3
+    else:
+        return (-1, None)
+    buf = bytearray([b])
+    for _ in range(n_more):
+        nb = win.getch()
+        if nb < 0 or nb >= 0x100:
+            return (-1, None)
+        buf.append(nb)
+    try:
+        s = buf.decode("utf-8")
+    except UnicodeDecodeError:
+        return (-1, None)
+    return (ord(s) if len(s) == 1 else -1, s)
+
+
 def _preview_modal(stdscr, target: SessionMeta, status: str) -> None:
     """Scrollable read-only preview of the focused session's transcript.
 
