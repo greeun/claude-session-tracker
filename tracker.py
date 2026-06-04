@@ -530,39 +530,84 @@ def _macos_proc_running(proc_name: str) -> bool:
     return r.returncode == 0
 
 
+def _wezterm_gui_sockets() -> list[str]:
+    """Paths of live WezTerm gui-sock-<pid> sockets, one per GUI instance.
+
+    The user may run several independent WezTerm GUI instances, each with its
+    own mux socket; `wezterm cli list` only sees the socket it connects to. The
+    socket filename encodes the gui pid, so we skip dead instances (whose
+    sockets would otherwise hang the cli)."""
+    import glob
+    base = os.path.expanduser("~/.local/share/wezterm")
+    socks = []
+    for s in sorted(glob.glob(os.path.join(base, "gui-sock-*"))):
+        pid_str = s.rsplit("-", 1)[-1]
+        if pid_str.isdigit() and _pid_alive(int(pid_str)):
+            socks.append(s)
+    return socks
+
+
+def _wezterm_cli_list(wez: str, socket: str | None) -> str | None:
+    """`wezterm cli list --format json` against one mux socket (None = the
+    inherited/default socket). Returns stdout, or None on failure."""
+    import subprocess
+    env = None
+    if socket:
+        env = dict(os.environ)
+        env["WEZTERM_UNIX_SOCKET"] = socket
+    try:
+        r = subprocess.run(
+            [wez, "cli", "list", "--format", "json"],
+            capture_output=True, text=True, timeout=5, env=env,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
 def _focus_wezterm(tty: str) -> tuple[bool, str]:
     """Find the WezTerm pane whose tty matches and raise its GUI window.
 
     WezTerm has no CLI to raise a GUI window on macOS, so we map
     tty -> pane -> window_title via `wezterm cli list`, then raise the matching
     window via the macOS Accessibility API (System Events AXRaise), matching on
-    the title minus its animated leading status glyph. activate-pane first
-    selects the right pane (helps multi-pane windows); it is best-effort since
-    the window raise is what matters.
+    the title minus its animated leading status glyph. The session may live in
+    any of several WezTerm GUI instances, so we search the inherited mux socket
+    first, then every live gui-sock-<pid>. activate-pane first selects the right
+    pane (helps multi-pane windows); it is best-effort since the window raise is
+    what matters (and AXRaise already scans all wezterm-gui processes).
     """
     import shutil
     import subprocess
     wez = shutil.which("wezterm")
     if not wez:
         return False, "wezterm not found"
-    try:
-        listed = subprocess.run(
-            [wez, "cli", "list", "--format", "json"],
-            capture_output=True, text=True, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False, "wezterm cli failed"
-    if listed.returncode != 0:
-        return False, "wezterm cli list failed"
-    pane = _wezterm_find_pane(listed.stdout, tty)
+    sockets: list[str | None] = [None]
+    for s in _wezterm_gui_sockets():
+        if s not in sockets:
+            sockets.append(s)
+    pane = None
+    pane_socket: str | None = None
+    for sock in sockets:
+        stdout = _wezterm_cli_list(wez, sock)
+        if stdout is None:
+            continue
+        found = _wezterm_find_pane(stdout, tty)
+        if found is not None:
+            pane, pane_socket = found, sock
+            break
     if pane is None:
         return False, "no wezterm pane for tty"
     pane_id = pane.get("pane_id")
     if isinstance(pane_id, int):
+        env = None
+        if pane_socket:
+            env = dict(os.environ)
+            env["WEZTERM_UNIX_SOCKET"] = pane_socket
         try:
             subprocess.run(
                 [wez, "cli", "activate-pane", "--pane-id", str(pane_id)],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, timeout=5, env=env,
             )
         except (OSError, subprocess.SubprocessError):
             pass  # best-effort pane select; window raise is what matters

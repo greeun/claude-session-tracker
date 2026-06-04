@@ -150,5 +150,19 @@ class WeztermAxraiseScriptTests(unittest.TestCase):
         self.assertIn('return "NOMATCH"', s)
 
 
+class WeztermGuiSocketsTests(unittest.TestCase):
+    def test_filters_dead_pids_and_non_pid_names(self):
+        fake = ["/x/gui-sock-111", "/x/gui-sock-222", "/x/gui-sock-notapid"]
+        with mock.patch("glob.glob", return_value=fake), \
+             mock.patch.object(tracker, "_pid_alive",
+                               side_effect=lambda p: p == 111):
+            socks = tracker._wezterm_gui_sockets()
+        self.assertEqual(socks, ["/x/gui-sock-111"])
+
+    def test_no_socket_dir_returns_empty(self):
+        with mock.patch("glob.glob", return_value=[]):
+            self.assertEqual(tracker._wezterm_gui_sockets(), [])
+
+
 if __name__ == "__main__":
     unittest.main()
