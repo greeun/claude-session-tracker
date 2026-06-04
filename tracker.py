@@ -417,6 +417,7 @@ def _wezterm_find_pane_id(list_json: str, tty: str) -> int | None:
     for p in panes:
         if isinstance(p, dict) and p.get("tty_name") == tty:
             pane_id = p.get("pane_id")
+            # wezterm serializes pane_id as a JSON integer
             if isinstance(pane_id, int):
                 return pane_id
     return None
@@ -424,7 +425,7 @@ def _wezterm_find_pane_id(list_json: str, tty: str) -> int | None:
 
 def _build_terminal_app_focus_script(tty: str) -> str:
     """AppleScript: select the Terminal.app tab whose tty matches and raise it.
-    Prints FOCUSED on a hit, NOMATCH otherwise."""
+    The script prints FOCUSED on a hit, NOMATCH otherwise."""
     esc = _applescript_escape(tty)
     return (
         'tell application "Terminal"\n'
@@ -446,7 +447,7 @@ def _build_terminal_app_focus_script(tty: str) -> str:
 
 def _build_iterm2_focus_script(tty: str) -> str:
     """AppleScript: select the iTerm2 session whose tty matches and raise it.
-    Prints FOCUSED on a hit, NOMATCH otherwise."""
+    The script prints FOCUSED on a hit, NOMATCH otherwise."""
     esc = _applescript_escape(tty)
     return (
         'tell application "iTerm"\n'
