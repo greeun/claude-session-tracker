@@ -407,9 +407,9 @@ def _normalize_tty(raw: str) -> str | None:
     return t if t.startswith("/dev/") else "/dev/" + t
 
 
-def _wezterm_find_pane_id(list_json: str, tty: str) -> int | None:
-    """Parse `wezterm cli list --format json` output, return the pane_id whose
-    tty_name matches `tty`, or None."""
+def _wezterm_find_pane(list_json: str, tty: str) -> dict | None:
+    """Parse `wezterm cli list --format json` output, return the pane record
+    whose tty_name matches `tty`, or None."""
     try:
         panes = json.loads(list_json)
     except (json.JSONDecodeError, ValueError, TypeError):
@@ -418,11 +418,21 @@ def _wezterm_find_pane_id(list_json: str, tty: str) -> int | None:
         return None
     for p in panes:
         if isinstance(p, dict) and p.get("tty_name") == tty:
-            pane_id = p.get("pane_id")
-            # wezterm serializes pane_id as a JSON integer
-            if isinstance(pane_id, int):
-                return pane_id
+            return p
     return None
+
+
+def _strip_status_glyph(title: str) -> str:
+    """Strip a leading status/spinner glyph (e.g. ✳ or braille spinner frames
+    like ⠂⠐) and surrounding whitespace from a WezTerm window title, leaving the
+    stable task text used for matching. Falls back to the trimmed original if
+    stripping would empty it."""
+    i = 0
+    while i < len(title) and (unicodedata.category(title[i]).startswith("S")
+                              or title[i].isspace()):
+        i += 1
+    stripped = title[i:].strip()
+    return stripped or title.strip()
 
 
 def _build_terminal_app_focus_script(tty: str) -> str:
@@ -514,9 +524,10 @@ def _focus_wezterm(tty: str) -> tuple[bool, str]:
         return False, "wezterm cli failed"
     if listed.returncode != 0:
         return False, "wezterm cli list failed"
-    pane_id = _wezterm_find_pane_id(listed.stdout, tty)
-    if pane_id is None:
+    pane = _wezterm_find_pane(listed.stdout, tty)
+    if pane is None:
         return False, "no wezterm pane for tty"
+    pane_id = pane.get("pane_id")
     try:
         activated = subprocess.run(
             [wez, "cli", "activate-pane", "--pane-id", str(pane_id)],

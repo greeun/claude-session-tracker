@@ -29,27 +29,47 @@ class NormalizeTtyTests(unittest.TestCase):
 
 WEZ_SAMPLE = """
 [
-  {"window_id": 97, "pane_id": 101, "tty_name": "/dev/ttys015"},
-  {"window_id": 95, "pane_id": 99,  "tty_name": "/dev/ttys010"}
+  {"window_id": 97, "pane_id": 101, "tty_name": "/dev/ttys015", "window_title": "✳ task A"},
+  {"window_id": 95, "pane_id": 99,  "tty_name": "/dev/ttys010", "window_title": "⠂ task B"}
 ]
 """
 
 
 class WeztermFindPaneTests(unittest.TestCase):
-    def test_match_returns_pane_id(self):
-        self.assertEqual(
-            tracker._wezterm_find_pane_id(WEZ_SAMPLE, "/dev/ttys010"), 99)
+    def test_match_returns_pane_dict(self):
+        p = tracker._wezterm_find_pane(WEZ_SAMPLE, "/dev/ttys010")
+        self.assertIsInstance(p, dict)
+        self.assertEqual(p["pane_id"], 99)
 
     def test_no_match_returns_none(self):
-        self.assertIsNone(
-            tracker._wezterm_find_pane_id(WEZ_SAMPLE, "/dev/ttys004"))
+        self.assertIsNone(tracker._wezterm_find_pane(WEZ_SAMPLE, "/dev/ttys004"))
 
     def test_bad_json_returns_none(self):
-        self.assertIsNone(
-            tracker._wezterm_find_pane_id("not json at all", "/dev/ttys010"))
+        self.assertIsNone(tracker._wezterm_find_pane("not json at all", "/dev/ttys010"))
 
     def test_non_list_returns_none(self):
-        self.assertIsNone(tracker._wezterm_find_pane_id("{}", "/dev/ttys010"))
+        self.assertIsNone(tracker._wezterm_find_pane("{}", "/dev/ttys010"))
+
+
+class StripStatusGlyphTests(unittest.TestCase):
+    def test_strips_asterisk_glyph(self):
+        self.assertEqual(tracker._strip_status_glyph("✳ Bring CST to foreground"),
+                         "Bring CST to foreground")
+
+    def test_strips_braille_spinner(self):
+        self.assertEqual(tracker._strip_status_glyph("⠂ Re-transcribe audio"),
+                         "Re-transcribe audio")
+
+    def test_plain_title_unchanged(self):
+        self.assertEqual(tracker._strip_status_glyph("Manage CLI sessions"),
+                         "Manage CLI sessions")
+
+    def test_leading_whitespace_trimmed(self):
+        self.assertEqual(tracker._strip_status_glyph("   spaced title"),
+                         "spaced title")
+
+    def test_all_glyphs_falls_back_to_original(self):
+        self.assertEqual(tracker._strip_status_glyph("✳⠂"), "✳⠂")
 
 
 class FocusScriptBuilderTests(unittest.TestCase):
