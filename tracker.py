@@ -96,6 +96,22 @@ def _applescript_escape(s: str) -> str:
 # in the TUI loop (see the `if _new:` block).
 
 
+def _activate_macos_app(app_name: str) -> None:
+    """Bring a macOS app to the foreground via AppleScript. Fire-and-forget;
+    failures are silent."""
+    import subprocess
+    try:
+        subprocess.Popen(
+            ["osascript", "-e", f'tell application "{app_name}" to activate'],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except OSError:
+        pass
+
+
 def open_in_new_terminal(cwd: str, session_id: str,
                          skip_perm: bool = False,
                          cmux_mode: str | None = None) -> tuple[bool, str]:
@@ -251,20 +267,6 @@ def open_in_new_terminal(cwd: str, session_id: str,
             except OSError as e:
                 return False, f"osascript failed: {e}"
 
-        def _activate_app(app_name: str) -> None:
-            """Bring a macOS app to the foreground via AppleScript.
-            Fires-and-forgets; failures are silent."""
-            try:
-                subprocess.Popen(
-                    ["osascript", "-e", f'tell application "{app_name}" to activate'],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                    close_fds=True,
-                )
-            except OSError:
-                pass
-
         def _run_cli(argv: list[str], label: str,
                      activate_name: str | None = None) -> tuple[bool, str]:
             try:
@@ -276,7 +278,7 @@ def open_in_new_terminal(cwd: str, session_id: str,
                     close_fds=True,
                 )
                 if activate_name:
-                    _activate_app(activate_name)
+                    _activate_macos_app(activate_name)
                 return True, f"opened in {label}"
             except OSError as e:
                 return False, f"{label} spawn failed: {e}"
