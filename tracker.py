@@ -518,11 +518,13 @@ def _focus_wezterm(tty: str) -> tuple[bool, str]:
     if pane_id is None:
         return False, "no wezterm pane for tty"
     try:
-        subprocess.run(
+        activated = subprocess.run(
             [wez, "cli", "activate-pane", "--pane-id", str(pane_id)],
             capture_output=True, text=True, timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
+        return False, "wezterm activate-pane failed"
+    if activated.returncode != 0:
         return False, "wezterm activate-pane failed"
     _activate_macos_app("WezTerm")
     return True, f"WezTerm pane {pane_id}"

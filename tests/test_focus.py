@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import tracker
@@ -96,6 +97,26 @@ class FocusExistingWindowTests(unittest.TestCase):
     def test_pid_without_tty_returns_false(self):
         # PID 0 has no normal controlling tty → no backend can match.
         ok, _ = tracker.focus_existing_window("sid", {"pid": 0})
+        self.assertFalse(ok)
+
+
+class RunApplescriptFocusTests(unittest.TestCase):
+    def test_focused_returns_true(self):
+        fake = mock.Mock(returncode=0, stdout="FOCUSED\n")
+        with mock.patch("subprocess.run", return_value=fake):
+            ok, info = tracker._run_applescript_focus("script", "Terminal.app")
+        self.assertTrue(ok)
+        self.assertEqual(info, "Terminal.app tab")
+
+    def test_nomatch_returns_false(self):
+        fake = mock.Mock(returncode=0, stdout="NOMATCH\n")
+        with mock.patch("subprocess.run", return_value=fake):
+            ok, _ = tracker._run_applescript_focus("script", "iTerm2")
+        self.assertFalse(ok)
+
+    def test_osascript_error_returns_false(self):
+        with mock.patch("subprocess.run", side_effect=OSError("boom")):
+            ok, _ = tracker._run_applescript_focus("script", "Terminal.app")
         self.assertFalse(ok)
 
 
