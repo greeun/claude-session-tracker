@@ -25,7 +25,7 @@ cst --version
 `tracker.py` is a self-contained script with these logical sections (top to bottom):
 
 1. **Constants & helpers** (lines 1–55) — paths, status glyphs (`●`/`○`/`✓`), labels
-2. **Terminal-window spawning** (`open_in_new_terminal`, ~line 67) — detects `$TERM_PROGRAM` and opens sessions in new windows for iTerm/Terminal.app/WezTerm/Ghostty/kitty/Alacritty; also supports `cmux` mode
+2. **Terminal-window spawning & focus** (`open_in_new_terminal`, ~line 99; `focus_existing_window`, after it) — `open_in_new_terminal` detects `$TERM_PROGRAM` and opens sessions in new windows for iTerm/Terminal.app/WezTerm/Ghostty/kitty/Alacritty (+`cmux`). `focus_existing_window` raises a *live* session's existing window by matching the claude PID's controlling tty against WezTerm panes (`wezterm cli list`) / Terminal.app tabs / iTerm2 sessions (AppleScript); TUI Enter tries focus first, then falls back to spawning.
 3. **Display utilities** (~line 327) — `display_width`, `pad_display`, `truncate_display`, `truncate_display_tail` — CJK-aware column formatting using `unicodedata.east_asian_width`
 4. **Live-process detection** (~line 439) — scans `~/.claude/sessions/<pid>.json` + `kill -0` to determine active vs ended
 5. **State persistence** (~line 495) — `state.json` for 작업종료 (done) flags, `index.json` for mtime-invalidated session cache

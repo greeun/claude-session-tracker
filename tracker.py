@@ -12,7 +12,7 @@ Data sources:
 """
 from __future__ import annotations
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 import argparse
 import json
@@ -1958,9 +1958,11 @@ HELP_LINES = [
     "Navigation (normal mode)",
     "  ↑↓ / Ctrl-P Ctrl-N     move one row",
     "  PgUp PgDn Home End     page / jump",
-    "  Enter                  open selected session in a NEW terminal window",
+    "  Enter                  live session: raise its existing terminal window;",
+    "                         else (or on focus miss) open in a NEW window",
     "                         (spawns `cd <cwd> && claude --resume <id>`;",
-    "                          macOS: iTerm/Terminal; Linux: $TERMINAL or xterm)",
+    "                          focus: WezTerm/Terminal.app/iTerm2 via tty match;",
+    "                          macOS new window: iTerm/Terminal; Linux: $TERMINAL/xterm)",
     "                         cmux: choose [t] workspace tab or [w] new window",
     "                         Without `cst --skip-perm`, a per-resume popup",
     "                         asks whether to add --dangerously-skip-permissions.",
