@@ -38,11 +38,13 @@ Main script: `tracker.py` (stdlib only, Python 3.10+, v1.1.0). Installed as
 
 Top-level flags: `-V/--version`, `--tui` (= `cst pick`), `--skip-perm`
 (pass `--dangerously-skip-permissions` to `claude` on resume; otherwise the
-TUI confirms per-resume).
+TUI confirms per-resume), `--hide-done` (start the TUI with ✓ done sessions
+hidden; toggle in-TUI with `H`).
 
 ```bash
 cst                       # list (default): # + ST + LAST + SESSION + MSGS + MESSAGE + PROJECT
 cst --tui                 # interactive TUI (same as `cst pick`)
+cst --tui --hide-done     # TUI, ✓ done hidden from the start (also: cst pick --hide-done)
 cst list --status working # working|waiting|idle|ended|done (active = alias for working)
 cst list --cwd ~/p --days 7 --limit 50
 cst search "<query>"      # full-text transcript search (OR via `|`, -i = ignore case)
@@ -117,7 +119,8 @@ stale `!` self-heals to `◦` to avoid a stuck state.
 - **`v` / `V`** — preview modal (scrollable transcript, read-only)
 - **`e` / `E`** — export focused session to `./<id>.md`
 - **`D` / `d` / `Ctrl-D`** — toggle done (or apply to all marked)
-- **`H` / `h`** — hide ✓ rows (no Ctrl-H alias — Backspace collision)
+- **`H` / `h`** — hide ✓ rows (no Ctrl-H alias — Backspace collision);
+  start hidden with `cst --hide-done` / `cst pick --hide-done`
 - **`C` / `c`** — toggle: only sessions under the TUI launch cwd
   (NFC-normalized prefix match, Korean paths OK)
 - **`R` / `r` / `Ctrl-R`** — rescan
@@ -150,7 +153,8 @@ with manual-entry and placeholder escape hatches).
 - **#** row-number column + **ST** glyph column + **PROJECT** column on every row
 - **`done` / `undone` / `live` / `export` / `install-hook` / `uninstall-hook` /
   `prompt-hook` / `status-hook`** subcommands
-- Top-level `--skip-perm` flag for resume
+- Top-level `--skip-perm` flag for resume; `--hide-done` to start the TUI with
+  ✓ done sessions hidden
 - TUI: `D`/`d`/`Ctrl-D` toggle-done, `H`/`h` hide-done, `C`/`c` cwd-only,
   `R`/`r`/`Ctrl-R` rescan, `e`/`E` export, `a`/`A` auto-rescan,
   `Ctrl-A` mark-all, `?` help, `v`/`V` preview

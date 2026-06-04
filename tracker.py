@@ -12,7 +12,7 @@ Data sources:
 """
 from __future__ import annotations
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 import argparse
 import json
@@ -2516,7 +2516,8 @@ def _do_rescan(cwd_filter, days, sessions) -> RescanResult:
 
 
 def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
-             days: int | None, skip_perm_default: bool = False):
+             days: int | None, skip_perm_default: bool = False,
+             hide_done_default: bool = False):
     import curses
     import time
     curses.curs_set(0)
@@ -2559,7 +2560,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
     search_query: str = ""
     search_hits: dict[str, str] | None = None
     search_mode: bool = False  # True while typing inside the `/` prompt
-    hide_done: bool = False    # H toggle: hide 작업종료 sessions from the view
+    hide_done: bool = hide_done_default  # H toggle: hide 작업종료 from the view
     cwd_only: bool = False     # C toggle: only sessions under the TUI launch cwd
     try:
         launch_cwd = unicodedata.normalize("NFC", os.getcwd())
@@ -3496,8 +3497,10 @@ def cmd_pick(args: argparse.Namespace) -> int:
         print("\r(no sessions found)            ")
         return 0
     skip_perm = bool(getattr(args, "skip_perm", False))
+    hide_done = bool(getattr(args, "hide_done", False))
     try:
-        curses.wrapper(_pick_ui, sessions, args.cwd, args.days, skip_perm)
+        curses.wrapper(_pick_ui, sessions, args.cwd, args.days, skip_perm,
+                       hide_done)
     except KeyboardInterrupt:
         pass
     # The TUI handles Enter by spawning a new terminal window, so we don't
@@ -4327,11 +4330,22 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--skip-perm", dest="skip_perm", action="store_true",
                     help="pass --dangerously-skip-permissions when resuming "
                          "(TUI & resume). Without it, the TUI prompts per resume.")
+    ap.add_argument("--hide-done", dest="hide_done", action="store_true",
+                    help="start the TUI with 작업완료(done) sessions hidden "
+                         "(toggle in-TUI with H)")
     sub = ap.add_subparsers(dest="cmd")
 
     p_pick = sub.add_parser("pick", help="interactive picker (TUI)")
     p_pick.add_argument("--cwd", type=str, default=None, help="filter by cwd prefix")
     p_pick.add_argument("--days", type=int, default=None, help="only last N days")
+    # default=SUPPRESS so an omitted flag here does NOT clobber a top-level
+    # --hide-done (argparse parses subcommands into a fresh namespace, then
+    # copies set attrs back over the parent's). Mirrors how --skip-perm stays
+    # top-level only; here we accept it in both positions for convenience.
+    p_pick.add_argument("--hide-done", dest="hide_done", action="store_true",
+                        default=argparse.SUPPRESS,
+                        help="start with 작업완료(done) sessions hidden "
+                             "(toggle with H)")
     p_pick.set_defaults(func=cmd_pick)
 
     p_list = sub.add_parser("list", help="list sessions (CLI, with status column)")
@@ -4458,6 +4472,7 @@ def main() -> int:
     args = ap.parse_args()
 
     skip_perm = bool(getattr(args, "skip_perm", False))
+    hide_done = bool(getattr(args, "hide_done", False))
 
     # No subcommand: synthesize the default one FROM the parser so its
     # defaults can never drift from the subparser definition (the old
@@ -4467,6 +4482,7 @@ def main() -> int:
         default_cmd = "pick" if getattr(args, "tui", False) else "list"
         args = ap.parse_args([default_cmd])
         args.skip_perm = skip_perm
+        args.hide_done = hide_done
     return args.func(args)
 
 
