@@ -67,5 +67,21 @@ class FocusScriptBuilderTests(unittest.TestCase):
         self.assertIn('return "NOMATCH"', s)
 
 
+class BackendFallbackTests(unittest.TestCase):
+    def test_wezterm_no_match_returns_false(self):
+        # A tty that no pane can own → (False, reason); never focuses anything.
+        ok, info = tracker._focus_wezterm("/dev/ttys-nonexistent-zzz")
+        self.assertFalse(ok)
+        self.assertIsInstance(info, str)
+
+    def test_macos_proc_running_returns_bool(self):
+        self.assertIsInstance(
+            tracker._macos_proc_running("definitely-no-such-proc-zzz"), bool)
+
+    def test_controlling_tty_bad_pid_returns_none(self):
+        # PID 0 is not a normal user process with a tty.
+        self.assertIsNone(tracker._controlling_tty(0))
+
+
 if __name__ == "__main__":
     unittest.main()

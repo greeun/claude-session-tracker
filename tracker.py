@@ -472,6 +472,87 @@ def _build_iterm2_focus_script(tty: str) -> str:
     )
 
 
+def _controlling_tty(pid: int) -> str | None:
+    """Return the normalized `/dev/ttysNNN` controlling tty for `pid`, or None."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "tty=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return _normalize_tty(out.stdout)
+
+
+def _macos_proc_running(proc_name: str) -> bool:
+    """True if a process with this exact name is running (no GUI launch)."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["pgrep", "-x", proc_name],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
+
+
+def _focus_wezterm(tty: str) -> tuple[bool, str]:
+    """Find the WezTerm pane whose tty matches and raise its window."""
+    import shutil
+    import subprocess
+    wez = shutil.which("wezterm")
+    if not wez:
+        return False, "wezterm not found"
+    try:
+        listed = subprocess.run(
+            [wez, "cli", "list", "--format", "json"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False, "wezterm cli failed"
+    if listed.returncode != 0:
+        return False, "wezterm cli list failed"
+    pane_id = _wezterm_find_pane_id(listed.stdout, tty)
+    if pane_id is None:
+        return False, "no wezterm pane for tty"
+    try:
+        subprocess.run(
+            [wez, "cli", "activate-pane", "--pane-id", str(pane_id)],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False, "wezterm activate-pane failed"
+    _activate_macos_app("WezTerm")
+    return True, f"WezTerm pane {pane_id}"
+
+
+def _run_applescript_focus(script: str, label: str) -> tuple[bool, str]:
+    """Run a focus AppleScript; success only if it printed FOCUSED."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=8,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False, f"{label} osascript failed"
+    if r.returncode == 0 and "FOCUSED" in r.stdout:
+        return True, f"{label} tab"
+    return False, f"no {label} tab for tty"
+
+
+def _focus_terminal_app(tty: str) -> tuple[bool, str]:
+    return _run_applescript_focus(
+        _build_terminal_app_focus_script(tty), "Terminal.app")
+
+
+def _focus_iterm2(tty: str) -> tuple[bool, str]:
+    return _run_applescript_focus(
+        _build_iterm2_focus_script(tty), "iTerm2")
+
+
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║ UTIL LAYER — domain-agnostic, reusable helpers (string/width/time/IO). ║
 # ║ Contract: nothing here may reference SessionMeta, status glyphs,       ║
