@@ -553,6 +553,48 @@ def _focus_iterm2(tty: str) -> tuple[bool, str]:
         _build_iterm2_focus_script(tty), "iTerm2")
 
 
+def focus_existing_window(session_id: str, live_info: dict) -> tuple[bool, str]:
+    """Raise the existing terminal window/tab/pane hosting a live session.
+
+    Derives the claude PID's controlling tty, then probes terminal backends in
+    a smart order (current $TERM_PROGRAM first), short-circuiting on the first
+    match. Returns (False, reason) when no backend can find/raise the window, so
+    the caller falls back to opening a new window.
+    """
+    import shutil
+    pid = live_info.get("pid")
+    if not isinstance(pid, int):
+        return False, "no pid"
+    tty = _controlling_tty(pid)
+    if not tty:
+        return False, "no controlling tty"
+
+    tp = os.environ.get("TERM_PROGRAM", "").lower()
+    wez = ("WezTerm", lambda: shutil.which("wezterm") is not None, _focus_wezterm)
+    term = ("Terminal.app", lambda: _macos_proc_running("Terminal"), _focus_terminal_app)
+    iterm = ("iTerm2", lambda: _macos_proc_running("iTerm2"), _focus_iterm2)
+
+    if "wezterm" in tp:
+        order = [wez, term, iterm]
+    elif "iterm" in tp:
+        order = [iterm, term, wez]
+    elif tp == "apple_terminal":
+        order = [term, iterm, wez]
+    else:
+        order = [wez, term, iterm]
+
+    for _name, available, focus in order:
+        try:
+            if not available():
+                continue
+            ok, info = focus(tty)
+            if ok:
+                return True, info
+        except Exception:
+            continue
+    return False, f"no window found for {tty}"
+
+
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║ UTIL LAYER — domain-agnostic, reusable helpers (string/width/time/IO). ║
 # ║ Contract: nothing here may reference SessionMeta, status glyphs,       ║

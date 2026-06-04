@@ -83,5 +83,21 @@ class BackendFallbackTests(unittest.TestCase):
         self.assertIsNone(tracker._controlling_tty(0))
 
 
+class FocusExistingWindowTests(unittest.TestCase):
+    def test_missing_pid_returns_false(self):
+        ok, info = tracker.focus_existing_window("sid", {})
+        self.assertFalse(ok)
+        self.assertIsInstance(info, str)
+
+    def test_non_int_pid_returns_false(self):
+        ok, _ = tracker.focus_existing_window("sid", {"pid": "nope"})
+        self.assertFalse(ok)
+
+    def test_pid_without_tty_returns_false(self):
+        # PID 0 has no normal controlling tty → no backend can match.
+        ok, _ = tracker.focus_existing_window("sid", {"pid": 0})
+        self.assertFalse(ok)
+
+
 if __name__ == "__main__":
     unittest.main()
