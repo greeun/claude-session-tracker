@@ -2066,11 +2066,21 @@ HELP_LINES = [
 
 
 def _wrap_display(s: str, width: int) -> list[str]:
-    """Wrap a single logical line into chunks that fit within `width` display columns."""
+    """Wrap a single logical line into chunks that fit within `width` display columns.
+
+    Embedded newlines are split defensively: callers should pass single
+    logical lines, but a stray ``\\n`` fed straight to ``addnstr()`` makes the
+    curses cursor jump a row and spill past the box border, so we guard here.
+    """
     if width <= 0:
         return [""]
     if not s:
         return [""]
+    if "\n" in s or "\r" in s:
+        out: list[str] = []
+        for part in s.splitlines():
+            out.extend(_wrap_display(part, width))
+        return out or [""]
     out: list[str] = []
     cur = ""
     used = 0
@@ -2200,8 +2210,9 @@ def _preview_modal(stdscr, target: SessionMeta, status: str) -> None:
     if target.first_user_msg:
         lines.append(("", 0))
         lines.append(("First user message:", curses.A_BOLD))
-        for ln in _wrap_display(target.first_user_msg, inner_w):
-            lines.append((ln, 0))
+        for raw_ln in target.first_user_msg.splitlines() or [""]:
+            for ln in _wrap_display(raw_ln, inner_w):
+                lines.append((ln, 0))
     lines.append(("", 0))
     lines.append(("─" * inner_w, dim_attr))
 
