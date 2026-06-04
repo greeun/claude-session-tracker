@@ -394,6 +394,17 @@ def open_in_new_terminal(cwd: str, session_id: str,
     return False, f"unsupported platform: {sys.platform}"
 
 
+# ── terminal-focus layer: raise an existing live session's window ──────────
+
+def _normalize_tty(raw: str) -> str | None:
+    """Normalize `ps -o tty=` output to a `/dev/ttysNNN` path, or None if the
+    process has no controlling tty (`?`/`??`/empty)."""
+    t = (raw or "").strip()
+    if not t or t in ("?", "??"):
+        return None
+    return t if t.startswith("/dev/") else "/dev/" + t
+
+
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║ UTIL LAYER — domain-agnostic, reusable helpers (string/width/time/IO). ║
 # ║ Contract: nothing here may reference SessionMeta, status glyphs,       ║
