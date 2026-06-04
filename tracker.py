@@ -405,6 +405,23 @@ def _normalize_tty(raw: str) -> str | None:
     return t if t.startswith("/dev/") else "/dev/" + t
 
 
+def _wezterm_find_pane_id(list_json: str, tty: str) -> int | None:
+    """Parse `wezterm cli list --format json` output, return the pane_id whose
+    tty_name matches `tty`, or None."""
+    try:
+        panes = json.loads(list_json)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
+    if not isinstance(panes, list):
+        return None
+    for p in panes:
+        if isinstance(p, dict) and p.get("tty_name") == tty:
+            pane_id = p.get("pane_id")
+            if isinstance(pane_id, int):
+                return pane_id
+    return None
+
+
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║ UTIL LAYER — domain-agnostic, reusable helpers (string/width/time/IO). ║
 # ║ Contract: nothing here may reference SessionMeta, status glyphs,       ║
