@@ -3241,9 +3241,17 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
         elif ch == curses.KEY_END:
             sel = max(0, len(items) - 1)
         elif ch in (10, 13):
-            # Enter — spawn `claude --resume` in a NEW terminal window; stay in TUI.
+            # Enter — if the session is live, raise its existing terminal window;
+            # otherwise (or on focus miss) spawn `claude --resume` in a NEW
+            # terminal window. Stay in TUI either way.
             if items:
                 target = items[sel]
+                live = get_live_session_info(target.session_id)
+                if live:
+                    ok, info = focus_existing_window(target.session_id, live)
+                    if ok:
+                        toast = f"→ focused  {target.session_id[:8]}  {info}"
+                        continue
                 open_cwd = target.cwd
                 if target.cwd and not os.path.isdir(target.cwd):
                     kind, new_cwd = _orphan_relocate_flow(target)
