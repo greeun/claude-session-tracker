@@ -482,6 +482,28 @@ def _build_iterm2_focus_script(tty: str) -> str:
     )
 
 
+def _build_wezterm_axraise_script(needle: str) -> str:
+    """AppleScript: raise the wezterm-gui window whose AX title contains `needle`,
+    via the macOS Accessibility API (WezTerm has no native CLI window-raise).
+    The script prints FOCUSED on a hit, NOMATCH otherwise."""
+    esc = _applescript_escape(needle)
+    return (
+        'tell application "System Events"\n'
+        f'  set theNeedle to "{esc}"\n'
+        '  repeat with p in (every process whose name is "wezterm-gui")\n'
+        '    repeat with w in windows of p\n'
+        '      if name of w contains theNeedle then\n'
+        '        perform action "AXRaise" of w\n'
+        '        set frontmost of p to true\n'
+        '        return "FOCUSED"\n'
+        '      end if\n'
+        '    end repeat\n'
+        '  end repeat\n'
+        'end tell\n'
+        'return "NOMATCH"'
+    )
+
+
 def _controlling_tty(pid: int) -> str | None:
     """Return the normalized `/dev/ttysNNN` controlling tty for `pid`, or None."""
     import subprocess
@@ -509,7 +531,15 @@ def _macos_proc_running(proc_name: str) -> bool:
 
 
 def _focus_wezterm(tty: str) -> tuple[bool, str]:
-    """Find the WezTerm pane whose tty matches and raise its window."""
+    """Find the WezTerm pane whose tty matches and raise its GUI window.
+
+    WezTerm has no CLI to raise a GUI window on macOS, so we map
+    tty -> pane -> window_title via `wezterm cli list`, then raise the matching
+    window via the macOS Accessibility API (System Events AXRaise), matching on
+    the title minus its animated leading status glyph. activate-pane first
+    selects the right pane (helps multi-pane windows); it is best-effort since
+    the window raise is what matters.
+    """
     import shutil
     import subprocess
     wez = shutil.which("wezterm")
@@ -528,17 +558,25 @@ def _focus_wezterm(tty: str) -> tuple[bool, str]:
     if pane is None:
         return False, "no wezterm pane for tty"
     pane_id = pane.get("pane_id")
-    try:
-        activated = subprocess.run(
-            [wez, "cli", "activate-pane", "--pane-id", str(pane_id)],
-            capture_output=True, text=True, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False, "wezterm activate-pane failed"
-    if activated.returncode != 0:
-        return False, "wezterm activate-pane failed"
-    _activate_macos_app("WezTerm")
-    return True, f"WezTerm pane {pane_id}"
+    if isinstance(pane_id, int):
+        try:
+            subprocess.run(
+                [wez, "cli", "activate-pane", "--pane-id", str(pane_id)],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass  # best-effort pane select; window raise is what matters
+    title = pane.get("window_title")
+    if not isinstance(title, str) or not title.strip():
+        return False, "no wezterm window title"
+    needle = _strip_status_glyph(title)
+    if not needle:
+        return False, "empty wezterm title"
+    ok, _info = _run_applescript_focus(
+        _build_wezterm_axraise_script(needle), "WezTerm")
+    if ok:
+        return True, f"WezTerm window «{needle[:40]}»"
+    return False, "no wezterm window raised"
 
 
 def _run_applescript_focus(script: str, label: str) -> tuple[bool, str]:

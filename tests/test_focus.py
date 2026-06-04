@@ -140,5 +140,15 @@ class RunApplescriptFocusTests(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class WeztermAxraiseScriptTests(unittest.TestCase):
+    def test_embeds_needle_and_axraise(self):
+        s = tracker._build_wezterm_axraise_script("Manage CLI sessions")
+        self.assertIn("Manage CLI sessions", s)
+        self.assertIn("wezterm-gui", s)
+        self.assertIn("AXRaise", s)
+        self.assertIn('return "FOCUSED"', s)
+        self.assertIn('return "NOMATCH"', s)
+
+
 if __name__ == "__main__":
     unittest.main()
