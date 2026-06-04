@@ -51,5 +51,21 @@ class WeztermFindPaneTests(unittest.TestCase):
         self.assertIsNone(tracker._wezterm_find_pane_id("{}", "/dev/ttys010"))
 
 
+class FocusScriptBuilderTests(unittest.TestCase):
+    def test_terminal_script_embeds_tty_and_app(self):
+        s = tracker._build_terminal_app_focus_script("/dev/ttys010")
+        self.assertIn("/dev/ttys010", s)
+        self.assertIn('tell application "Terminal"', s)
+        self.assertIn('return "FOCUSED"', s)
+        self.assertIn('return "NOMATCH"', s)
+
+    def test_iterm_script_embeds_tty_and_app(self):
+        s = tracker._build_iterm2_focus_script("/dev/ttys010")
+        self.assertIn("/dev/ttys010", s)
+        self.assertIn('tell application "iTerm"', s)
+        self.assertIn('return "FOCUSED"', s)
+        self.assertIn('return "NOMATCH"', s)
+
+
 if __name__ == "__main__":
     unittest.main()

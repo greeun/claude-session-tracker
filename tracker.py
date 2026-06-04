@@ -422,6 +422,53 @@ def _wezterm_find_pane_id(list_json: str, tty: str) -> int | None:
     return None
 
 
+def _build_terminal_app_focus_script(tty: str) -> str:
+    """AppleScript: select the Terminal.app tab whose tty matches and raise it.
+    Prints FOCUSED on a hit, NOMATCH otherwise."""
+    esc = _applescript_escape(tty)
+    return (
+        'tell application "Terminal"\n'
+        f'  set theTTY to "{esc}"\n'
+        '  repeat with w in windows\n'
+        '    repeat with t in tabs of w\n'
+        '      if (tty of t) is theTTY then\n'
+        '        set selected tab of w to t\n'
+        '        set index of w to 1\n'
+        '        activate\n'
+        '        return "FOCUSED"\n'
+        '      end if\n'
+        '    end repeat\n'
+        '  end repeat\n'
+        'end tell\n'
+        'return "NOMATCH"'
+    )
+
+
+def _build_iterm2_focus_script(tty: str) -> str:
+    """AppleScript: select the iTerm2 session whose tty matches and raise it.
+    Prints FOCUSED on a hit, NOMATCH otherwise."""
+    esc = _applescript_escape(tty)
+    return (
+        'tell application "iTerm"\n'
+        f'  set theTTY to "{esc}"\n'
+        '  repeat with w in windows\n'
+        '    repeat with t in tabs of w\n'
+        '      repeat with s in sessions of t\n'
+        '        if (tty of s) is theTTY then\n'
+        '          select w\n'
+        '          select t\n'
+        '          select s\n'
+        '          activate\n'
+        '          return "FOCUSED"\n'
+        '        end if\n'
+        '      end repeat\n'
+        '    end repeat\n'
+        '  end repeat\n'
+        'end tell\n'
+        'return "NOMATCH"'
+    )
+
+
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║ UTIL LAYER — domain-agnostic, reusable helpers (string/width/time/IO). ║
 # ║ Contract: nothing here may reference SessionMeta, status glyphs,       ║
