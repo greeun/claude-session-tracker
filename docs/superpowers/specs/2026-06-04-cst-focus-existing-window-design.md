@@ -102,11 +102,24 @@ output → find tty) lets us unit-test the matching without a TTY or GUI.
 ### Backend: WezTerm
 - `available()`: `wezterm` on PATH and `wezterm cli list` succeeds.
 - Match: `wezterm cli list --format json` → find pane where
-  `tty_name == /dev/<tty>` → get `pane_id`.
-- Focus: `wezterm cli activate-pane --pane-id <id>`, then
-  `_activate_app("WezTerm")` (existing helper, `tracker.py:254`) to bring the OS
-  window forward.
+  `tty_name == /dev/<tty>` → get `pane_id` and `window_title`.
+- Focus: `wezterm cli activate-pane --pane-id <id>` (best-effort: selects the
+  right pane in multi-pane windows), then **raise the GUI window**.
 - All `subprocess.run(..., timeout=5)`.
+
+> **Implementation note (2026-06-05, revised after testing):** the originally
+> specified raise — `wezterm cli activate-pane` + `tell application "WezTerm" to
+> activate` — does **not** bring the target GUI window to the macOS foreground.
+> WezTerm (20240203, and current) has no native CLI/Lua to raise a specific GUI
+> window; `activate-pane` only changes the mux's active pane, and `activate`
+> re-raises WezTerm's already-front window (the one cst runs in). Verified
+> on-device. **Actual mechanism:** map `tty → pane → window_title`, strip the
+> animated leading status glyph (✳ / braille spinner; `_strip_status_glyph`),
+> then raise the matching `wezterm-gui` window via the macOS Accessibility API
+> (System Events `AXRaise` + `set frontmost`), matching the de-glyphed title as
+> a substring of the AX window name. Requires a one-time Accessibility grant.
+> Known limits: title collisions raise the first match; AX title truncation or
+> no match → new-window fallback.
 
 ### Backend: Terminal.app
 - `available()`: via System Events, only if process "Terminal" is running (do
