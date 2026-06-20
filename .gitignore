@@ -17,3 +17,23 @@ linkedin-post/
 # the cwd. Anchored to repo root so docs/*-<date>-*.md stays tracked.
 /[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-20[0-9][0-9]-[0-9][0-9]-[0-9][0-9].md
 /[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-20[0-9][0-9]-[0-9][0-9]-[0-9][0-9].txt
+
+# superpowers (auto-installed; do not track)
+.superpowers/
+docs/superpowers/
+
+# >>> skill-artifacts (auto; do not commit skill-generated output)
+.DS_Store
+/runs/
+/output/
+/outputs/
+/out/
+/generated/
+/.tmp/
+/tmp/
+__pycache__/
+.pytest_cache/
+*-run/
+*-runs/
+*-output/
+# <<< skill-artifacts
