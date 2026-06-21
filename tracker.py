@@ -3554,6 +3554,19 @@ def cmd_pick(args: argparse.Namespace) -> int:
         return 0
     skip_perm = bool(getattr(args, "skip_perm", False))
     hide_done = bool(getattr(args, "hide_done", False))
+    # Ghostty (and cmux, which embeds Ghostty) advertise TERM=xterm-ghostty,
+    # whose terminfo entry the system ncurses DB frequently lacks. initscr()
+    # would then die with "setupterm: could not find terminal" and the TUI
+    # never opens — to the user it just looks like `cst` does nothing. Probe
+    # the current TERM up front and transparently fall back to a near-universal
+    # entry so the picker still launches.
+    try:
+        curses.setupterm()
+    except curses.error:
+        orig = os.environ.get("TERM", "")
+        os.environ["TERM"] = "xterm-256color"
+        print(f"\r(terminfo for TERM={orig!r} not found; "
+              f"using xterm-256color)            ", file=sys.stderr)
     try:
         curses.wrapper(_pick_ui, sessions, args.cwd, args.days, skip_perm,
                        hide_done)
