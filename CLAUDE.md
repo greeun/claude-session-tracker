@@ -74,11 +74,15 @@ All shell out through `_run_claude(argv)` (isolated for testing).
   the TUI rows. Heuristic: any PR URL in the transcript counts (same as
   agent-view), so a session that merely *mentions* a PR URL will show it.
 
-Deferred — pin unification only: `jobs/pins.json` element format is unconfirmed
-(it stays `[]` until pinned, and pins are settable only via agent-view's Ctrl+T,
-not any CLI, so there's no headless way to capture the format), and writing that
-file risks corrupting agent-view's own pin state. To finish it, pin a session in
-agent-view (Ctrl+T) and read the resulting `~/.claude/jobs/pins.json`.
+- **pin display (read-only)** — `read_pins()` reads `~/.claude/jobs/pins.json`,
+  whose real format (captured from an agent-view Ctrl+T pin) is a JSON array of
+  daemonShort strings, e.g. `["cbe8e3bb","4c51890c"]` (stale shorts persist).
+  `pin_marker(short, pins)` renders `*` (1-col ASCII, not the double-width emoji)
+  on pinned rows in `cst list`, `cst jobs`, and the TUI; `StatusContext.pins`
+  carries the set so it refreshes on rescan. **Read-only by design** — cst never
+  writes pins.json: it's a supervisor-locked file and a concurrent write could
+  corrupt agent-view's own pin state. Bidirectional sync (cst Ctrl-T ↔ pins.json)
+  is feasible now that the format is known but intentionally not done.
 8. **TUI** (`_pick_ui`, ~line 1383) — curses-based picker with two modes (normal + search), rendering loop, modal dialogs (help, preview, delete confirm, cmux chooser). **Color theme**: dark/light palettes via `tui_init_colors()` — pair NUMBERS carry fixed meaning (1–9), only (fg,bg) swap per theme, so the whole UI re-themes without touching call sites; pair 7 doubles as the full-screen `bkgd` fill so each theme renders identically across terminals. `resolve_theme()` picks the effective theme (CLI `--theme` → saved pref → `COLORFGBG` auto-detect → dark); `t`/`T` toggles live and persists via `save_theme()` into `state.json`.
 9. **Argument parser** (`_build_parser`, ~line 2549) and `main` (~line 2649)
 

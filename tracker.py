@@ -1080,6 +1080,27 @@ def job_badge(job: dict | None) -> str:
     return f"[{base} ⎇{branch}]" if branch else f"[{base}]"
 
 
+def read_pins() -> set[str]:
+    """agent-view's pinned daemonShorts from ~/.claude/jobs/pins.json (a JSON
+    array of short-id strings, e.g. ["cbe8e3bb","4c51890c"]; stale shorts whose
+    job was removed persist). Read-only — cst never writes this supervisor file.
+    """
+    try:
+        with (JOBS_DIR / "pins.json").open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return set()
+    return {x for x in data if isinstance(x, str)} if isinstance(data, list) else set()
+
+
+PIN_GLYPH = "*"   # 1-col ASCII (emoji pin is double-width, breaks alignment)
+
+
+def pin_marker(short: str | None, pins: set[str]) -> str:
+    """`*` when this job short is pinned in agent-view, else empty."""
+    return PIN_GLYPH if short and short in pins else ""
+
+
 def bg_delete_warning(target_sids: list[str], jobs: dict) -> str:
     """Warning shown before deleting sessions that are job-backed: cst's delete
     only unlinks the transcript — the live supervisor process keeps running.
@@ -1247,13 +1268,14 @@ class StatusContext:
     registry: dict
     overlay: dict
     jobs: dict
+    pins: set = field(default_factory=set)  # agent-view pinned daemonShorts
 
     @classmethod
     def capture(cls) -> "StatusContext":
         live, _ = scan_live_sessions()
         return cls(live=live, done=done_ids(),
                    registry=scan_registry_status(), overlay=status_overlay(),
-                   jobs=scan_jobs())
+                   jobs=scan_jobs(), pins=read_pins())
 
     def resolve(self, session_id: str) -> str:
         return resolve_status(session_id, self.live, self.done,
@@ -1769,8 +1791,10 @@ def cmd_list(args: argparse.Namespace) -> int:
         sid = s.session_id[:8]
         ts = fmt_ts(s.last_ts)
         first = truncate(s.first_user_msg, 60) or "(no user message)"
-        tags = " ".join(t for t in (job_badge(ctx.jobs.get(s.session_id)),
-                                    pr_badge(s.prs)) if t)
+        job = ctx.jobs.get(s.session_id)
+        tags = " ".join(t for t in (
+            pin_marker((job or {}).get("short"), ctx.pins),
+            job_badge(job), pr_badge(s.prs)) if t)
         proj = shorten_path(s.cwd) + (f"  {tags}" if tags else "")
         print(
             f"{idx:>{num_w}} "
@@ -2189,12 +2213,13 @@ def cmd_jobs(args: argparse.Namespace) -> int:
     exec / transcript-less jobs the session browser (transcript-based) can't
     show. Read-only; use cst stop/logs/attach to act on a row."""
     jobs = scan_jobs()
+    pins = read_pins()
     print(f"claude-session-tracker v{__version__}  ·  "
           f"{daemon_status_line(read_daemon_roster())}")
     if not jobs:
         print("(no background jobs in ~/.claude/jobs)")
         return 0
-    print(f"{'ST':<2} {'SHORT':<9} {'STATE':<8} {'TAG':<24} "
+    print(f"{'':<2} {'ST':<2} {'SHORT':<9} {'STATE':<8} {'TAG':<24} "
           f"{'DETAIL':<40}  CWD")
     print("-" * 100)
     # waiting first, then working, then the rest — most-attention-first.
@@ -2208,7 +2233,9 @@ def cmd_jobs(args: argparse.Namespace) -> int:
         state = j.get("state") or "?"
         tag = job_badge(j)
         detail = truncate(j.get("detail") or "", 40)
-        print(f"{pad_display(glyph, 2)} {j.get('short', ''):<9} {state:<8} "
+        pin = pin_marker(j.get("short"), pins)
+        print(f"{pad_display(pin, 2)} {pad_display(glyph, 2)} "
+              f"{j.get('short', ''):<9} {state:<8} "
               f"{tag:<24} {pad_display(truncate_display(detail, 40), 40)}  "
               f"{shorten_path(j.get('cwd') or '')}")
     print(f"\n{len(jobs)} background job(s). "
@@ -3678,12 +3705,11 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             proj_full = shorten_path(s.cwd)
             if s.git_branch:
                 proj_full = f"{proj_full}  ⎇{s.git_branch}"
-            badge = job_badge(ctx.jobs.get(s.session_id))
-            if badge:
-                proj_full = f"{proj_full}  {badge}"
-            prb = pr_badge(s.prs)
-            if prb:
-                proj_full = f"{proj_full}  {prb}"
+            _job = ctx.jobs.get(s.session_id)
+            for _tag in (pin_marker((_job or {}).get("short"), ctx.pins),
+                         job_badge(_job), pr_badge(s.prs)):
+                if _tag:
+                    proj_full = f"{proj_full}  {_tag}"
             proj_cell = truncate_display_tail(proj_full, proj_w)
 
             line_before_status = f"{mark}{idx + 1:>{num_w}} "
