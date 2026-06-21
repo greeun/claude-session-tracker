@@ -376,7 +376,7 @@ class TestTopLevelFlags(unittest.TestCase):
         expected = {
             "pick", "list", "search", "show", "subagents", "relocate",
             "export", "resume", "backup", "restore", "stats",
-            "done", "undone", "live",
+            "done", "undone", "live", "stop", "logs",
             "prompt-hook", "status-hook", "install-hook", "uninstall-hook",
         }
         self.assertEqual(set(subs), expected)

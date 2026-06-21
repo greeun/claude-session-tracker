@@ -133,9 +133,29 @@ def _activate_macos_app(app_name: str) -> None:
         pass
 
 
+def session_open_invocation(claude_bin: str, session_id: str,
+                            short: str | None, skip_perm: bool) -> str:
+    """The core `claude` invocation to open a session in a terminal.
+
+    A background (agent-view) session has a job short id — open it with
+    `claude attach <short>` so the terminal takes over the *live*
+    supervisor-hosted session (catch-up summary + live stream). Everything else
+    is a plain transcript resume (`claude --resume <sid>`), a fresh local fork.
+    attach connects to an existing session, so the resume-only
+    --dangerously-skip-permissions flag does not apply there.
+    """
+    import shlex
+    q = shlex.quote
+    if short:
+        return f"{q(claude_bin)} attach {q(short)}"
+    skip = " --dangerously-skip-permissions" if skip_perm else ""
+    return f"{q(claude_bin)} --resume {q(session_id)}{skip}"
+
+
 def open_in_new_terminal(cwd: str, session_id: str,
                          skip_perm: bool = False,
-                         cmux_mode: str | None = None) -> tuple[bool, str]:
+                         cmux_mode: str | None = None,
+                         attach_short: str | None = None) -> tuple[bool, str]:
     """Spawn `cd <cwd> && claude --resume <session_id>` in a new terminal window.
 
     Returns (ok, info). On success, `info` names the terminal used; on failure,
@@ -158,20 +178,28 @@ def open_in_new_terminal(cwd: str, session_id: str,
     # transcript from ~/.claude/projects/<mangled>/, not from the dir itself).
     # Done parent-side too so terminals that take `--cwd <cwd>` (wezterm,
     # ghostty, kitty, alacritty, cmux) don't choke on a missing directory.
+    # The cwd-placeholder dance is resume-specific (project-scoped `--resume`
+    # maps the cwd string to the transcript dir). attach addresses the live
+    # session by short id and needs none of it.
     recreated_cwd = False
-    try:
-        if cwd and not os.path.isdir(cwd):
-            os.makedirs(cwd, exist_ok=True)
-            recreated_cwd = True
-    except OSError:
-        # Best-effort; the shell `mkdir -p` below retries, and if that also
-        # fails the existing cd-failure handler surfaces the error.
-        recreated_cwd = False
+    if not attach_short:
+        try:
+            if cwd and not os.path.isdir(cwd):
+                os.makedirs(cwd, exist_ok=True)
+                recreated_cwd = True
+        except OSError:
+            # Best-effort; the shell `mkdir -p` below retries, and if that also
+            # fails the existing cd-failure handler surfaces the error.
+            recreated_cwd = False
 
     safe_cwd = shlex.quote(cwd)
     safe_sid = shlex.quote(session_id)
     safe_claude = shlex.quote(claude_bin)
     skip_flag = " --dangerously-skip-permissions" if skip_perm else ""
+    # attach to the live bg session by short id, else resume the transcript.
+    core_cmd = session_open_invocation(claude_bin, session_id,
+                                       attach_short, skip_perm)
+    fail_label = "claude attach" if attach_short else "claude --resume"
     # When the recorded cwd was gone we recreated an empty placeholder so
     # project-scoped `claude --resume` can still find the transcript. If the
     # folder was *moved* (not deleted) the real files live elsewhere — point
@@ -197,9 +225,9 @@ def open_in_new_terminal(cwd: str, session_id: str,
         f"mkdir -p {safe_cwd} && "
         f"cd {safe_cwd} && "
         f"{recreated_notice}"
-        f"{safe_claude} --resume {safe_sid}{skip_flag}; "
+        f"{core_cmd}; "
         f'rc=$?; if [ "$rc" -ne 0 ]; then '
-        f'printf "\\n[cst] \'claude --resume\' failed (exit %s)\\n"'
+        f'printf "\\n[cst] \'{fail_label}\' failed (exit %s)\\n"'
         f' "$rc"; '
         f"printf \"[cst] claude binary: {claude_bin}\\n\"; "
         f'printf "[cst] press Enter to close this window..."; '
@@ -214,7 +242,7 @@ def open_in_new_terminal(cwd: str, session_id: str,
             return False, "cmux binary not found"
         resume_cmd = (
             f"mkdir -p {safe_cwd} && cd {safe_cwd} && "
-            f"{safe_claude} --resume {safe_sid}{skip_flag}"
+            f"{core_cmd}"
         )
         ws_name = f"claude:{session_id[:8]}"
         try:
@@ -1017,9 +1045,42 @@ def scan_jobs() -> dict[str, dict]:
             "template": data.get("template") or "",
             "short": data.get("daemonShort") or d.name,
             "cwd": data.get("cwd") or "",
+            "worktreeBranch": data.get("worktreeBranch") or "",
+            "worktreePath": data.get("worktreePath") or "",
             "updatedAt": data.get("updatedAt"),
         }
     return out
+
+
+def job_short_for(session_id: str) -> str | None:
+    """The agent-view daemonShort for a session, or None if it is not a
+    background (job-backed) session. Used to attach/stop/logs the live session
+    via the `claude` CLI instead of forking its transcript."""
+    return (scan_jobs().get(session_id) or {}).get("short")
+
+
+def job_badge(job: dict | None) -> str:
+    """Compact tag for a job-backed (background/agent-view) row, e.g.
+    `[exec]`, `[bg]`, or `[bg ⎇worktree-fix]`. Empty for non-bg sessions.
+    Surfaces the agent-view `template` and the git worktree branch the session
+    is editing on — context the transcript alone does not carry."""
+    if not job:
+        return ""
+    if (job.get("template") or "") == "exec":
+        return "[exec]"
+    branch = job.get("worktreeBranch") or ""
+    return f"[bg ⎇{branch}]" if branch else "[bg]"
+
+
+def bg_delete_warning(target_sids: list[str], jobs: dict) -> str:
+    """Warning shown before deleting sessions that are job-backed: cst's delete
+    only unlinks the transcript — the live supervisor process keeps running.
+    Empty string when no target is a background session."""
+    n = sum(1 for s in target_sids if s in jobs)
+    if not n:
+        return ""
+    return (f"⚠ {n} background session(s): delete removes the transcript only — "
+            f"the live process keeps running. `claude stop <short>` first.")
 
 
 def get_live_session_info(session_id: str) -> dict | None:
@@ -1635,7 +1696,8 @@ def cmd_list(args: argparse.Namespace) -> int:
         sid = s.session_id[:8]
         ts = fmt_ts(s.last_ts)
         first = truncate(s.first_user_msg, 60) or "(no user message)"
-        proj = shorten_path(s.cwd)
+        badge = job_badge(ctx.jobs.get(s.session_id))
+        proj = shorten_path(s.cwd) + (f"  {badge}" if badge else "")
         print(
             f"{idx:>{num_w}} "
             f"{pad_display(st, STATUS_WIDTH)} "
@@ -1911,8 +1973,13 @@ def cmd_resume(args: argparse.Namespace) -> int:
     if target is None:
         return 1
     cwd = target.cwd or "."
-    skip_flag = " --dangerously-skip-permissions" if getattr(args, "skip_perm", False) else ""
-    cmd = f'cd "{cwd}" && claude --resume {target.session_id}{skip_flag}'
+    short = job_short_for(target.session_id)
+    if short:
+        # background session — attach to the live process, not a transcript fork
+        cmd = f"claude attach {short}"
+    else:
+        skip_flag = " --dangerously-skip-permissions" if getattr(args, "skip_perm", False) else ""
+        cmd = f'cd "{cwd}" && claude --resume {target.session_id}{skip_flag}'
     if args.print_only:
         print(cmd)
         return 0
@@ -1989,6 +2056,45 @@ def cmd_live(args: argparse.Namespace) -> int:
         print(f"{pid:>7}  {rs:<7}  {kind:<11}  "
               f"{started:<17}  {sid[:8]:<10}  {shorten_path(cwd)}")
     return 0
+
+
+def _run_claude(argv: list[str]) -> int:
+    """Run the real `claude` CLI with argv, inheriting stdio (passthrough).
+    Returns its exit code, or 1 if the binary can't be launched. Isolated so
+    bg-action commands (stop/logs) are unit-testable by stubbing this."""
+    import shutil
+    import subprocess
+    claude = shutil.which("claude") or "claude"
+    try:
+        return subprocess.run([claude, *argv]).returncode
+    except OSError as e:
+        print(f"[cst] failed to run 'claude {' '.join(argv)}': {e}",
+              file=sys.stderr)
+        return 1
+
+
+def _bg_action(session_prefix: str, verb: str) -> int:
+    """Resolve a session and run `claude <verb> <short>` against its live
+    background process. Refuses non-bg sessions (no ~/.claude/jobs entry)."""
+    target = require_session(session_prefix)
+    if target is None:
+        return 1
+    short = job_short_for(target.session_id)
+    if not short:
+        print(f"[cst {verb}] {target.session_id[:8]} is not a background "
+              f"session (no ~/.claude/jobs entry). Only bg sessions started "
+              f"via `claude --bg` / agent view can be {verb}'d.",
+              file=sys.stderr)
+        return 1
+    return _run_claude([verb, short])
+
+
+def cmd_stop(args: argparse.Namespace) -> int:
+    return _bg_action(args.session_id, "stop")
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    return _bg_action(args.session_id, "logs")
 
 
 # ---------- prompt-hook (UserPromptSubmit: /done & /undone, 0 tokens) ----------
@@ -2982,7 +3088,8 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
         h2, w2 = stdscr.getmaxyx()
         box_w = min(72, max(40, w2 - 6))
         preview = targets[:5]
-        box_h = 7 + len(preview)
+        bg_warn = bg_delete_warning([s.session_id for s in targets], ctx.jobs)
+        box_h = 7 + len(preview) + (1 if bg_warn else 0)
         y0 = max(0, (h2 - box_h) // 2)
         x0 = max(0, (w2 - box_w) // 2)
         win = curses.newwin(box_h, box_w, y0, x0)
@@ -3001,6 +3108,9 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             if n > len(preview):
                 win.addnstr(2 + len(preview), 3,
                             f"  … +{n - len(preview)} more", box_w - 6)
+            if bg_warn:
+                win.addnstr(box_h - 4, 3, truncate(bg_warn, box_w - 6),
+                            box_w - 6, curses.color_pair(5) | curses.A_BOLD)
             msg = "This cannot be undone."
             win.addnstr(box_h - 3, 3, msg, box_w - 6,
                         curses.color_pair(5))
@@ -3449,6 +3559,9 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             proj_full = shorten_path(s.cwd)
             if s.git_branch:
                 proj_full = f"{proj_full}  ⎇{s.git_branch}"
+            badge = job_badge(ctx.jobs.get(s.session_id))
+            if badge:
+                proj_full = f"{proj_full}  {badge}"
             proj_cell = truncate_display_tail(proj_full, proj_w)
 
             line_before_status = f"{mark}{idx + 1:>{num_w}} "
@@ -3686,6 +3799,23 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                     if ok:
                         toast = f"→ focused  {target.session_id[:8]}  {info}"
                         continue
+                job_short = job_short_for(target.session_id)
+                if job_short:
+                    # Background session — attach to the live supervisor-hosted
+                    # session (catch-up + live stream), not a transcript fork.
+                    # No orphan-relocate / skip-perm: those are resume-only.
+                    cmux_m = choose_cmux_mode() if _in_cmux else None
+                    if _in_cmux and cmux_m is None:
+                        toast = "Attach cancelled"
+                        continue
+                    ok, info = open_in_new_terminal(
+                        target.cwd, target.session_id,
+                        cmux_mode=cmux_m, attach_short=job_short,
+                    )
+                    sid8 = target.session_id[:8]
+                    toast = (f"→ attach {sid8}  {info}" if ok
+                             else f"Attach failed: {info}  ({sid8})")
+                    continue
                 open_cwd = target.cwd
                 if target.cwd and not os.path.isdir(target.cwd):
                     kind, new_cwd = _orphan_relocate_flow(target)
@@ -4846,6 +4976,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_done.add_argument("--force", action="store_true",
                         help="mark done even if the session is actively working")
     p_done.set_defaults(func=cmd_done)
+
+    p_stop = sub.add_parser(
+        "stop", help="stop a live background session (claude stop <short>)")
+    p_stop.add_argument("session_id")
+    p_stop.set_defaults(func=cmd_stop)
+
+    p_logs = sub.add_parser(
+        "logs", help="show a background session's recent output (claude logs)")
+    p_logs.add_argument("session_id")
+    p_logs.set_defaults(func=cmd_logs)
 
     p_undone = sub.add_parser("undone", help="clear done flag")
     p_undone.add_argument("session_id")
