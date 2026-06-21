@@ -30,7 +30,7 @@ cst --version
 4. **Live-process detection** (~line 439) — scans `~/.claude/sessions/<pid>.json` + `kill -0` to determine active vs ended
 5. **State persistence** (~line 495) — `state.json` for 작업종료 (done) flags, `index.json` for mtime-invalidated session cache
 6. **Session loading** (`SessionMeta` dataclass, ~line 553; `load_all_sessions`, ~line 705) — parses `.jsonl` transcripts with caching
-7. **CLI subcommands** (~line 766) — `cmd_list`, `cmd_search`, `cmd_show`, `cmd_resume`, `cmd_done`, `cmd_undone`, `cmd_live`, `cmd_stop`, `cmd_logs`, `cmd_relocate`, `cmd_backup`, `cmd_restore`, `cmd_stats`, `cmd_subagents`
+7. **CLI subcommands** (~line 766) — `cmd_list`, `cmd_search`, `cmd_show`, `cmd_resume`, `cmd_done`, `cmd_undone`, `cmd_live`, `cmd_stop`, `cmd_logs`, `cmd_bg`, `cmd_jobs`, `cmd_relocate`, `cmd_backup`, `cmd_restore`, `cmd_stats`, `cmd_subagents`
 
 ### bg-aware actions (attach / stop / logs)
 
@@ -54,10 +54,22 @@ instead of forking the transcript:
 All shell out through `_run_claude(argv)` (isolated for testing).
 
 - **row badge** — `job_badge(job)` tags job-backed rows with their agent-view
-  `template` and git worktree branch: `[exec]`, `[bg]`, or `[bg ⎇<branch>]`
-  (branch from state.json `worktreeBranch`, which `scan_jobs()` now captures).
-  Appended to the PROJECT column in `cst list` and the TUI rows, so a bg
-  session's branch shows even though cst doesn't compute git branches itself.
+  `template`, git worktree branch, and process liveness: `[exec]`, `[bg]`,
+  `[bg ⎇<branch>]`, `[bg ∙]` (the ∙ mirrors agent-view's ✻/∙ — `tempo != active`
+  means the process exited but is still attach/respawn-able). Branch/worktreePath
+  come from state.json, which `scan_jobs()` captures. Appended to the PROJECT
+  column in `cst list` and the TUI rows.
+- **`cst jobs`** (`cmd_jobs`) — lists EVERY agent-view background job from
+  `~/.claude/jobs`, including exec / transcript-less jobs the transcript-based
+  session browser can't show, with a `daemon_status_line()` header
+  (`read_daemon_roster()` reads `~/.claude/daemon/roster.json`). Read-only.
+- **`cst bg <prompt> [--name N]`** (`cmd_bg`) — dispatch a new background session
+  (`claude --bg`), turning cst into a launcher as well as a viewer.
+
+Deferred (schema not real-validatable yet): PR-status column (state.json carries
+no PR fields on observed jobs; PR data lives in a separate session descriptor)
+and pin unification (`jobs/pins.json` element format unconfirmed + writing it
+risks corrupting agent-view's own pin state).
 8. **TUI** (`_pick_ui`, ~line 1383) — curses-based picker with two modes (normal + search), rendering loop, modal dialogs (help, preview, delete confirm, cmux chooser). **Color theme**: dark/light palettes via `tui_init_colors()` — pair NUMBERS carry fixed meaning (1–9), only (fg,bg) swap per theme, so the whole UI re-themes without touching call sites; pair 7 doubles as the full-screen `bkgd` fill so each theme renders identically across terminals. `resolve_theme()` picks the effective theme (CLI `--theme` → saved pref → `COLORFGBG` auto-detect → dark); `t`/`T` toggles live and persists via `save_theme()` into `state.json`.
 9. **Argument parser** (`_build_parser`, ~line 2549) and `main` (~line 2649)
 

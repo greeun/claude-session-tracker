@@ -33,6 +33,8 @@ SESSIONS_REGISTRY_DIR = Path.home() / ".claude" / "sessions"
 # process is stopped they leave no registry entry — the jobs scanner reads
 # their persisted agent-view `state` instead (see scan_jobs / classify_status).
 JOBS_DIR = Path.home() / ".claude" / "jobs"
+# Supervisor (daemon) state: roster.json lists the running background workers.
+DAEMON_DIR = Path.home() / ".claude" / "daemon"
 HOME = str(Path.home())
 CACHE_DIR = Path.home() / ".cache" / "claude-session-tracker"
 CACHE_PATH = CACHE_DIR / "index.json"
@@ -1061,15 +1063,21 @@ def job_short_for(session_id: str) -> str | None:
 
 def job_badge(job: dict | None) -> str:
     """Compact tag for a job-backed (background/agent-view) row, e.g.
-    `[exec]`, `[bg]`, or `[bg ⎇worktree-fix]`. Empty for non-bg sessions.
-    Surfaces the agent-view `template` and the git worktree branch the session
-    is editing on — context the transcript alone does not carry."""
+    `[exec]`, `[bg]`, `[bg ⎇worktree-fix]`, `[bg ∙]`. Empty for non-bg sessions.
+    Surfaces the agent-view `template`, the git worktree branch the session is
+    editing on, and a ∙ when the process has exited (agent-view's ✻/∙ icon
+    shape: tempo != "active" means recoverable-but-not-running) — context the
+    transcript alone does not carry."""
     if not job:
         return ""
-    if (job.get("template") or "") == "exec":
-        return "[exec]"
+    base = "exec" if (job.get("template") or "") == "exec" else "bg"
+    tempo = job.get("tempo")
+    if tempo and tempo != "active":
+        base += " ∙"               # process exited; still attach/respawn-able
+    if base.startswith("exec"):
+        return f"[{base}]"
     branch = job.get("worktreeBranch") or ""
-    return f"[bg ⎇{branch}]" if branch else "[bg]"
+    return f"[{base} ⎇{branch}]" if branch else f"[{base}]"
 
 
 def bg_delete_warning(target_sids: list[str], jobs: dict) -> str:
@@ -1081,6 +1089,27 @@ def bg_delete_warning(target_sids: list[str], jobs: dict) -> str:
         return ""
     return (f"⚠ {n} background session(s): delete removes the transcript only — "
             f"the live process keeps running. `claude stop <short>` first.")
+
+
+def read_daemon_roster() -> dict | None:
+    """Parse ~/.claude/daemon/roster.json (the supervisor's worker roster), or
+    None when there is no reachable daemon / unreadable file."""
+    try:
+        with (DAEMON_DIR / "roster.json").open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def daemon_status_line(roster: dict | None) -> str:
+    """One-line supervisor health summary from a roster dict."""
+    if not roster:
+        return "daemon: not running"
+    pid = roster.get("supervisorPid")
+    workers = roster.get("workers")
+    n = len(workers) if isinstance(workers, dict) else 0
+    return f"daemon: pid {pid} · {n} worker(s)"
 
 
 def get_live_session_info(session_id: str) -> dict | None:
@@ -2095,6 +2124,51 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
 def cmd_logs(args: argparse.Namespace) -> int:
     return _bg_action(args.session_id, "logs")
+
+
+def cmd_bg(args: argparse.Namespace) -> int:
+    """Dispatch a new background session: `claude --bg [--name N] <prompt>`."""
+    prompt = " ".join(args.prompt).strip()
+    if not prompt:
+        print("[cst bg] empty prompt — nothing to dispatch.", file=sys.stderr)
+        return 1
+    argv = ["--bg"]
+    if getattr(args, "name", None):
+        argv += ["--name", args.name]
+    argv.append(prompt)
+    return _run_claude(argv)
+
+
+def cmd_jobs(args: argparse.Namespace) -> int:
+    """List every agent-view background job from ~/.claude/jobs, including
+    exec / transcript-less jobs the session browser (transcript-based) can't
+    show. Read-only; use cst stop/logs/attach to act on a row."""
+    jobs = scan_jobs()
+    print(f"claude-session-tracker v{__version__}  ·  "
+          f"{daemon_status_line(read_daemon_roster())}")
+    if not jobs:
+        print("(no background jobs in ~/.claude/jobs)")
+        return 0
+    print(f"{'ST':<2} {'SHORT':<9} {'STATE':<8} {'TAG':<24} "
+          f"{'DETAIL':<40}  CWD")
+    print("-" * 100)
+    # waiting first, then working, then the rest — most-attention-first.
+    order = {STATUS_WAITING: 0, STATUS_WORKING: 1, STATUS_IDLE: 2,
+             STATUS_ENDED: 3, STATUS_DONE: 4}
+    rows = sorted(jobs.items(),
+                  key=lambda kv: order.get(
+                      _JOB_STATE_GLYPH.get(kv[1].get("state"), STATUS_ENDED), 9))
+    for _sid, j in rows:
+        glyph = _JOB_STATE_GLYPH.get(j.get("state"), STATUS_ENDED)
+        state = j.get("state") or "?"
+        tag = job_badge(j)
+        detail = truncate(j.get("detail") or "", 40)
+        print(f"{pad_display(glyph, 2)} {j.get('short', ''):<9} {state:<8} "
+              f"{tag:<24} {pad_display(truncate_display(detail, 40), 40)}  "
+              f"{shorten_path(j.get('cwd') or '')}")
+    print(f"\n{len(jobs)} background job(s). "
+          f"Act with: cst attach|stop|logs <short>")
+    return 0
 
 
 # ---------- prompt-hook (UserPromptSubmit: /done & /undone, 0 tokens) ----------
@@ -4976,6 +5050,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_done.add_argument("--force", action="store_true",
                         help="mark done even if the session is actively working")
     p_done.set_defaults(func=cmd_done)
+
+    p_bg = sub.add_parser(
+        "bg", help="dispatch a new background session (claude --bg <prompt>)")
+    p_bg.add_argument("prompt", nargs="*", help="the task to run in background")
+    p_bg.add_argument("--name", help="display name for the session")
+    p_bg.set_defaults(func=cmd_bg)
+
+    p_jobs = sub.add_parser(
+        "jobs", help="list all agent-view background jobs (incl. exec)")
+    p_jobs.set_defaults(func=cmd_jobs)
 
     p_stop = sub.add_parser(
         "stop", help="stop a live background session (claude stop <short>)")
