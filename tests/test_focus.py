@@ -164,5 +164,109 @@ class WeztermGuiSocketsTests(unittest.TestCase):
             self.assertEqual(tracker._wezterm_gui_sockets(), [])
 
 
+CMUX_DEBUG_SAMPLE = """\
+[0] surface:10 (33A0D740-0666-43C2-85E0-501ABA4CF0AC) "task A" mapped=1 tree=1 window=window:1 (7495C250-43F7-4714-BD08-443113F7153E) workspace=workspace:1 (A9A05530-568D-4727-BBCF-06FA05A7CDFE) pane=pane:10 (579596E1-9EEE-4959-9AD1-38DC7D3785BB) bonsplitTab=D0B46344 ctx=split
+    runtime=1 focused=0 terminal=0x0000000b9da44380 ghostty=0x0000000ba11b8000 portal=live#1
+    tty=ttys005 cwd=/x branch=develop ports=[] visible=1
+[1] surface:12 mapped=0 tree=0 window=nil workspace=nil pane=nil bonsplitTab=nil ctx=tab
+    runtime=0 terminal=0x1 ghostty=nil
+    tty=nil cwd=nil
+[2] surface:5 (E189283E-9DFC-4E23-8FC2-DD04E50CBD7B) "task B" mapped=1 tree=1 window=window:2 (7F229B95-16C5-4E9B-BF4C-8151B01AC4AC) workspace=workspace:2 (F6376A2E-1D26-4C61-A300-BF8F5A97D718) pane=pane:5 (09C4ECD7-5F86-48BA-8610-A27CC28C6D2B) bonsplitTab=3B ctx=split
+    runtime=1
+    tty=ttys002 cwd=/y branch=main
+"""
+
+
+class CmuxLocateSurfaceTests(unittest.TestCase):
+    def test_match_first_surface(self):
+        loc = tracker._cmux_locate_surface(CMUX_DEBUG_SAMPLE, "ttys005")
+        self.assertEqual(loc["window"], "7495C250-43F7-4714-BD08-443113F7153E")
+        self.assertEqual(loc["workspace"], "A9A05530-568D-4727-BBCF-06FA05A7CDFE")
+        self.assertEqual(loc["pane"], "579596E1-9EEE-4959-9AD1-38DC7D3785BB")
+
+    def test_match_later_surface(self):
+        loc = tracker._cmux_locate_surface(CMUX_DEBUG_SAMPLE, "ttys002")
+        self.assertEqual(loc["window"], "7F229B95-16C5-4E9B-BF4C-8151B01AC4AC")
+        self.assertEqual(loc["pane"], "09C4ECD7-5F86-48BA-8610-A27CC28C6D2B")
+
+    def test_no_match_returns_none(self):
+        self.assertIsNone(tracker._cmux_locate_surface(CMUX_DEBUG_SAMPLE, "ttys999"))
+
+    def test_unmapped_surface_ignored(self):
+        # surface:12 has tty=nil and window=nil — never a valid target.
+        self.assertIsNone(tracker._cmux_locate_surface(CMUX_DEBUG_SAMPLE, "nil"))
+
+    def test_match_without_window_returns_none(self):
+        sample = (
+            "[0] surface:1 (X) m=1 window=nil workspace=nil pane=nil ctx=tab\n"
+            "    tty=ttys777 cwd=/z\n"
+        )
+        self.assertIsNone(tracker._cmux_locate_surface(sample, "ttys777"))
+
+
+def _fake_cmux_run(sample, debug_rc=0, focus_rc=0):
+    def run(cmd, *a, **k):
+        if "debug-terminals" in cmd:
+            return mock.Mock(returncode=debug_rc, stdout=sample)
+        return mock.Mock(returncode=focus_rc, stdout="OK\n")
+    return run
+
+
+class FocusCmuxTests(unittest.TestCase):
+    def test_cmux_not_found_returns_false(self):
+        with mock.patch("shutil.which", return_value=None):
+            ok, info = tracker._focus_cmux("/dev/ttys005")
+        self.assertFalse(ok)
+        self.assertEqual(info, "cmux not found")
+
+    def test_success_raises_workspace(self):
+        with mock.patch("shutil.which", return_value="/bin/cmux"), \
+             mock.patch("subprocess.run",
+                        side_effect=_fake_cmux_run(CMUX_DEBUG_SAMPLE)):
+            ok, info = tracker._focus_cmux("/dev/ttys005")
+        self.assertTrue(ok)
+        self.assertEqual(info, "cmux workspace")
+
+    def test_no_surface_for_tty_returns_false(self):
+        with mock.patch("shutil.which", return_value="/bin/cmux"), \
+             mock.patch("subprocess.run",
+                        side_effect=_fake_cmux_run(CMUX_DEBUG_SAMPLE)):
+            ok, info = tracker._focus_cmux("/dev/ttys999")
+        self.assertFalse(ok)
+        self.assertIn("ttys999", info)
+
+    def test_debug_terminals_error_returns_false(self):
+        with mock.patch("shutil.which", return_value="/bin/cmux"), \
+             mock.patch("subprocess.run",
+                        side_effect=_fake_cmux_run("", debug_rc=1)):
+            ok, info = tracker._focus_cmux("/dev/ttys005")
+        self.assertFalse(ok)
+        self.assertEqual(info, "cmux debug-terminals error")
+
+    def test_focus_window_failure_returns_false(self):
+        with mock.patch("shutil.which", return_value="/bin/cmux"), \
+             mock.patch("subprocess.run",
+                        side_effect=_fake_cmux_run(CMUX_DEBUG_SAMPLE, focus_rc=1)):
+            ok, info = tracker._focus_cmux("/dev/ttys005")
+        self.assertFalse(ok)
+        self.assertEqual(info, "cmux focus-window failed")
+
+
+class CmuxOrderTests(unittest.TestCase):
+    def test_cmux_probed_first_inside_cmux_workspace(self):
+        with mock.patch.object(tracker, "_controlling_tty",
+                               return_value="/dev/ttys005"), \
+             mock.patch("shutil.which", return_value="/bin/cmux"), \
+             mock.patch.object(tracker, "_macos_proc_running", return_value=True), \
+             mock.patch.object(tracker, "_focus_cmux",
+                               return_value=(True, "cmux workspace")) as fc, \
+             mock.patch.dict(os.environ,
+                             {"CMUX_WORKSPACE_ID": "X", "TERM_PROGRAM": "ghostty"}):
+            ok, info = tracker.focus_existing_window("sid", {"pid": 4321})
+        self.assertTrue(ok)
+        self.assertEqual(info, "cmux workspace")
+        fc.assert_called_once_with("/dev/ttys005")
+
+
 if __name__ == "__main__":
     unittest.main()

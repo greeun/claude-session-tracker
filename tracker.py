@@ -12,7 +12,7 @@ Data sources:
 """
 from __future__ import annotations
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 import argparse
 import json
@@ -28,6 +28,11 @@ from typing import Iterator
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 SESSIONS_REGISTRY_DIR = Path.home() / ".claude" / "sessions"
+# Agent-view background sessions: ~/.claude/jobs/<short>/state.json.
+# Hosted by the supervisor, not the pid registry above, so once an idle bg
+# process is stopped they leave no registry entry — the jobs scanner reads
+# their persisted agent-view `state` instead (see scan_jobs / classify_status).
+JOBS_DIR = Path.home() / ".claude" / "jobs"
 HOME = str(Path.home())
 CACHE_DIR = Path.home() / ".cache" / "claude-session-tracker"
 CACHE_PATH = CACHE_DIR / "index.json"
@@ -70,6 +75,22 @@ _STATE_GLYPH = {
     "working": STATUS_WORKING,
     "waiting": STATUS_WAITING,
     "idle":    STATUS_IDLE,
+}
+
+# jobs/<id>/state.json agent-view `state` -> glyph. The union is
+# working | blocked | idle | done | failed | stopped | queued (captured from
+# Claude Code 2.1.x). "blocked" is agent-view's waiting-for-input state.
+# Finished/unknown states fall through to ○ ended (default), since a stopped
+# bg process is no longer running — only the live-ish states override "ended".
+_JOB_STATE_GLYPH = {
+    "working": STATUS_WORKING,
+    "blocked": STATUS_WAITING,
+    "waiting": STATUS_WAITING,
+    "idle":    STATUS_IDLE,
+    "queued":  STATUS_IDLE,
+    "done":    STATUS_ENDED,
+    "failed":  STATUS_ENDED,
+    "stopped": STATUS_ENDED,
 }
 
 
@@ -649,6 +670,82 @@ def _focus_iterm2(tty: str) -> tuple[bool, str]:
         _build_iterm2_focus_script(tty), "iTerm2")
 
 
+def _cmux_locate_surface(debug_out: str, tty_base: str) -> dict | None:
+    """Parse `cmux --id-format both debug-terminals`; return the window/
+    workspace/pane UUIDs of the surface whose `tty=<tty_base>` line matches,
+    or None. Each surface is a multi-line block: the header line carries
+    `window=window:N (UUID) workspace=... pane=...`, and the controlling pty
+    appears on a later `tty=ttysNNN` line of the same block."""
+    uuid = r"\(([0-9A-Fa-f-]{36})\)"
+    pending: dict | None = None
+    for line in debug_out.splitlines():
+        s = line.strip()
+        if re.match(r"\[\d+\]\s+surface:", s):
+            win = re.search(rf"window=window:\d+ {uuid}", s)
+            ws = re.search(rf"workspace=workspace:\d+ {uuid}", s)
+            pane = re.search(rf"pane=pane:\d+ {uuid}", s)
+            pending = {
+                "window": win.group(1) if win else None,
+                "workspace": ws.group(1) if ws else None,
+                "pane": pane.group(1) if pane else None,
+            }
+            continue
+        m = re.search(r"\btty=(ttys[0-9]+)\b", s)
+        if m and pending is not None and m.group(1) == tty_base:
+            if pending["window"] and pending["workspace"]:
+                return pending
+            return None
+    return None
+
+
+def _focus_cmux(tty: str) -> tuple[bool, str]:
+    """Raise the cmux workspace/window hosting the surface whose pty matches
+    `tty` (e.g. /dev/ttys005). cmux is a Ghostty-based GUI multiplexer with no
+    per-tty raise command, so we map tty -> surface -> (workspace, window) via
+    `debug-terminals`, then select-workspace + focus-pane + focus-window. Refs
+    like `window:1` are rejected by focus-window, so we drive everything by the
+    UUIDs that `--id-format both` prints."""
+    import shutil
+    import subprocess
+    cmux = shutil.which("cmux")
+    if not cmux:
+        return False, "cmux not found"
+    tty_base = tty.rsplit("/", 1)[-1]  # /dev/ttys005 -> ttys005
+    try:
+        r = subprocess.run(
+            [cmux, "--id-format", "both", "debug-terminals"],
+            capture_output=True, text=True, timeout=8,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False, "cmux debug-terminals failed"
+    if r.returncode != 0:
+        return False, "cmux debug-terminals error"
+    loc = _cmux_locate_surface(r.stdout, tty_base)
+    if not loc:
+        return False, f"no cmux surface for {tty_base}"
+    ws, win, pane = loc["workspace"], loc["window"], loc["pane"]
+    try:
+        subprocess.run(
+            [cmux, "select-workspace", "--workspace", ws, "--window", win],
+            capture_output=True, timeout=5,
+        )
+        if pane:
+            subprocess.run(
+                [cmux, "focus-pane", "--pane", pane,
+                 "--workspace", ws, "--window", win],
+                capture_output=True, timeout=5,
+            )
+        fr = subprocess.run(
+            [cmux, "focus-window", "--window", win],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False, "cmux focus failed"
+    if fr.returncode != 0:
+        return False, "cmux focus-window failed"
+    return True, "cmux workspace"
+
+
 def focus_existing_window(session_id: str, live_info: dict) -> tuple[bool, str]:
     """Raise the existing terminal window/tab/pane hosting a live session.
 
@@ -669,15 +766,23 @@ def focus_existing_window(session_id: str, live_info: dict) -> tuple[bool, str]:
     wez = ("WezTerm", lambda: shutil.which("wezterm") is not None, _focus_wezterm)
     term = ("Terminal.app", lambda: _macos_proc_running("Terminal"), _focus_terminal_app)
     iterm = ("iTerm2", lambda: _macos_proc_running("iTerm2"), _focus_iterm2)
+    cmux = ("cmux",
+            lambda: shutil.which("cmux") is not None and _macos_proc_running("cmux"),
+            _focus_cmux)
 
-    if "wezterm" in tp:
-        order = [wez, term, iterm]
+    # In cmux TERM_PROGRAM is "ghostty" (its embedded terminal), so cmux can't
+    # be detected from $TERM_PROGRAM alone — probe it first when we're inside a
+    # cmux workspace, and keep it as a fallback everywhere else.
+    if os.environ.get("CMUX_WORKSPACE_ID"):
+        order = [cmux, wez, term, iterm]
+    elif "wezterm" in tp:
+        order = [wez, term, iterm, cmux]
     elif "iterm" in tp:
-        order = [iterm, term, wez]
+        order = [iterm, term, wez, cmux]
     elif tp == "apple_terminal":
-        order = [term, iterm, wez]
+        order = [term, iterm, wez, cmux]
     else:
-        order = [wez, term, iterm]
+        order = [cmux, wez, term, iterm]
 
     for _name, available, focus in order:
         try:
@@ -878,6 +983,45 @@ def scan_registry_status() -> dict[str, dict]:
     return out
 
 
+def scan_jobs() -> dict[str, dict]:
+    """sessionId -> agent-view job record from ~/.claude/jobs/<short>/state.json.
+
+    Background (agent-view) sessions are managed by the supervisor and may not
+    appear in the pid registry once their idle process is stopped. Their
+    persisted state.json still carries the true agent-view `state`, so cst can
+    show ●/!/◦ instead of a misleading ○ ended. Keyed by sessionId (falling
+    back to resumeSessionId) so it joins straight onto the transcript-derived
+    SessionMeta. Robust to the sibling pins.json/.order files and partial dirs.
+    """
+    out: dict[str, dict] = {}
+    if not JOBS_DIR.is_dir():
+        return out
+    for d in JOBS_DIR.iterdir():
+        if not d.is_dir():
+            continue  # skip pins.json / .order and other stray files
+        try:
+            with (d / "state.json").open("r", encoding="utf-8") as fp:
+                data = json.load(fp)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        sid = data.get("sessionId") or data.get("resumeSessionId")
+        if not sid:
+            continue
+        st = data.get("state")
+        out[sid] = {
+            "state": st if isinstance(st, str) else None,
+            "tempo": data.get("tempo") if isinstance(data.get("tempo"), str) else None,
+            "detail": data.get("detail") or "",
+            "template": data.get("template") or "",
+            "short": data.get("daemonShort") or d.name,
+            "cwd": data.get("cwd") or "",
+            "updatedAt": data.get("updatedAt"),
+        }
+    return out
+
+
 def get_live_session_info(session_id: str) -> dict | None:
     """Return the registry record (pid, cwd, ideName, …) for a live session."""
     if not SESSIONS_REGISTRY_DIR.is_dir():
@@ -945,6 +1089,26 @@ def set_done(session_id: str, value: bool) -> None:
     save_state(state)
 
 
+# Refusing done on an actively-working (●) session: the task is still running,
+# and since done > every state, the ✓ would mask a live, quota-burning session.
+# Stop it with `claude stop <short>` → ended, or wait for the turn to finish →
+# idle, then mark done. Other states (waiting/idle/ended) and unmarking are
+# allowed. (cst's own Del removes the transcript but does NOT stop the live
+# supervisor process, so it is not a substitute for `claude stop`.)
+DONE_WORKING_REASON = (
+    "● actively working — refusing to mark done (the ✓ flag would hide a live, "
+    "quota-burning session). Stop it with `claude stop <short>` or wait for the "
+    "turn to finish, then mark done. Pass --force to override.")
+
+
+def done_guard_blocks(status: str, force: bool = False) -> bool:
+    """True when a done=True request must be refused: the session is actively
+    working (●) and not forced. Pure decision so every entry point (cmd_done,
+    the done! prompt-hook, TUI D / Ctrl-D) refuses consistently. Already-done
+    sessions resolve to ✓ (not ●) so unmarking is never blocked here."""
+    return (not force) and status == STATUS_WORKING
+
+
 def status_overlay() -> dict:
     """state.json hook-driven status overlay: sid -> {state,event,ts}."""
     val = load_state().get("status")
@@ -971,12 +1135,14 @@ def set_status(session_id: str, state: str | None, event: str) -> None:
 
 def resolve_status(session_id: str, live: set[str], done: set[str],
                    registry: dict | None = None,
-                   overlay: dict | None = None) -> str:
+                   overlay: dict | None = None,
+                   jobs: dict | None = None) -> str:
     return classify_status(
         done=session_id in done,
         alive=session_id in live,
         overlay=(overlay or {}).get(session_id),
         reg=(registry or {}).get(session_id),
+        job=(jobs or {}).get(session_id),
     )
 
 
@@ -990,16 +1156,18 @@ class StatusContext:
     done: set[str]
     registry: dict
     overlay: dict
+    jobs: dict
 
     @classmethod
     def capture(cls) -> "StatusContext":
         live, _ = scan_live_sessions()
         return cls(live=live, done=done_ids(),
-                   registry=scan_registry_status(), overlay=status_overlay())
+                   registry=scan_registry_status(), overlay=status_overlay(),
+                   jobs=scan_jobs())
 
     def resolve(self, session_id: str) -> str:
         return resolve_status(session_id, self.live, self.done,
-                              self.registry, self.overlay)
+                              self.registry, self.overlay, self.jobs)
 
     def counts(self, sessions) -> dict:
         c = {g: 0 for g in STATUS_ALL}
@@ -1009,7 +1177,7 @@ class StatusContext:
 
     def waiting(self, sessions) -> set:
         return waiting_ids(sessions, self.live, self.done,
-                           self.registry, self.overlay)
+                           self.registry, self.overlay, self.jobs)
 
 
 def _iso_to_ms(iso: str | None) -> int | None:
@@ -1022,17 +1190,27 @@ def _iso_to_ms(iso: str | None) -> int | None:
 
 def classify_status(*, done: bool, alive: bool,
                        overlay: dict | None,
-                       reg: dict | None) -> str:
+                       reg: dict | None,
+                       job: dict | None = None) -> str:
     """Pure status decision. See spec 'Resolution priority'.
 
     overlay: state.json status entry for this session, e.g.
              {"state": "waiting", "event": "Notification", "ts": "<iso>"} or None
     reg:     registry record for this session, e.g.
              {"status": "idle", "updatedAt": <ms>} or None
+    job:     ~/.claude/jobs record for this session, e.g.
+             {"state": "blocked", ...} or None. Only consulted when the pid
+             registry shows the session as not alive: a background session
+             whose process the supervisor stopped is absent from the registry
+             but still carries its true agent-view state, so we surface that
+             instead of a misleading ○ ended. A live (attached/running) bg
+             session is in the registry, so the fresher signal there wins.
     """
     if done:
         return STATUS_DONE
     if not alive:
+        if job:
+            return _JOB_STATE_GLYPH.get(job.get("state"), STATUS_ENDED)
         return STATUS_ENDED
     reg_status = (reg or {}).get("status")
     reg_ms = (reg or {}).get("updatedAt")
@@ -1085,16 +1263,79 @@ def save_auto_rescan(enabled: bool, interval: int) -> None:
     save_state(st)
 
 
+# ── TUI color theme persistence + resolution ────────────────────────────────
+#
+# Mirrors how auto-rescan stores its preference in state.json — the theme is a
+# user preference of the same nature, so it lives in the same overlay (no extra
+# config file). The stored value is one of "auto"/"dark"/"light"; "auto" defers
+# the dark↔light decision to resolve_theme() (COLORFGBG sniff). The live `t`
+# toggle persists the *concrete* theme it switched to, so the choice sticks.
+
+THEME_CHOICES = ("auto", "dark", "light")
+
+
+def load_theme() -> str:
+    """Stored TUI theme preference from state.json ("auto"|"dark"|"light").
+    Defaults to "auto" on missing / unknown values."""
+    val = load_state().get("theme")
+    return val if val in THEME_CHOICES else "auto"
+
+
+def save_theme(theme: str) -> None:
+    if theme not in THEME_CHOICES:
+        theme = "auto"
+    st = load_state()
+    st["theme"] = theme
+    save_state(st)
+
+
+def _detect_terminal_is_light(env: dict | None = None) -> bool | None:
+    """Best-effort terminal-background detection via ``COLORFGBG``.
+
+    Returns ``True`` (light bg), ``False`` (dark bg), or ``None`` (unknown).
+    ``COLORFGBG`` is ``"fg;bg"`` or ``"fg;default;bg"`` — the last field is the
+    background color index; index 7 (white) / 15 (bright white) reads as light.
+    macOS Terminal.app / default iTerm2 do NOT set it, so auto falls back to
+    dark and the user toggles to light with `t` / --theme.
+    """
+    src = os.environ if env is None else env
+    raw = (src.get("COLORFGBG") or "").strip()
+    if not raw:
+        return None
+    parts = raw.split(";")
+    if len(parts) < 2:
+        return None
+    bg = parts[-1].strip()
+    if not bg.isdigit():
+        return None
+    return int(bg) in (7, 15)
+
+
+def resolve_theme(config_theme: str, cli_override: str | None = None,
+                  env: dict | None = None) -> str:
+    """Resolve the effective TUI theme to ``"dark"`` or ``"light"``.
+
+    Priority: ``cli_override`` → saved ``config_theme`` (when explicit) →
+    ``COLORFGBG`` auto-detect → ``"dark"`` fallback. ``"auto"`` from either
+    source triggers detection rather than acting as an explicit theme.
+    """
+    candidate = (cli_override or config_theme or "auto").lower()
+    if candidate in ("dark", "light"):
+        return candidate
+    return "light" if _detect_terminal_is_light(env) else "dark"
+
+
 def newly_waiting(prev: set[str], cur: set[str]) -> set[str]:
     """Session ids that transitioned INTO waiting since the last snapshot."""
     return cur - prev
 
 
 def waiting_ids(sessions: list, live: set[str], done: set[str],
-                registry: dict, overlay: dict) -> set[str]:
+                registry: dict, overlay: dict,
+                jobs: dict | None = None) -> set[str]:
     """Session ids currently resolving to STATUS_WAITING."""
     return {s.session_id for s in sessions
-            if resolve_status(s.session_id, live, done, registry, overlay)
+            if resolve_status(s.session_id, live, done, registry, overlay, jobs)
             == STATUS_WAITING}
 
 
@@ -1693,6 +1934,10 @@ def cmd_done(args: argparse.Namespace) -> int:
     target = require_session(args.session_id)
     if target is None:
         return 1
+    status = StatusContext.capture().resolve(target.session_id)
+    if done_guard_blocks(status, getattr(args, "force", False)):
+        print(f"{target.session_id[:8]}  {DONE_WORKING_REASON}", file=sys.stderr)
+        return 1
     set_done(target.session_id, True)
     print(f"✓ Marked done: {target.session_id[:8]}  {shorten_path(target.cwd)}")
     return 0
@@ -1822,6 +2067,12 @@ def cmd_prompt_hook(args: argparse.Namespace) -> int:
         return _block(
             f"[cst {action}] failed — no session matching '{raw_target}' "
             f"(not found or ambiguous). Nothing changed.\n{note}")
+    if action == "done":
+        status = StatusContext.capture().resolve(target.session_id)
+        if done_guard_blocks(status):
+            return _block(
+                f"[cst done] refused — {target.session_id[:8]}  "
+                f"{DONE_WORKING_REASON}\n{note}")
     set_done(target.session_id, action == "done")
     glyph = "✓ done ON" if action == "done" else "○ done cleared"
     return _block(
@@ -2091,6 +2342,7 @@ HELP_LINES = [
     "                         (Ctrl-H is unavailable — it aliases Backspace)",
     "  C / c                  toggle: only show sessions under the TUI launch cwd",
     "                         (prefix match on the recorded session cwd)",
+    "  t / T                  toggle color theme (dark ↔ light) — saved",
     "  R / r / Ctrl-R         rescan sessions + live-process registry",
     "  Del / Fn+Delete        delete marked/current session(s)",
     "  ?                      this help",
@@ -2571,25 +2823,96 @@ def _do_rescan(cwd_filter, days, sessions) -> RescanResult:
     return RescanResult(ctx, ctx.waiting(sessions))
 
 
+# ── TUI color theme palettes ────────────────────────────────────────────────
+#
+# Pair NUMBERS carry fixed meaning (1=selection, 2=header/accent, 3=working,
+# 4=cwd, 5=danger, 6=mark/done, 7=dim/ended, 8=waiting, 9=idle); only their
+# (fg, bg) differ per theme. Because every call site resolves a pair by NUMBER,
+# swapping the palette re-themes the whole UI without touching call sites.
+#
+# Both themes fix a background on EVERY pair so a theme renders identically
+# across Terminal.app / WezTerm / iTerm2 / ghostty regardless of that terminal's
+# own background (the earlier `-1`/inherit design made the dark accents — yellow
+# especially — unreadable on a light terminal). Pair 7 doubles as the
+# full-screen bg fill (via stdscr.bkgd) in BOTH themes — white-on-black under
+# dark, black-on-white under light — so untouched cells inherit the theme bg.
+#
+# DARK  = the saturated "looks good on black" scheme on a FIXED black bg.
+# LIGHT = the same hues remapped onto a FIXED white bg: the selection chip
+#         becomes a solid black bar (white-on-black, so color_pair(1) still
+#         stands out with no call-site change), the yellow header goes mono
+#         black, and idle's cyan (washes out on white) is swapped for blue.
+_BG_PAIR = 7
+_ACTIVE_THEME = "dark"
+
+
+def current_theme() -> str:
+    """The theme last applied by :func:`tui_init_colors` ("dark"|"light")."""
+    return _ACTIVE_THEME
+
+
+def tui_init_colors(theme: str, stdscr=None) -> None:
+    """Initialize the curses color palette for ``theme`` ("dark"|"light").
+
+    Safe to call repeatedly — used both at startup and on the live `t` toggle.
+    Unknown values fall back to dark. When ``stdscr`` is given, also fills the
+    whole screen with the theme background via the shared fill pair (7).
+    """
+    import curses
+    global _ACTIVE_THEME
+    _ACTIVE_THEME = "light" if theme == "light" else "dark"
+    try:
+        curses.use_default_colors()
+    except (curses.error, ValueError):
+        pass
+    B, R, G, Y = (curses.COLOR_BLACK, curses.COLOR_RED,
+                  curses.COLOR_GREEN, curses.COLOR_YELLOW)
+    BL, M, C, W = (curses.COLOR_BLUE, curses.COLOR_MAGENTA,
+                   curses.COLOR_CYAN, curses.COLOR_WHITE)
+    if _ACTIVE_THEME == "light":
+        palette = (
+            (1, W, B),   # selection — solid black bar (reverse look on white)
+            (2, B, W),   # header / accent — mono black, recedes on white
+            (3, G, W),   # working
+            (4, BL, W),  # cwd / project
+            (5, R, W),   # danger
+            (6, M, W),   # mark / done
+            (7, B, W),   # dim / ended; also the bg-fill pair
+            (8, R, W),   # waiting
+            (9, BL, W),  # idle — cyan washes out on white, use blue
+        )
+    else:
+        palette = (
+            (1, B, C),   # selection — solid cyan chip
+            (2, Y, B),   # header / accent
+            (3, G, B),   # working
+            (4, BL, B),  # cwd / project
+            (5, R, B),   # danger
+            (6, M, B),   # mark / done
+            (7, W, B),   # dim / ended; also the bg-fill pair
+            (8, R, B),   # waiting
+            (9, C, B),   # idle
+        )
+    for n, fg, bg in palette:
+        try:
+            curses.init_pair(n, fg, bg)
+        except (curses.error, ValueError):
+            pass
+    if stdscr is not None:
+        try:
+            stdscr.bkgd(" ", curses.color_pair(_BG_PAIR))
+        except (curses.error, ValueError):
+            pass
+
+
 def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
              days: int | None, skip_perm_default: bool = False,
-             hide_done_default: bool = False):
+             hide_done_default: bool = False, theme: str = "dark"):
     import curses
     import time
     curses.curs_set(0)
-    try:
-        curses.use_default_colors()
-        curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_CYAN)   # selection
-        curses.init_pair(2, curses.COLOR_YELLOW, -1)                 # header
-        curses.init_pair(3, curses.COLOR_GREEN, -1)                  # active
-        curses.init_pair(4, curses.COLOR_BLUE, -1)                   # cwd / project
-        curses.init_pair(5, curses.COLOR_RED, -1)                    # danger
-        curses.init_pair(6, curses.COLOR_MAGENTA, -1)                # mark / done
-        curses.init_pair(7, curses.COLOR_WHITE, -1)                  # dim for ended
-        curses.init_pair(8, curses.COLOR_RED, -1)                    # waiting
-        curses.init_pair(9, curses.COLOR_CYAN, -1)                   # idle
-    except curses.error:
-        pass
+    cur_theme = "light" if theme == "light" else "dark"
+    tui_init_colors(cur_theme, stdscr)
     # Default ESCDELAY is 1000ms — too slow; users see a 1s lag between
     # pressing Esc and the TUI reacting. 25ms is enough for real escape
     # sequences to arrive while feeling instant.
@@ -3298,10 +3621,13 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                 # typing a filter (search mode stays active).
                 if items:
                     target_sid = items[sel].session_id
-                    now_done = mark_done(target_sid)
-                    ctx.done = done_ids()
-                    toast = ("Marked done" if now_done
-                             else "Cleared done") + f": {target_sid[:8]}"
+                    if done_guard_blocks(ctx.resolve(target_sid)):
+                        toast = f"● working — `claude stop` it or wait: {target_sid[:8]}"
+                    else:
+                        now_done = mark_done(target_sid)
+                        ctx.done = done_ids()
+                        toast = ("Marked done" if now_done
+                                 else "Cleared done") + f": {target_sid[:8]}"
             elif ch == 18:  # Ctrl-R — rescan (mirrors normal-mode R)
                 _r = _do_rescan(cwd_filter, days, sessions)
                 ctx = _r.ctx
@@ -3427,17 +3753,25 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
         elif ch in (ord('D'), ord('d'), 4):  # D / d / Ctrl-D
             if marked:
                 target_sids = [s.session_id for s in sessions if s.session_id in marked]
-                for sid in target_sids:
+                allowed = [s for s in target_sids
+                           if not done_guard_blocks(ctx.resolve(s))]
+                skipped = len(target_sids) - len(allowed)
+                for sid in allowed:
                     set_done(sid, True)
                 ctx.done = done_ids()
                 marked.clear()
-                toast = f"Marked done: {len(target_sids)} session(s)"
+                toast = f"Marked done: {len(allowed)} session(s)"
+                if skipped:
+                    toast += f" · skipped {skipped} ● working (`claude stop` / --force)"
             elif items:
                 target_sid = items[sel].session_id
-                now_done = mark_done(target_sid)
-                ctx.done = done_ids()
-                toast = ("Marked done" if now_done else "Cleared done") \
-                        + f": {target_sid[:8]}"
+                if done_guard_blocks(ctx.resolve(target_sid)):
+                    toast = f"● working — stop first (Ctrl-X) or wait: {target_sid[:8]}"
+                else:
+                    now_done = mark_done(target_sid)
+                    ctx.done = done_ids()
+                    toast = ("Marked done" if now_done else "Cleared done") \
+                            + f": {target_sid[:8]}"
         elif ch in (ord('a'), ord('A')):
             _res = _auto_rescan_modal(stdscr, auto_enabled, auto_interval)
             if _res is not None:
@@ -3446,6 +3780,14 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                 last_rescan = time.monotonic()
                 toast = ("Auto-rescan: off" if not auto_enabled
                          else f"Auto-rescan: every {auto_interval}s")
+        elif ch in (ord('t'), ord('T')):
+            # Live theme toggle (dark ↔ light): re-init the palette in place and
+            # persist the concrete choice. The next render redraws the frame on
+            # the freshly filled background.
+            cur_theme = "light" if cur_theme == "dark" else "dark"
+            tui_init_colors(cur_theme, stdscr)
+            save_theme(cur_theme)
+            toast = f"Theme: {cur_theme}"
         elif ch in (ord('H'), ord('h')):
             # No Ctrl-H alias: Ctrl-H == ASCII 8 == Backspace on most terminals.
             hide_done = not hide_done
@@ -3554,6 +3896,7 @@ def cmd_pick(args: argparse.Namespace) -> int:
         return 0
     skip_perm = bool(getattr(args, "skip_perm", False))
     hide_done = bool(getattr(args, "hide_done", False))
+    theme = resolve_theme(load_theme(), getattr(args, "theme", None))
     # Ghostty (and cmux, which embeds Ghostty) advertise TERM=xterm-ghostty,
     # whose terminfo entry the system ncurses DB frequently lacks. initscr()
     # would then die with "setupterm: could not find terminal" and the TUI
@@ -3569,7 +3912,7 @@ def cmd_pick(args: argparse.Namespace) -> int:
               f"using xterm-256color)            ", file=sys.stderr)
     try:
         curses.wrapper(_pick_ui, sessions, args.cwd, args.days, skip_perm,
-                       hide_done)
+                       hide_done, theme)
     except KeyboardInterrupt:
         pass
     # The TUI handles Enter by spawning a new terminal window, so we don't
@@ -4402,6 +4745,9 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--hide-done", dest="hide_done", action="store_true",
                     help="start the TUI with 작업완료(done) sessions hidden "
                          "(toggle in-TUI with H)")
+    ap.add_argument("--theme", choices=THEME_CHOICES, default=None,
+                    help="TUI color theme (default: saved choice, else "
+                         "auto-detect via COLORFGBG; toggle in-TUI with t)")
     sub = ap.add_subparsers(dest="cmd")
 
     p_pick = sub.add_parser("pick", help="interactive picker (TUI)")
@@ -4415,6 +4761,11 @@ def _build_parser() -> argparse.ArgumentParser:
                         default=argparse.SUPPRESS,
                         help="start with 작업완료(done) sessions hidden "
                              "(toggle with H)")
+    # default=SUPPRESS so an omitted flag here does NOT clobber a top-level
+    # --theme (same pattern as --hide-done above).
+    p_pick.add_argument("--theme", choices=THEME_CHOICES,
+                        default=argparse.SUPPRESS,
+                        help="TUI color theme (toggle in-TUI with t)")
     p_pick.set_defaults(func=cmd_pick)
 
     p_list = sub.add_parser("list", help="list sessions (CLI, with status column)")
@@ -4492,6 +4843,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_done = sub.add_parser("done", help="mark session as done")
     p_done.add_argument("session_id")
+    p_done.add_argument("--force", action="store_true",
+                        help="mark done even if the session is actively working")
     p_done.set_defaults(func=cmd_done)
 
     p_undone = sub.add_parser("undone", help="clear done flag")
@@ -4542,6 +4895,7 @@ def main() -> int:
 
     skip_perm = bool(getattr(args, "skip_perm", False))
     hide_done = bool(getattr(args, "hide_done", False))
+    theme = getattr(args, "theme", None)
 
     # No subcommand: synthesize the default one FROM the parser so its
     # defaults can never drift from the subparser definition (the old
@@ -4552,6 +4906,10 @@ def main() -> int:
         args = ap.parse_args([default_cmd])
         args.skip_perm = skip_perm
         args.hide_done = hide_done
+        # Re-parsing builds a fresh namespace, so carry the top-level --theme
+        # back (mirrors skip_perm/hide_done) — else `cst --tui --theme light`
+        # would silently drop the theme.
+        args.theme = theme
     return args.func(args)
 
 

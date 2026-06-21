@@ -71,6 +71,7 @@ cst done <id>                 # 세션을 done으로 표시
 cst export <id>               # 트랜스크립트를 ./<id>.md로 출력
 cst stats                     # 요약 (프로젝트·상태 분포)
 cst --skip-perm --tui         # 재개 시 --dangerously-skip-permissions 자동 적용
+cst --theme light --tui       # TUI 색 테마 지정(auto|dark|light; `t`/`T`로 실시간 토글)
 ```
 
 ---

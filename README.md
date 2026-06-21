@@ -71,6 +71,7 @@ cst done <id>                 # mark a session as done
 cst export <id>               # write transcript to ./<id>.md
 cst stats                     # counts, top projects, status breakdown
 cst --skip-perm --tui         # auto-apply --dangerously-skip-permissions on resume
+cst --theme light --tui       # force a TUI color theme (auto|dark|light; `t`/`T` toggles live)
 ```
 
 ---
