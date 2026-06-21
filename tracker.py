@@ -21,7 +21,7 @@ import re
 import sys
 import tarfile
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
@@ -40,7 +40,7 @@ CACHE_DIR = Path.home() / ".cache" / "claude-session-tracker"
 CACHE_PATH = CACHE_DIR / "index.json"
 # Bumped whenever the cached SessionMeta shape or extraction logic changes,
 # so stale entries are re-indexed instead of serving wrong snippets.
-_CACHE_SCHEMA = 3
+_CACHE_SCHEMA = 4
 STATE_PATH = CACHE_DIR / "state.json"
 
 # Compact glyphs shown in tables (display width 1 each).
@@ -1441,6 +1441,7 @@ class SessionMeta:
     msg_count: int = 0
     first_user_msg: str = ""
     git_branch: str = ""
+    prs: list = field(default_factory=list)  # [{host,repo,number,url}] from transcript
 
 
 @dataclass
@@ -1516,6 +1517,46 @@ def iter_jsonl(path: Path) -> Iterator[dict]:
         return
 
 
+# agent-view detects a session's PRs by link-scanning its transcript for PR
+# URLs (jobs/state.json carries linkScanPath/linkScanOffset, NOT the PR itself —
+# verified on a real session that opened a PR). cst does the same over the
+# transcript it already reads. Matches GitHub pulls + GitLab/Bitbucket MRs.
+_PR_URL_RE = re.compile(
+    r"https?://(?:www\.)?(github\.com|gitlab\.com|bitbucket\.org)/"
+    r"([^/\s\"']+/[^/\s\"']+?)/(?:pull|-/merge_requests|pull-requests)/(\d+)")
+
+
+def find_pr_refs(text: str) -> list[dict]:
+    """Extract deduped PR/MR refs ({host,repo,number,url}) from a text blob."""
+    seen: dict = {}
+    for m in _PR_URL_RE.finditer(text or ""):
+        repo, num = m.group(2), int(m.group(3))
+        seen.setdefault((repo, num), {"host": m.group(1), "repo": repo,
+                                      "number": num, "url": m.group(0)})
+    return list(seen.values())
+
+
+def scan_pr_refs(path: Path) -> list[dict]:
+    """Scan a transcript .jsonl for PR/MR URLs, deduped across the whole file."""
+    refs: dict = {}
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                for r in find_pr_refs(line):
+                    refs[(r["repo"], r["number"])] = r
+    except OSError:
+        pass
+    return list(refs.values())
+
+
+def pr_badge(prs: list) -> str:
+    """`[PR #1]` / `[PR #1,3]` for a session's PR refs; empty when none."""
+    if not prs:
+        return ""
+    nums = sorted({p["number"] for p in prs})
+    return "[PR #" + ",".join(str(n) for n in nums) + "]"
+
+
 def load_session_meta(path: Path, fast: bool = False) -> SessionMeta | None:
     meta = SessionMeta(session_id=path.stem, path=path)
     if fast:
@@ -1549,6 +1590,7 @@ def load_session_meta(path: Path, fast: bool = False) -> SessionMeta | None:
                 meta.first_user_msg = text
     if meta.msg_count == 0:
         return None
+    meta.prs = scan_pr_refs(path)
     return meta
 
 
@@ -1603,6 +1645,7 @@ def _meta_to_cache(m: SessionMeta) -> dict:
         "msg_count": m.msg_count,
         "first_user_msg": m.first_user_msg,
         "git_branch": m.git_branch,
+        "prs": m.prs,
     }
 
 
@@ -1616,6 +1659,7 @@ def _meta_from_cache(d: dict, path: Path) -> SessionMeta:
         msg_count=d.get("msg_count", 0),
         first_user_msg=d.get("first_user_msg", ""),
         git_branch=d.get("git_branch", ""),
+        prs=d.get("prs") or [],
     )
 
 
@@ -1725,8 +1769,9 @@ def cmd_list(args: argparse.Namespace) -> int:
         sid = s.session_id[:8]
         ts = fmt_ts(s.last_ts)
         first = truncate(s.first_user_msg, 60) or "(no user message)"
-        badge = job_badge(ctx.jobs.get(s.session_id))
-        proj = shorten_path(s.cwd) + (f"  {badge}" if badge else "")
+        tags = " ".join(t for t in (job_badge(ctx.jobs.get(s.session_id)),
+                                    pr_badge(s.prs)) if t)
+        proj = shorten_path(s.cwd) + (f"  {tags}" if tags else "")
         print(
             f"{idx:>{num_w}} "
             f"{pad_display(st, STATUS_WIDTH)} "
@@ -3636,6 +3681,9 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             badge = job_badge(ctx.jobs.get(s.session_id))
             if badge:
                 proj_full = f"{proj_full}  {badge}"
+            prb = pr_badge(s.prs)
+            if prb:
+                proj_full = f"{proj_full}  {prb}"
             proj_cell = truncate_display_tail(proj_full, proj_w)
 
             line_before_status = f"{mark}{idx + 1:>{num_w}} "

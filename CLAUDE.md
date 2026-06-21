@@ -65,11 +65,20 @@ All shell out through `_run_claude(argv)` (isolated for testing).
   (`read_daemon_roster()` reads `~/.claude/daemon/roster.json`). Read-only.
 - **`cst bg <prompt> [--name N]`** (`cmd_bg`) — dispatch a new background session
   (`claude --bg`), turning cst into a launcher as well as a viewer.
+- **PR detection** — verified against a real PR-opening session: jobs/state.json
+  has NO pr field, only `linkScanPath`/`linkScanOffset`; agent-view detects PRs
+  by link-scanning the transcript. cst mirrors this — `scan_pr_refs(path)` /
+  `find_pr_refs(text)` extract `{host,repo,number,url}` from GitHub pull /
+  GitLab-Bitbucket MR URLs, stored on `SessionMeta.prs` (cached; `_CACHE_SCHEMA`
+  bumped 3→4). `pr_badge(prs)` renders `[PR #1]` / `[PR #1,3]` in `cst list` and
+  the TUI rows. Heuristic: any PR URL in the transcript counts (same as
+  agent-view), so a session that merely *mentions* a PR URL will show it.
 
-Deferred (schema not real-validatable yet): PR-status column (state.json carries
-no PR fields on observed jobs; PR data lives in a separate session descriptor)
-and pin unification (`jobs/pins.json` element format unconfirmed + writing it
-risks corrupting agent-view's own pin state).
+Deferred — pin unification only: `jobs/pins.json` element format is unconfirmed
+(it stays `[]` until pinned, and pins are settable only via agent-view's Ctrl+T,
+not any CLI, so there's no headless way to capture the format), and writing that
+file risks corrupting agent-view's own pin state. To finish it, pin a session in
+agent-view (Ctrl+T) and read the resulting `~/.claude/jobs/pins.json`.
 8. **TUI** (`_pick_ui`, ~line 1383) — curses-based picker with two modes (normal + search), rendering loop, modal dialogs (help, preview, delete confirm, cmux chooser). **Color theme**: dark/light palettes via `tui_init_colors()` — pair NUMBERS carry fixed meaning (1–9), only (fg,bg) swap per theme, so the whole UI re-themes without touching call sites; pair 7 doubles as the full-screen `bkgd` fill so each theme renders identically across terminals. `resolve_theme()` picks the effective theme (CLI `--theme` → saved pref → `COLORFGBG` auto-detect → dark); `t`/`T` toggles live and persists via `save_theme()` into `state.json`.
 9. **Argument parser** (`_build_parser`, ~line 2549) and `main` (~line 2649)
 
