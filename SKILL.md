@@ -61,6 +61,15 @@ cst restore <archive.tar.gz> [--cwd PFX]
             [--on-conflict skip|overwrite|rename] [--dry-run] [-y]
 cst relocate <id> <new-cwd> [--keep-original] [--force] [--dry-run] [-y]
 
+# Background (agent-view) sessions — claude --bg / `claude agents`:
+cst jobs                  # ALL agent-view jobs incl exec/transcript-less ones,
+                          #   with daemon status; * = pinned in agent-view
+cst bg "<prompt>" [--name N]  # dispatch a new background session (claude --bg)
+cst stop <id>             # stop a live background session (claude stop <short>)
+cst logs <id>            # a bg session's recent output (claude logs <short>)
+# Rows are tagged: [bg ⎇<branch>] / [exec] / [bg ∙](process exited) / [PR #N] / *(pinned)
+# `cst resume`/TUI Enter ATTACH a bg session (claude attach) instead of forking.
+
 # Hooks (install once, then automatic):
 cst install-hook   [--settings PATH]   # wire prompt-hook + status-hook
 cst uninstall-hook [--settings PATH]   # remove cst entries, keep foreign hooks
