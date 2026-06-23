@@ -2319,7 +2319,13 @@ def cmd_prompt_hook(args: argparse.Namespace) -> int:
         return _block(
             f"[cst {action}] failed — no session matching '{raw_target}' "
             f"(not found or ambiguous). Nothing changed.\n{note}")
-    if action == "done":
+    # Self-done (no explicit target) is exempt from the working-guard: the
+    # session is *necessarily* ● working while it processes this very prompt,
+    # so guarding it would block self-done 100% of the time. The guard exists
+    # to stop ✓ from masking some *other* live, quota-burning session — only an
+    # explicit target can be that other session.
+    explicit = bool(m.group(3))
+    if action == "done" and explicit:
         status = StatusContext.capture().resolve(target.session_id)
         if done_guard_blocks(status):
             return _block(

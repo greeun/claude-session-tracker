@@ -105,8 +105,20 @@ class TestPromptHookGuard(_CmdBase):
             rc = tk.cmd_prompt_hook(tk.argparse.Namespace())
         return rc, buf.getvalue()
 
-    def test_done_bang_on_working_blocks_without_marking(self):
+    def test_done_bang_self_on_working_marks(self):
+        # self `done!` (no explicit target) is the user declaring "this very
+        # session is finished". The session is *necessarily* ● working at that
+        # instant — it is processing this very prompt — so the working-guard
+        # would block self-done 100% of the time. The guard is meant for *other*
+        # live sessions, not the one you are sitting in; self is exempt.
         rc, out = self._run("done!", tk.STATUS_WORKING)
+        self.assertEqual(_json.loads(out)["decision"], "block")  # hook always blocks the prompt
+        self.assertIn(self._SID, tk.done_ids())
+
+    def test_done_bang_explicit_target_on_working_blocks(self):
+        # An explicit target (`done! <id>`) is a *different* live session — the
+        # guard still refuses, so a quota-burning session is not masked by ✓.
+        rc, out = self._run(f"done! {self._SID}", tk.STATUS_WORKING)
         body = _json.loads(out)
         self.assertEqual(body["decision"], "block")
         self.assertIn("working", body["reason"].lower())
