@@ -115,11 +115,17 @@ signal there still wins. Joined onto transcripts by `sessionId`.
 
 **done guard**: marking done is refused on an actively-working (●) session,
 since done > every state would mask a live, quota-burning session.
-`done_guard_blocks(status, force)` gates all four entry points (`cmd_done`, the
-`done!` prompt-hook, TUI `D`/`Ctrl-D`). Waiting/idle/ended and unmarking stay
-allowed; `cst done --force` overrides. Stop the session with `claude stop
+`done_guard_blocks(status, force)` gates `cmd_done`, the `done!` prompt-hook
+(explicit target only — see below), and TUI `D`/`Ctrl-D`. Waiting/idle/ended
+and unmarking stay allowed; `cst done --force` overrides. Stop the session with
+`claude stop
 <short>` (cst's own Del removes the transcript but does NOT stop the live bg
 process) or let the turn finish, then mark done.
+
+Self `done!` (no explicit target) is **exempt** from the working-guard: that
+session is necessarily ● working while it processes the very `done!` prompt, so
+guarding it would block self-done 100% of the time. The guard fires only on an
+explicit `done! <id>` — a *different* live session ✓ would otherwise mask.
 
 ## Development Notes
 
