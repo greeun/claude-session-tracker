@@ -20,7 +20,7 @@ process is ended/job-state; a live one resolves overlay → registry → `●`):
   in TUI, `cst done <id>`, or the `done!` prompt hook). Persists in
   `~/.cache/claude-session-tracker/state.json`.
 
-Main script: `tracker.py` (stdlib only, Python 3.10+, v1.5.1). Installed as
+Main script: `tracker.py` (stdlib only, Python 3.10+, v1.6.0). Installed as
 `~/.local/bin/cst`.
 
 ## When to Use
