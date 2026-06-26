@@ -32,7 +32,7 @@ ln -sf ~/.claude/skills/claude-session-tracker/tracker.py ~/.local/bin/cst
 
 # 3. Verify
 cst --version
-# claude-session-tracker v1.1.0
+# claude-session-tracker v1.5.1
 
 # 4. (optional) wire the 0-token done!/undone! prompt hook + status precision layer
 cst install-hook
@@ -70,6 +70,8 @@ cst search "auth refactor"    # full-text search across every transcript
 cst done <id>                 # mark a session as done
 cst export <id>               # write transcript to ./<id>.md
 cst stats                     # counts, top projects, status breakdown
+cst list --sort msgs          # sort by a column (time|status|msgs|project; --reverse flips)
+cst jobs                      # agent-view background sessions (claude --bg)
 cst --skip-perm --tui         # auto-apply --dangerously-skip-permissions on resume
 cst --theme light --tui       # force a TUI color theme (auto|dark|light; `t`/`T` toggles live)
 ```
@@ -78,7 +80,7 @@ cst --theme light --tui       # force a TUI color theme (auto|dark|light; `t`/`T
 
 ## Status glyphs
 
-Compact one-column glyphs in the `ST` column. Resolution priority: **`✓` > `○` > overlay > registry > fallback `●`**. Conceptually that means **✓ done > ○ ended > ! waiting > ● working > ◦ idle**.
+Compact one-column glyphs in the `ST` column. Resolution order in `classify_status()`: **`✓` done always wins**; otherwise a **dead** process is `○` ended (or, for a background/agent-view job, its last persisted state); a **live** process resolves from the hook **overlay** if present, else the live **registry** (`busy`→`●`, `waiting`→`!`, `idle`→`◦`), falling back to `●` when alive with no signal. So liveness gates the active states — `done > (dead⇒ended) > overlay > registry > ●`.
 
 | Glyph | Label | Meaning |
 |:---:|:---|:---|
@@ -103,16 +105,19 @@ Status is **computed fresh on every command invocation** — there is no backgro
 | `-V`, `--version` | Print version and exit |
 | `--tui` | Launch the TUI (same as `cst pick`) |
 | `--skip-perm` | When resuming (TUI or `resume`), pass `--dangerously-skip-permissions` to `claude` automatically. Without it, the TUI shows a per-resume confirmation. |
+| `--hide-done` | Start the TUI with `✓` done sessions hidden (toggle in-TUI with `H`). |
+| `--theme auto\|dark\|light` | TUI color theme. `auto` sniffs `COLORFGBG`, else dark. `t`/`T` toggles live and persists. |
 
 ### `cst list` — default table view
 
 ```bash
 cst list [--limit 30] [--cwd PREFIX] [--days N]
          [--status working|waiting|idle|ended|done|active]
+         [--sort time|status|msgs|project] [--reverse]
 ```
 
 ```
-claude-session-tracker v1.1.0
+claude-session-tracker v1.5.1
   #  ST  LAST ACTIVITY     SESSION   MSGS  MESSAGE                   PROJECT
   1  ●   2026-05-24 01:17  960faaa8   261  claude-sessions 는…       ~/.claude/skills
   2  !   2026-05-24 01:16  06d116f7    34  proceed? (y/N)            ~/project/url-shortener
@@ -123,6 +128,11 @@ claude-session-tracker v1.1.0
 - Row numbers start at 1; column auto-expands for 1000+ sessions.
 - `--status active` is a backward-compatibility alias for `working`.
 - Combinable: `--cwd ~/project --status waiting --days 7`.
+- **Sort:** `--sort time|status|msgs|project` (default `time`, newest-first).
+  `--reverse` flips direction. `status` orders working→waiting→idle→ended→done;
+  ties always break by recency. An explicit `--sort` is a one-off; with no
+  `--sort` the saved TUI sort preference is used. Sort runs **before** `--limit`,
+  so the slice is the top-N of the chosen order.
 
 ### `cst pick` / `--tui` — interactive TUI
 
@@ -244,6 +254,31 @@ Top projects:
 
 Lists every subagent dispatched from a parent session with `agentType`, description, message count, and first prompt.
 
+### Background (agent-view) sessions — `claude --bg` / `claude agents`
+
+cst also surfaces the supervisor-managed **background** sessions that the
+agent-view dispatches (`claude --bg`). These are addressed by their short
+`daemonShort` id, so cst drives the real `claude` CLI instead of forking the
+transcript.
+
+```bash
+cst jobs                  # list EVERY agent-view job (incl exec/transcript-less),
+                          #   with a daemon-status header; * = pinned in agent-view
+cst bg "<prompt>" [--name N]  # dispatch a NEW background session (claude --bg)
+cst stop <id>             # stop a live bg process (claude stop <short>) — the only
+                          #   way to actually stop it; cst's Del just unlinks the transcript
+cst logs <id>             # peek a bg session's recent output (claude logs <short>)
+```
+
+- **Resume/Enter attaches.** For a job-backed row, `cst resume` and TUI `Enter`
+  run `claude attach <short>` (live supervisor session: catch-up + live stream)
+  instead of a transcript fork.
+- **Row badges** (appended to the PROJECT column in `cst list` / TUI rows):
+  `[bg]`, `[exec]`, `[bg ⎇<branch>]` (git-worktree branch), `[bg ∙]` (process
+  exited but still attach/respawn-able), `[PR #1]` / `[PR #1,3]` (PR/MR URLs
+  found in the transcript), and a leading `*` for sessions pinned in agent-view
+  (read from `~/.claude/jobs/pins.json`; cst never writes it).
+
 ### Hook commands
 
 | Command | When you'd run it |
@@ -277,7 +312,10 @@ A curses picker with fzf-style filter, status glyphs, modals, and action keys. *
 | **`H`** / **`h`** | Toggle hide-done — hide/show ✓ rows (no `Ctrl-H` alias — that's Backspace) |
 | **`C`** / **`c`** | Toggle cwd-only — show only sessions under the TUI's launch cwd (NFC-normalized prefix match) |
 | **`R`** / **`r`** / **`Ctrl-R`** | Rescan sessions + live-process registry |
-| **`a`** / **`A`** | Auto-rescan interval popup (Off / 5 / 10 / 30 / 60 / 120s; default ON 10s, persisted in `state.json`; beep + macOS notification when a session newly enters `!` waiting) |
+| **`a`** / **`A`** | Auto-rescan interval popup (Off / 5 / 10 / 30 / 60 / 120s; default ON 10s, persisted in `state.json`; `curses.beep()` + a sticky TUI toast when a session newly enters `!` waiting — no macOS desktop notification) |
+| **`s`** | Cycle sort column: `time → status → msgs → project` (resets to the column's natural direction). Header shows `sort:<col>▼/▲` and highlights the active column. Persisted. |
+| **`S`** | Reverse the current sort direction. Persisted. |
+| **`t`** / **`T`** | Toggle color theme (dark ↔ light). Persisted in `state.json`. |
 | `Del` / `Fn+Delete` | Delete marked/current session(s) (confirmation modal) |
 | `?` | Help modal |
 | `/` | Enter search mode |
@@ -304,12 +342,13 @@ A cursor appears on the prompt line. Live filtering happens as you type.
 ### Header bar
 
 ```
- claude-session-tracker v1.1.0  12/563  ●3 !1 ◦0 ○558 ✓1  ⟳10s  [✓ hidden]  [📂 ~/project]   ? help  Enter open  / filter  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit
+ claude-session-tracker v1.5.1  12/563  ●3 !1 ◦0 ○558 ✓1  ⟳10s  sort:time▼  [✓ hidden]  [📂 ~/project]   ? help  Enter open  / filter  s sort  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit
 ```
 
 - `12/563` — visible rows / total sessions
 - `●3 !1 ◦0 ○558 ✓1` — per-status counts in the current view
 - `⟳10s` — auto-rescan interval (or `⟳off`)
+- `sort:time▼` — active sort column + direction (`▼` desc / `▲` asc); the matching column header is highlighted
 - `[✓ hidden]` — shown only when hide-done is on
 - `[📂 ~/project]` — shown only when cwd-only is on
 
@@ -422,8 +461,10 @@ Equivalent manual entry (one event shown):
 | `~/.claude/projects/**/*.jsonl` | Session transcripts (Claude Code's own data) | **No** — your history |
 | `~/.claude/sessions/<pid>.json` | Claude Code's live-process registry (read-only) | Leave alone |
 | `~/.claude/settings.json` | Claude Code settings (cst writes hook entries here) | No — `cst uninstall-hook` only removes cst entries |
+| `~/.claude/jobs/<short>/state.json` | Agent-view background-job state (read-only) | Leave alone |
+| `~/.claude/jobs/pins.json` | Agent-view pin set (read-only; cst never writes) | Leave alone |
 | `~/.cache/claude-session-tracker/index.json` | mtime/size-invalidated session-metadata cache | Yes — regenerates on next run |
-| `~/.cache/claude-session-tracker/state.json` | done flags + hook status overlay + auto-rescan preference | Yes — clears all `✓` marks and overlay |
+| `~/.cache/claude-session-tracker/state.json` | done flags + hook status overlay + user prefs (auto-rescan, theme, sort) | Yes — clears all `✓` marks, overlay, and prefs |
 
 ### `state.json` schema
 
@@ -442,11 +483,18 @@ Equivalent manual entry (one event shown):
   "auto_rescan": {
     "enabled": true,
     "interval": 10
+  },
+  "theme": "auto" | "dark" | "light",
+  "sort": {
+    "key": "time" | "status" | "msgs" | "project",
+    "reverse": true
   }
 }
 ```
 
-`status` is populated by `cst status-hook` (only when hooks are installed). `auto_rescan` is set from the TUI `a` popup. Deleting `state.json` clears all three.
+`status` is populated by `cst status-hook` (only when hooks are installed).
+`auto_rescan` is set from the TUI `a` popup, `theme` from `t`/`T` (or `--theme`),
+`sort` from the TUI `s`/`S` keys. Deleting `state.json` clears all of them.
 
 ---
 
@@ -513,8 +561,11 @@ cst relocate <id> ~/project/actual-folder -y
 `cst` is a superset. Every `claude-sessions` subcommand is preserved, plus:
 
 - **#** row-number column + **ST** glyph column + **PROJECT** column on every row
-- **`done`**, **`undone`**, **`live`**, **`export`**, **`install-hook`** / **`uninstall-hook`** / **`prompt-hook`** / **`status-hook`** subcommands
-- TUI keys: `D/d/Ctrl-D` (toggle done) · `H/h` (hide done) · `C/c` (cwd-only) · `R/r/Ctrl-R` (rescan) · `e/E` (export) · `a/A` (auto-rescan) · `Ctrl-A` (mark all) · `?` (help) · `v/V` (preview)
+- **`done`**, **`undone`**, **`live`**, **`export`**, **`bg`** / **`jobs`** / **`stop`** / **`logs`** (agent-view background sessions), **`install-hook`** / **`uninstall-hook`** / **`prompt-hook`** / **`status-hook`** subcommands
+- `cst list --sort time|status|msgs|project [--reverse]` column sort
+- TUI keys: `D/d/Ctrl-D` (toggle done) · `H/h` (hide done) · `C/c` (cwd-only) · `R/r/Ctrl-R` (rescan) · `e/E` (export) · `a/A` (auto-rescan) · `s`/`S` (column sort) · `t/T` (theme) · `Ctrl-A` (mark all) · `?` (help) · `v/V` (preview)
+- Background/agent-view rows: `[bg]`/`[exec]`/`[bg ⎇branch]`/`[bg ∙]`/`[PR #N]` badges, `*` pin marker, `Enter` attaches (not forks)
+- Color themes (dark/light, `--theme` / `t`)
 - fzf-style `/` with live filter and typing-while-navigating
 - Unicode (Korean/Japanese/Chinese) input support in search
 - Enter opens the session in a **new terminal window of the same app** you're in (iTerm/WezTerm/Ghostty/kitty/Alacritty/Terminal/cmux), raised to the foreground — the old behavior replaced the TUI process with `claude`
@@ -528,7 +579,7 @@ Different goals, complementary tools.
 |---|---|---|
 | Role | Task manager for **concurrent running** sessions | Browser for **all** sessions (live + archived) |
 | Platform | macOS-only (osascript window focus) | Cross-platform (stdlib only) |
-| Data | Separate registry (title / priority / tags / note) | Original jsonl + minimal overlay (done flag + hook status + auto-rescan pref) |
+| Data | Separate registry (title / priority / tags / note) | Original jsonl + minimal overlay (done flag + hook status + auto-rescan / theme / sort prefs) |
 | Headline features | Window focus · priority ranking · stale review · watch TUI · hooks · statusline | List / search / resume / export / backup / restore / relocate / status glyphs / orphan-relocate |
 | Scope | Sessions you actively juggle | 500+ sessions in history |
 
@@ -558,7 +609,7 @@ A: `Ctrl-H == ASCII 8 == Backspace` on virtually every terminal and curses build
 A: Press `Enter` instead of `Esc`. `Enter` in search mode commits the filter; `Esc` clears it.
 
 **Q: Does the auto-rescan really beep when something needs me?**
-A: Yes. When the rescan detects a session **newly entering** `!` waiting (i.e. not in the previous tick), it rings `curses.beep()` and (on macOS) sends a Notification Center alert. Already-waiting sessions don't re-alert.
+A: Yes. When the rescan detects a session **newly entering** `!` waiting (i.e. not in the previous tick), it rings `curses.beep()` and shows a sticky in-TUI toast (`⚠ N now waiting: …`). Already-waiting sessions don't re-alert. (There is **no** macOS desktop notification — `osascript -e 'display notification'` is owned by Script Editor, so it was removed.)
 
 **Q: Does it work on Linux / Windows?**
 A: Linux: yes (pure stdlib). Windows: the curses TUI needs `windows-curses`; CLI commands work as-is.

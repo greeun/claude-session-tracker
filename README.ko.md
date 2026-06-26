@@ -32,7 +32,7 @@ ln -sf ~/.claude/skills/claude-session-tracker/tracker.py ~/.local/bin/cst
 
 # 3. 확인
 cst --version
-# claude-session-tracker v1.1.0
+# claude-session-tracker v1.5.1
 
 # 4. (선택) 토큰 0짜리 done!/undone! 프롬프트 훅 + 상태 정밀 레이어 설치
 cst install-hook
@@ -70,6 +70,8 @@ cst search "인증 리팩토링"     # 모든 세션 트랜스크립트 본문 �
 cst done <id>                 # 세션을 done으로 표시
 cst export <id>               # 트랜스크립트를 ./<id>.md로 출력
 cst stats                     # 요약 (프로젝트·상태 분포)
+cst list --sort msgs          # 컬럼 정렬 (time|status|msgs|project; --reverse로 방향 반전)
+cst jobs                      # agent-view 백그라운드 세션 (claude --bg)
 cst --skip-perm --tui         # 재개 시 --dangerously-skip-permissions 자동 적용
 cst --theme light --tui       # TUI 색 테마 지정(auto|dark|light; `t`/`T`로 실시간 토글)
 ```
@@ -78,7 +80,7 @@ cst --theme light --tui       # TUI 색 테마 지정(auto|dark|light; `t`/`T`�
 
 ## 상태 글리프
 
-`ST` 컬럼에 1칸 글리프로 표시. 해결 우선순위: **`✓` > `○` > 오버레이 > 레지스트리 > 폴백 `●`**. 개념적으로 **✓ done > ○ ended > ! waiting > ● working > ◦ idle**.
+`ST` 컬럼에 1칸 글리프로 표시. `classify_status()`의 해결 순서: **`✓` done이 항상 우선**; 그 외에는 **죽은** 프로세스는 `○` ended(백그라운드/agent-view 잡이면 마지막으로 저장된 상태); **살아있는** 프로세스는 훅 **오버레이**가 있으면 그것, 없으면 라이브 **레지스트리**(`busy`→`●`, `waiting`→`!`, `idle`→`◦`)로 해결, 살아있지만 신호 없으면 `●`로 폴백. 즉 liveness가 활성 상태를 게이트 — `done > (죽음⇒ended) > 오버레이 > 레지스트리 > ●`.
 
 | 글리프 | 라벨 | 의미 |
 |:---:|:---|:---|
@@ -103,16 +105,19 @@ cst --theme light --tui       # TUI 색 테마 지정(auto|dark|light; `t`/`T`�
 | `-V`, `--version` | 버전 출력 후 종료 |
 | `--tui` | TUI 실행 (cst pick과 동일) |
 | `--skip-perm` | 재개 시(TUI 또는 `resume`) `--dangerously-skip-permissions`를 자동으로 `claude`에 전달. 없으면 TUI에서 재개마다 확인 모달이 뜸. |
+| `--hide-done` | TUI를 `✓` done 세션을 숨긴 상태로 시작 (TUI에서 `H`로 토글) |
+| `--theme auto\|dark\|light` | TUI 색 테마. `auto`는 `COLORFGBG` 감지, 실패 시 dark. `t`/`T`로 실시간 토글·저장. |
 
 ### `cst list` — 기본 테이블 뷰
 
 ```bash
 cst list [--limit 30] [--cwd PREFIX] [--days N]
          [--status working|waiting|idle|ended|done|active]
+         [--sort time|status|msgs|project] [--reverse]
 ```
 
 ```
-claude-session-tracker v1.1.0
+claude-session-tracker v1.5.1
   #  ST  LAST ACTIVITY     SESSION   MSGS  MESSAGE                   PROJECT
   1  ●   2026-05-24 01:17  960faaa8   261  claude-sessions 는…       ~/.claude/skills
   2  !   2026-05-24 01:16  06d116f7    34  proceed? (y/N)            ~/project/url-shortener
@@ -123,6 +128,10 @@ claude-session-tracker v1.1.0
 - 번호는 1부터, 1000개 이상 세션은 자동으로 컬럼 폭 확장
 - `--status active`는 `working`의 하위 호환 별칭
 - 조합 가능: `--cwd ~/project --status waiting --days 7`
+- **정렬:** `--sort time|status|msgs|project` (기본 `time`, 최신순). `--reverse`로
+  방향 반전. `status`는 working→waiting→idle→ended→done 순; 동점은 항상 최신순으로
+  깨짐. 명시적 `--sort`는 일회성이고, `--sort` 없으면 저장된 TUI 정렬 설정을 사용.
+  정렬은 `--limit` **이전**에 적용되어 선택된 순서의 상위 N개를 자름.
 
 ### `cst pick` / `--tui` — 인터랙티브 TUI
 
@@ -244,6 +253,28 @@ Top projects:
 
 부모 세션에서 디스패치된 모든 서브에이전트를 `agentType`, description, 메시지 수, 첫 프롬프트와 함께 출력.
 
+### 백그라운드 (agent-view) 세션 — `claude --bg` / `claude agents`
+
+cst는 agent-view가 디스패치한 supervisor 관리 **백그라운드** 세션(`claude --bg`)도
+보여줍니다. 이들은 짧은 `daemonShort` id로 주소 지정되며, cst는 트랜스크립트를
+포크하는 대신 실제 `claude` CLI를 구동합니다.
+
+```bash
+cst jobs                  # 모든 agent-view 잡 나열(exec/트랜스크립트 없는 잡 포함),
+                          #   데몬 상태 헤더 포함; * = agent-view에서 핀 고정됨
+cst bg "<prompt>" [--name N]  # 새 백그라운드 세션 디스패치 (claude --bg)
+cst stop <id>             # 라이브 bg 프로세스 정지 (claude stop <short>) — 실제로
+                          #   정지하는 유일한 방법; cst의 Del은 트랜스크립트만 언링크
+cst logs <id>             # bg 세션 최근 출력 보기 (claude logs <short>)
+```
+
+- **재개/Enter는 attach.** 잡 기반 행에서 `cst resume`·TUI `Enter`는 트랜스크립트
+  포크 대신 `claude attach <short>`(라이브 supervisor 세션: catch-up + 라이브 스트림)을 실행.
+- **행 배지** (`cst list`/TUI 행의 PROJECT 컬럼에 덧붙음): `[bg]`, `[exec]`,
+  `[bg ⎇<branch>]`(git worktree 브랜치), `[bg ∙]`(프로세스 종료됐지만 attach/재실행
+  가능), `[PR #1]`/`[PR #1,3]`(트랜스크립트에서 발견된 PR/MR URL), 그리고 agent-view에서
+  핀 고정된 세션 앞의 `*`(`~/.claude/jobs/pins.json`에서 읽음; cst는 절대 쓰지 않음).
+
 ### 훅 관련 명령
 
 | 명령 | 사용 시점 |
@@ -277,7 +308,10 @@ fzf 스타일 필터, 상태 글리프, 모달, 액션 키를 갖춘 curses 선�
 | **`H`** / **`h`** | hide-done 토글 — ✓ 행 숨김/표시 (`Ctrl-H`는 Backspace라 별칭 없음) |
 | **`C`** / **`c`** | cwd-only 토글 — TUI 실행 cwd 아래의 세션만 표시 (NFC-정규화 prefix 매치) |
 | **`R`** / **`r`** / **`Ctrl-R`** | 세션 목록 + 라이브 프로세스 레지스트리 재스캔 |
-| **`a`** / **`A`** | 자동 재스캔 간격 팝업 (Off / 5 / 10 / 30 / 60 / 120초; 기본 ON 10초, `state.json`에 저장; 세션이 **새로** `!` 대기로 전이 시 벨 + macOS 알림) |
+| **`a`** / **`A`** | 자동 재스캔 간격 팝업 (Off / 5 / 10 / 30 / 60 / 120초; 기본 ON 10초, `state.json`에 저장; 세션이 **새로** `!` 대기로 전이 시 `curses.beep()` + 고정 TUI 토스트 — macOS 데스크톱 알림 없음) |
+| **`s`** | 정렬 컬럼 순환: `time → status → msgs → project` (해당 컬럼의 자연 방향으로 리셋). 헤더에 `sort:<col>▼/▲` 표시 + 활성 컬럼 하이라이트. 저장됨. |
+| **`S`** | 현재 정렬 방향 반전. 저장됨. |
+| **`t`** / **`T`** | 색 테마 토글 (dark ↔ light). `state.json`에 저장. |
 | `Del` / `Fn+Delete` | 마크된/현재 세션 삭제 (확인 모달) |
 | `?` | 도움말 모달 |
 | `/` | 검색 모드 진입 |
@@ -304,12 +338,13 @@ fzf 스타일 필터, 상태 글리프, 모달, 액션 키를 갖춘 curses 선�
 ### 헤더
 
 ```
- claude-session-tracker v1.1.0  12/563  ●3 !1 ◦0 ○558 ✓1  ⟳10s  [✓ hidden]  [📂 ~/project]   ? help  Enter open  / filter  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit
+ claude-session-tracker v1.5.1  12/563  ●3 !1 ◦0 ○558 ✓1  ⟳10s  sort:time▼  [✓ hidden]  [📂 ~/project]   ? help  Enter open  / filter  s sort  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit
 ```
 
 - `12/563` — 보이는 행 / 전체 세션 수
 - `●3 !1 ◦0 ○558 ✓1` — 현재 뷰의 상태별 카운트
 - `⟳10s` — 자동 재스캔 간격 (또는 `⟳off`)
+- `sort:time▼` — 활성 정렬 컬럼 + 방향 (`▼` 내림 / `▲` 오름); 해당 컬럼 헤더가 하이라이트됨
 - `[✓ hidden]` — hide-done이 켜졌을 때만 표시
 - `[📂 ~/project]` — cwd-only가 켜졌을 때만 표시
 
@@ -422,8 +457,10 @@ TUI에서 `Enter`를 누르면 **현재 쓰는 터미널 앱과 동일한 앱의
 | `~/.claude/projects/**/*.jsonl` | 세션 트랜스크립트 (Claude Code 원본) | **아니오** — 작업 이력 |
 | `~/.claude/sessions/<pid>.json` | Claude Code의 라이브 프로세스 레지스트리 (읽기 전용) | 건드리지 말 것 |
 | `~/.claude/settings.json` | Claude Code 설정 (cst가 훅 항목을 기록) | 아니오 — `cst uninstall-hook`로 cst 항목만 제거 |
+| `~/.claude/jobs/<short>/state.json` | agent-view 백그라운드 잡 상태 (읽기 전용) | 건드리지 말 것 |
+| `~/.claude/jobs/pins.json` | agent-view 핀 집합 (읽기 전용; cst는 쓰지 않음) | 건드리지 말 것 |
 | `~/.cache/claude-session-tracker/index.json` | mtime/size 무효화 세션 메타 캐시 | 예 (다음 실행 시 재생성) |
-| `~/.cache/claude-session-tracker/state.json` | done 플래그 + 훅 상태 오버레이 + 자동 재스캔 설정 | 예 (모든 `✓` 마크 + 오버레이 초기화) |
+| `~/.cache/claude-session-tracker/state.json` | done 플래그 + 훅 상태 오버레이 + 사용자 설정(자동 재스캔·테마·정렬) | 예 (모든 `✓` 마크·오버레이·설정 초기화) |
 
 ### `state.json` 스키마
 
@@ -442,11 +479,18 @@ TUI에서 `Enter`를 누르면 **현재 쓰는 터미널 앱과 동일한 앱의
   "auto_rescan": {
     "enabled": true,
     "interval": 10
+  },
+  "theme": "auto" | "dark" | "light",
+  "sort": {
+    "key": "time" | "status" | "msgs" | "project",
+    "reverse": true
   }
 }
 ```
 
-`status`는 `cst status-hook`이 채움 (훅이 설치돼 있을 때만). `auto_rescan`은 TUI `a` 팝업에서 설정. `state.json`을 지우면 셋 다 초기화.
+`status`는 `cst status-hook`이 채움 (훅이 설치돼 있을 때만). `auto_rescan`은 TUI `a`
+팝업, `theme`은 `t`/`T`(또는 `--theme`), `sort`는 TUI `s`/`S` 키에서 설정. `state.json`을
+지우면 전부 초기화.
 
 ---
 
@@ -513,8 +557,11 @@ cst relocate <id> ~/project/actual-folder -y
 `cst`는 상위 집합. 모든 `claude-sessions` 서브커맨드 유지 + 추가:
 
 - **#** 번호 컬럼 + **ST** 글리프 컬럼 + **PROJECT** 컬럼을 매 행에 표시
-- **`done`**, **`undone`**, **`live`**, **`export`**, **`install-hook`** / **`uninstall-hook`** / **`prompt-hook`** / **`status-hook`** 서브커맨드
-- TUI 키: `D/d/Ctrl-D` (done 토글) · `H/h` (숨김 토글) · `C/c` (cwd-only) · `R/r/Ctrl-R` (rescan) · `e/E` (내보내기) · `a/A` (자동 재스캔) · `Ctrl-A` (전체 마크) · `?` (도움말) · `v/V` (미리보기)
+- **`done`**, **`undone`**, **`live`**, **`export`**, **`bg`** / **`jobs`** / **`stop`** / **`logs`** (agent-view 백그라운드 세션), **`install-hook`** / **`uninstall-hook`** / **`prompt-hook`** / **`status-hook`** 서브커맨드
+- `cst list --sort time|status|msgs|project [--reverse]` 컬럼 정렬
+- TUI 키: `D/d/Ctrl-D` (done 토글) · `H/h` (숨김 토글) · `C/c` (cwd-only) · `R/r/Ctrl-R` (rescan) · `e/E` (내보내기) · `a/A` (자동 재스캔) · `s`/`S` (컬럼 정렬) · `t/T` (테마) · `Ctrl-A` (전체 마크) · `?` (도움말) · `v/V` (미리보기)
+- 백그라운드/agent-view 행: `[bg]`/`[exec]`/`[bg ⎇branch]`/`[bg ∙]`/`[PR #N]` 배지, `*` 핀 마커, `Enter`는 attach(포크 아님)
+- 색 테마 (dark/light, `--theme` / `t`)
 - fzf 스타일 `/` — 타이핑하며 동시에 이동, 필터 확정 후 다양한 액션
 - Unicode (**한글**/일본어/중국어) 검색 입력 지원
 - Enter가 **현재와 같은 터미널 앱의 새 창**(iTerm/WezTerm/Ghostty/kitty/Alacritty/Terminal/cmux)에서 세션을 열고 **포그라운드로 끌어옴** (기존 `claude-sessions`는 TUI 프로세스를 `claude`로 교체)
@@ -528,7 +575,7 @@ cst relocate <id> ~/project/actual-folder -y
 |---|---|---|
 | 역할 | **동시 실행 중**인 세션의 작업 매니저 | **모든** 세션(라이브+과거) 브라우저 |
 | 플랫폼 | macOS 전용 | 크로스 플랫폼 (stdlib만) |
-| 데이터 | 별도 레지스트리 (제목/우선순위/태그/노트) | 원본 jsonl + 최소 overlay (done 플래그 + 훅 상태 + 자동 재스캔 설정) |
+| 데이터 | 별도 레지스트리 (제목/우선순위/태그/노트) | 원본 jsonl + 최소 overlay (done 플래그 + 훅 상태 + 자동 재스캔·테마·정렬 설정) |
 | 주요 기능 | 윈도우 포커스 · 우선순위 · stale 리뷰 · watch TUI · 훅 · statusline | list / search / resume / export / backup / restore / relocate / 상태 글리프 / orphan-relocate |
 | 범위 | 지금 동시에 처리 중인 세션 | 이력 전체 수백 개 |
 
@@ -558,7 +605,7 @@ A: `Ctrl-H == ASCII 8 == Backspace`. 바인딩하면 Backspace가 망가져서 �
 A: `Esc` 대신 **`Enter`**. 검색 모드의 Enter = 필터 확정 + 모드 종료. Esc는 초기화.
 
 **Q: 자동 재스캔이 정말로 알림을 울리나요?**
-A: 네. 직전 틱에 없었는데 이번 틱에 **새로** `!` 대기로 들어온 세션이 감지되면 `curses.beep()`를 울리고 macOS에서는 Notification Center 알림을 보냅니다. 이미 대기 중이던 세션은 재알림하지 않습니다.
+A: 네. 직전 틱에 없었는데 이번 틱에 **새로** `!` 대기로 들어온 세션이 감지되면 `curses.beep()`를 울리고 고정 TUI 토스트(`⚠ N now waiting: …`)를 띄웁니다. 이미 대기 중이던 세션은 재알림하지 않습니다. (macOS 데스크톱 알림은 **없습니다** — `osascript -e 'display notification'`이 Script Editor 소유라 제거됨.)
 
 **Q: Linux / Windows에서 동작하나요?**
 A: Linux: 동작 (순수 stdlib). Windows: curses TUI는 `windows-curses` 패키지 필요, CLI 명령은 그대로 동작.

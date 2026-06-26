@@ -7,8 +7,8 @@ description: Track live/waiting/ended/done status of Claude Code sessions. List,
 
 Fork of `claude-sessions` that adds **live status tracking** plus a precision
 hook overlay, fzf-style filter UX, transcript export, and new-window session
-opening. Every session resolves to one of five states
-(priority: `✓ > ○ > overlay > registry > ●`):
+opening. Every session resolves to one of five states (done always wins; a dead
+process is ended/job-state; a live one resolves overlay → registry → `●`):
 
 - **●** working — Claude is actively producing output.
 - **!** waiting — Claude is waiting for your input or a permission decision
@@ -20,7 +20,7 @@ opening. Every session resolves to one of five states
   in TUI, `cst done <id>`, or the `done!` prompt hook). Persists in
   `~/.cache/claude-session-tracker/state.json`.
 
-Main script: `tracker.py` (stdlib only, Python 3.10+, v1.1.0). Installed as
+Main script: `tracker.py` (stdlib only, Python 3.10+, v1.5.1). Installed as
 `~/.local/bin/cst`.
 
 ## When to Use
@@ -39,7 +39,8 @@ Main script: `tracker.py` (stdlib only, Python 3.10+, v1.1.0). Installed as
 Top-level flags: `-V/--version`, `--tui` (= `cst pick`), `--skip-perm`
 (pass `--dangerously-skip-permissions` to `claude` on resume; otherwise the
 TUI confirms per-resume), `--hide-done` (start the TUI with ✓ done sessions
-hidden; toggle in-TUI with `H`).
+hidden; toggle in-TUI with `H`), `--theme auto|dark|light` (TUI color theme;
+`t`/`T` toggles live and persists).
 
 ```bash
 cst                       # list (default): # + ST + LAST + SESSION + MSGS + MESSAGE + PROJECT
@@ -47,6 +48,8 @@ cst --tui                 # interactive TUI (same as `cst pick`)
 cst --tui --hide-done     # TUI, ✓ done hidden from the start (also: cst pick --hide-done)
 cst list --status working # working|waiting|idle|ended|done (active = alias for working)
 cst list --cwd ~/p --days 7 --limit 50
+cst list --sort msgs      # sort column: time(default)|status|msgs|project; --reverse flips
+                          #   no --sort uses the saved TUI sort pref
 cst search "<query>"      # full-text transcript search (OR via `|`, -i = ignore case)
 cst show <id>             # transcript with Status header (--max-chars, --with-subagents)
 cst export <id>           # write transcript to <id>.md (--format md|txt, --out PATH|DIR)
@@ -134,8 +137,13 @@ stale `!` self-heals to `◦` to avoid a stuck state.
   (NFC-normalized prefix match, Korean paths OK)
 - **`R` / `r` / `Ctrl-R`** — rescan
 - **`a` / `A`** — auto-rescan interval popup (Off / 5 / 10 / 30 / 60 / 120s;
-  default ON 10s; persisted in `state.json`; beep + macOS notification when a
-  session **newly** enters `!` waiting)
+  default ON 10s; persisted in `state.json`; `curses.beep()` + a sticky TUI
+  toast when a session **newly** enters `!` waiting — no macOS desktop
+  notification)
+- **`s`** — cycle sort column (time→status→msgs→project, resets to the column's
+  natural direction) · **`S`** — reverse sort direction. Header shows
+  `sort:<col>▼/▲` + highlights the active column; persisted in `state.json`.
+- **`t` / `T`** — toggle color theme (dark ↔ light), persisted in `state.json`
 - `?` — help modal · `/` — enter search mode · `Esc` — clear/quit
 
 **Search mode (`/` prompt)** — fzf-style, all text input lives here:
@@ -166,7 +174,7 @@ with manual-entry and placeholder escape hatches).
   ✓ done sessions hidden
 - TUI: `D`/`d`/`Ctrl-D` toggle-done, `H`/`h` hide-done, `C`/`c` cwd-only,
   `R`/`r`/`Ctrl-R` rescan, `e`/`E` export, `a`/`A` auto-rescan,
-  `Ctrl-A` mark-all, `?` help, `v`/`V` preview
+  `s`/`S` column sort, `t`/`T` theme, `Ctrl-A` mark-all, `?` help, `v`/`V` preview
 - fzf-style `/` — type + ↑↓ at once, Enter commits (doesn't auto-open),
   Ctrl-D marks while filtering, Tab escalates to full-text
 - Unicode input in `/` (manual UTF-8 assembly bypasses Python curses bugs
@@ -212,8 +220,10 @@ relocate with cwd rewrite, interactive delete, multi-select marks.
 - `~/.cache/claude-session-tracker/index.json` — mtime/size-invalidated
   indexing cache. Safe to delete.
 - `~/.cache/claude-session-tracker/state.json` — overlay storing
-  `{done: {sid: ts}, status: {sid: {state, event, ts}}, auto_rescan: {enabled, interval}}`.
-  Safe to delete (clears all ✓ marks, status overlay, and auto-rescan pref).
+  `{done: {sid: ts}, status: {sid: {state, event, ts}}, auto_rescan: {enabled, interval}, theme: "auto"|"dark"|"light", sort: {key, reverse}}`.
+  Safe to delete (clears all ✓ marks, status overlay, auto-rescan / theme /
+  sort prefs).
+- `~/.claude/jobs/pins.json` — agent-view pin set (read-only; cst never writes).
 
 ## Do not
 

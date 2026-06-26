@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `claude-session-tracker` (CLI: `cst`) is a single-file Python tool that browses, searches, resumes, and tracks the status of local Claude Code sessions. It's a superset of `claude-sessions` adding live-process status detection, a "task done" flag, and an fzf-style curses TUI. **Stdlib-only, zero dependencies**, Python 3.10+.
 
-The entire implementation lives in `tracker.py` (~2700 lines). There are no tests, no build system, and no package manager. `SKILL.md` is the Claude Code skill definition.
+The entire implementation lives in `tracker.py` (~5,300 lines), with a stdlib `unittest` suite under `tests/`. There is no build system and no package manager. `SKILL.md` is the Claude Code skill definition; `README.md` / `README.ko.md` are the human-facing docs.
 
 ## Running and Installing
 
@@ -24,13 +24,13 @@ cst --version
 
 `tracker.py` is a self-contained script with these logical sections (top to bottom):
 
-1. **Constants & helpers** (lines 1–55) — paths, status glyphs (`●`/`○`/`✓`), labels
-2. **Terminal-window spawning & focus** (`open_in_new_terminal`, ~line 99; `focus_existing_window`, after it) — `open_in_new_terminal` detects `$TERM_PROGRAM` and opens sessions in new windows for iTerm/Terminal.app/WezTerm/Ghostty/kitty/Alacritty (+`cmux`). `focus_existing_window` raises a *live* session's existing window by matching the claude PID's controlling tty (`ps -o tty=`): WezTerm via `wezterm cli list` → window title → macOS Accessibility `AXRaise` of the `wezterm-gui` window (WezTerm has no CLI window-raise); Terminal.app tabs / iTerm2 sessions via AppleScript `tty` match; cmux workspaces via `cmux --id-format both debug-terminals` (maps tty → surface → workspace/window UUIDs) then `select-workspace` + `focus-pane` + `focus-window` (cmux runs Ghostty as `$TERM_PROGRAM`, so it's probed first whenever `$CMUX_WORKSPACE_ID` is set, else as a fallback). TUI Enter tries focus first, then falls back to spawning.
-3. **Display utilities** (~line 327) — `display_width`, `pad_display`, `truncate_display`, `truncate_display_tail` — CJK-aware column formatting using `unicodedata.east_asian_width`
-4. **Live-process detection** (~line 439) — scans `~/.claude/sessions/<pid>.json` + `kill -0` to determine active vs ended
-5. **State persistence** (~line 495) — `state.json` for 작업종료 (done) flags, `index.json` for mtime-invalidated session cache
-6. **Session loading** (`SessionMeta` dataclass, ~line 553; `load_all_sessions`, ~line 705) — parses `.jsonl` transcripts with caching
-7. **CLI subcommands** (~line 766) — `cmd_list`, `cmd_search`, `cmd_show`, `cmd_resume`, `cmd_done`, `cmd_undone`, `cmd_live`, `cmd_stop`, `cmd_logs`, `cmd_bg`, `cmd_jobs`, `cmd_relocate`, `cmd_backup`, `cmd_restore`, `cmd_stats`, `cmd_subagents`
+1. **Constants & helpers** (lines ~46–100) — paths, `_CACHE_SCHEMA`, status glyphs (`●`/`!`/`◦`/`○`/`✓`), labels, `_JOB_STATE_GLYPH`
+2. **Terminal-window spawning & focus** (`open_in_new_terminal`, ~line 157; `focus_existing_window`, ~line 779) — `open_in_new_terminal` detects `$TERM_PROGRAM` and opens sessions in new windows for iTerm/Terminal.app/WezTerm/Ghostty/kitty/Alacritty (+`cmux`). `focus_existing_window` raises a *live* session's existing window by matching the claude PID's controlling tty (`ps -o tty=`): WezTerm via `wezterm cli list` → window title → macOS Accessibility `AXRaise` of the `wezterm-gui` window (WezTerm has no CLI window-raise); Terminal.app tabs / iTerm2 sessions via AppleScript `tty` match; cmux workspaces via `cmux --id-format both debug-terminals` (maps tty → surface → workspace/window UUIDs) then `select-workspace` + `focus-pane` + `focus-window` (cmux runs Ghostty as `$TERM_PROGRAM`, so it's probed first whenever `$CMUX_WORKSPACE_ID` is set, else as a fallback). TUI Enter tries focus first, then falls back to spawning.
+3. **Display utilities** (~line 837) — `display_width`, `pad_display`, `truncate_display`, `truncate_display_tail`, `shorten_path` — CJK-aware column formatting using `unicodedata.east_asian_width`
+4. **Live-process detection** (~line 962) — scans `~/.claude/sessions/<pid>.json` + `kill -0` to determine active vs ended
+5. **State persistence & prefs** (`load_state`/`save_state`, ~line 1156) — `state.json` holds 작업종료 (done) flags + the status overlay + user prefs (auto-rescan ~line 1355, TUI theme ~line 1389, column sort ~line 1404); `index.json` is the mtime-invalidated session cache
+6. **Session loading** (`SessionMeta` dataclass, ~line 1524; `load_all_sessions`, ~line 1755) — parses `.jsonl` transcripts with caching; also `scan_pr_refs`/`pr_badge`
+7. **CLI subcommands** (~line 1822) — `cmd_list`, `cmd_search`, `cmd_show`, `cmd_export`, `cmd_resume`, `cmd_done`, `cmd_undone`, `cmd_live`, `cmd_stop`, `cmd_logs`, `cmd_bg`, `cmd_jobs`, `cmd_relocate`, `cmd_backup`, `cmd_restore`, `cmd_stats`, `cmd_subagents`, plus the hook commands `cmd_prompt_hook`/`cmd_status_hook`/`cmd_install_hook`/`cmd_uninstall_hook`
 
 ### bg-aware actions (attach / stop / logs)
 
@@ -83,12 +83,30 @@ All shell out through `_run_claude(argv)` (isolated for testing).
   writes pins.json: it's a supervisor-locked file and a concurrent write could
   corrupt agent-view's own pin state. Bidirectional sync (cst Ctrl-T ↔ pins.json)
   is feasible now that the format is known but intentionally not done.
-8. **TUI** (`_pick_ui`, ~line 1383) — curses-based picker with two modes (normal + search), rendering loop, modal dialogs (help, preview, delete confirm, cmux chooser). **Color theme**: dark/light palettes via `tui_init_colors()` — pair NUMBERS carry fixed meaning (1–9), only (fg,bg) swap per theme, so the whole UI re-themes without touching call sites; pair 7 doubles as the full-screen `bkgd` fill so each theme renders identically across terminals. `resolve_theme()` picks the effective theme (CLI `--theme` → saved pref → `COLORFGBG` auto-detect → dark); `t`/`T` toggles live and persists via `save_theme()` into `state.json`.
-9. **Argument parser** (`_build_parser`, ~line 2549) and `main` (~line 2649)
+
+### Column sort (`cst list --sort` / TUI `s`,`S`)
+
+`sort_sessions(sessions, ctx, sort_key, reverse)` (~line 1427) is the shared
+sorter for both `cst list` and the TUI. Sortable columns: `SORT_KEYS =
+("time","status","msgs","project")`. `_SORT_DEFAULT_DESC` gives each column a
+natural direction (time/msgs descending, status/project ascending). Ties break
+by `last_ts` descending — the function pre-sorts by recency and relies on
+Python's **stable** sort so equal primary keys keep newest-first. `status` sorts
+by `_status_sort_rank()` (working→waiting→idle→ended→done, needs the
+`StatusContext` to resolve live status). The pref persists in `state.json` as
+`{"sort": {"key", "reverse"}}` via `load_sort`/`save_sort` (~line 1453, mirrors
+`save_theme`). `cmd_list` honours an explicit `--sort` (natural dir, flipped by
+`--reverse`) as a one-off, else falls back to the saved pref; sort runs **before**
+`--limit` so the slice is top-N of the chosen order. In the TUI, `s` cycles the
+column (resetting to its natural direction) and `S` toggles reverse — both save
+immediately, reset the cursor, and the header shows `sort:<col>▼/▲` with the
+active column's header label highlighted.
+8. **TUI** (`_pick_ui`, ~line 3246) — curses-based picker with two modes (normal + search), rendering loop, modal dialogs (help, preview, delete confirm, cmux chooser). Normal-mode action keys include `s`/`S` (sort) and `t`/`T` (theme) alongside `D`/`H`/`C`/`a`/`R`/`e`/`v`. **Color theme**: dark/light palettes via `tui_init_colors()` — pair NUMBERS carry fixed meaning (1–9), only (fg,bg) swap per theme, so the whole UI re-themes without touching call sites; pair 7 doubles as the full-screen `bkgd` fill so each theme renders identically across terminals. `resolve_theme()` picks the effective theme (CLI `--theme` → saved pref → `COLORFGBG` auto-detect → dark); `t`/`T` toggles live and persists via `save_theme()` into `state.json`.
+9. **Argument parser** (`_build_parser`, ~line 5129) and `main` (~line 5313)
 
 ### Key data flow
 
-`load_all_sessions()` is the central data loader — it reads all `.jsonl` files under `~/.claude/projects/`, applies the mtime-based index cache, resolves live/done status, filters by `--cwd`/`--days`/`--status`, and returns sorted `SessionMeta` objects. Both CLI commands and the TUI consume this.
+`load_all_sessions()` is the central data loader — it reads all `.jsonl` files under `~/.claude/projects/`, applies the mtime-based index cache, resolves live/done status, filters by `--cwd`/`--days`/`--status`, and returns `SessionMeta` objects sorted by `last_ts` descending (the default order). Both CLI commands and the TUI consume this, then re-order via `sort_sessions()` when a non-default column sort is active.
 
 ### Data files read/written
 
@@ -98,11 +116,19 @@ All shell out through `_run_claude(argv)` (isolated for testing).
 | `~/.claude/sessions/<pid>.json` | Read | Live-process registry (interactive sessions) |
 | `~/.claude/jobs/<short>/state.json` | Read | Agent-view background-session state (`scan_jobs()`) |
 | `~/.cache/claude-session-tracker/index.json` | R/W | Session metadata cache (safe to delete) |
-| `~/.cache/claude-session-tracker/state.json` | R/W | Done-flag overlay + user prefs: auto-rescan, TUI theme (safe to delete) |
+| `~/.cache/claude-session-tracker/state.json` | R/W | Done-flag overlay + status overlay + user prefs: auto-rescan, TUI theme, column sort (safe to delete) |
+| `~/.claude/jobs/pins.json` | Read | Agent-view pin set (`read_pins()`) — never written |
 
 ### Status resolution priority
 
-`resolve_status()`: **✓ (done) > ● (active) > ○ (ended)**. Done flag always wins.
+`classify_status()` (via `resolve_status()` / `StatusContext.resolve`) decides
+in this order: **✓ done always wins**; otherwise a **dead** process is `○` ended
+(or, for a background/agent-view job, its last persisted job-state); a **live**
+process resolves from the hook **overlay** if present (with a self-heal that
+downgrades a stale `working`/`waiting` to `◦` idle when the registry has a newer
+idle tick), else from the live **registry** (`busy`→`●`, `waiting`→`!`,
+`idle`→`◦`); a live process with no signal falls back to `●`. So liveness gates
+the active states — done > (dead⇒ended/job-state) > overlay > registry > `●`.
 
 Background (agent-view) sessions are managed by the supervisor, not the pid
 registry, so when their idle process is stopped they vanish from
@@ -129,10 +155,10 @@ explicit `done! <id>` — a *different* live session ✓ would otherwise mask.
 
 ## Development Notes
 
-- No test suite exists — test manually via `python3 tracker.py` and `python3 tracker.py --tui`
-- The TUI requires a real TTY — it cannot run from non-interactive Bash calls or agent tool calls
+- Tests live under `tests/` (stdlib `unittest`, run with `python3 -m pytest -q` or `python3 -m unittest discover -s tests`) — one `test_*.py` per feature; add one when you add a feature. They load `tracker.py` via `importlib` and stub `CACHE_DIR`/`STATE_PATH` into a tempdir for state tests
+- The TUI itself requires a real TTY — `_pick_ui` can't run from non-interactive Bash calls or agent tool calls (verify its curses layout headlessly via `pty.fork` + `getyx`)
 - CJK/Unicode display width is handled manually via `east_asian_width`; search mode assembles UTF-8 byte-by-byte to work around Python curses bugs on some terminals
 - `ESCDELAY` is set to 25ms for responsive Esc handling
-- `_CACHE_SCHEMA` version (currently 2) must be bumped when `SessionMeta` fields or extraction logic change, to invalidate stale cache entries
+- `_CACHE_SCHEMA` version (currently 4) must be bumped when `SessionMeta` fields or extraction logic change, to invalidate stale cache entries
 - `encode_cwd()` NFC-normalizes paths before encoding — important for Korean filesystem paths on macOS
 - Version string is in `__version__` at the top of `tracker.py`
