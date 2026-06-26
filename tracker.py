@@ -1401,6 +1401,73 @@ def save_theme(theme: str) -> None:
     save_state(st)
 
 
+# ---- column sort preference (CLI `--sort` / TUI `s`,`S`) -------------------
+# Sortable columns shared by `cst list` and the TUI picker. Each maps to a
+# SessionMeta attribute (or the live-resolved status). Stored in state.json the
+# same way the theme is, so the TUI choice sticks across runs and `cst list`
+# (without an explicit --sort) mirrors it.
+
+SORT_KEYS = ("time", "status", "msgs", "project")
+SORT_LABELS = {  # compact tag rendered in the TUI header / toasts
+    "time": "time", "status": "status", "msgs": "msgs", "project": "project",
+}
+# Natural direction per column (True = descending). Time/msgs read best
+# newest-/most-first; status/project read best ascending (rank / A→Z).
+_SORT_DEFAULT_DESC = {"time": True, "status": False, "msgs": True, "project": False}
+
+
+def _status_sort_rank(st: str) -> int:
+    """Rank a status glyph for sorting: working→waiting→idle→ended→done."""
+    try:
+        return STATUS_ALL.index(st)
+    except ValueError:
+        return len(STATUS_ALL)
+
+
+def sort_sessions(sessions: list["SessionMeta"], ctx, sort_key: str = "time",
+                  reverse: "bool | None" = None) -> list["SessionMeta"]:
+    """Return a NEW list of ``sessions`` ordered by ``sort_key``.
+
+    ``ctx`` is a StatusContext — needed to resolve live status for status-sort.
+    ``reverse=None`` uses the column's natural direction (``_SORT_DEFAULT_DESC``).
+    Equal primary keys break by ``last_ts`` descending: Python's sort is stable,
+    so pre-sorting by recency keeps newest-first within ties.
+    """
+    if sort_key not in SORT_KEYS:
+        sort_key = "time"
+    if reverse is None:
+        reverse = _SORT_DEFAULT_DESC[sort_key]
+    _MIN = datetime.min.replace(tzinfo=timezone.utc)
+    base = sorted(sessions, key=lambda m: m.last_ts or _MIN, reverse=True)
+    if sort_key == "time":
+        return base if reverse else base[::-1]
+    if sort_key == "msgs":
+        keyfn = lambda m: m.msg_count
+    elif sort_key == "status":
+        keyfn = lambda m: _status_sort_rank(ctx.resolve(m.session_id))
+    else:  # project
+        keyfn = lambda m: (shorten_path(m.cwd) or "").lower()
+    return sorted(base, key=keyfn, reverse=reverse)
+
+
+def load_sort() -> "tuple[str, bool]":
+    """Stored (sort_key, reverse) from state.json; ("time", desc) by default."""
+    cfg = load_state().get("sort")
+    if isinstance(cfg, dict) and cfg.get("key") in SORT_KEYS:
+        key = cfg["key"]
+        rev = cfg.get("reverse")
+        return key, rev if isinstance(rev, bool) else _SORT_DEFAULT_DESC[key]
+    return "time", _SORT_DEFAULT_DESC["time"]
+
+
+def save_sort(sort_key: str, reverse: bool) -> None:
+    if sort_key not in SORT_KEYS:
+        sort_key = "time"
+    st = load_state()
+    st["sort"] = {"key": sort_key, "reverse": bool(reverse)}
+    save_state(st)
+
+
 def _detect_terminal_is_light(env: dict | None = None) -> bool | None:
     """Best-effort terminal-background detection via ``COLORFGBG``.
 
@@ -1766,6 +1833,20 @@ def cmd_list(args: argparse.Namespace) -> int:
         if wanted:
             sessions = [s for s in sessions
                         if ctx.resolve(s.session_id) == wanted]
+    # Column sort: an explicit --sort is a one-off override (natural direction,
+    # flipped by --reverse); no flag uses the saved TUI preference. Sort runs
+    # BEFORE --limit so the slice keeps the top-N of the chosen order. getattr
+    # keeps callers that build a bare Namespace (tests) working.
+    sort_arg = getattr(args, "sort", None)
+    reverse_arg = getattr(args, "reverse", False)
+    if sort_arg:
+        rev = (not _SORT_DEFAULT_DESC[sort_arg]) if reverse_arg else None
+        sessions = sort_sessions(sessions, ctx, sort_arg, reverse=rev)
+    else:
+        skey, srev = load_sort()
+        if reverse_arg:
+            srev = not srev
+        sessions = sort_sessions(sessions, ctx, skey, srev)
     if args.limit:
         sessions = sessions[: args.limit]
     if not sessions:
@@ -2600,6 +2681,8 @@ HELP_LINES = [
     "                         (Ctrl-H is unavailable — it aliases Backspace)",
     "  C / c                  toggle: only show sessions under the TUI launch cwd",
     "                         (prefix match on the recorded session cwd)",
+    "  s                      cycle sort column (time→status→msgs→project) — saved",
+    "  S                      reverse the sort direction — saved",
     "  t / T                  toggle color theme (dark ↔ light) — saved",
     "  R / r / Ctrl-R         rescan sessions + live-process registry",
     "  Del / Fn+Delete        delete marked/current session(s)",
@@ -3197,6 +3280,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
     search_query: str = ""
     search_hits: dict[str, str] | None = None
     search_mode: bool = False  # True while typing inside the `/` prompt
+    sort_key, sort_reverse = load_sort()  # column sort (s cycles, S reverses)
     hide_done: bool = hide_done_default  # H toggle: hide 작업종료 from the view
     cwd_only: bool = False     # C toggle: only sessions under the TUI launch cwd
     try:
@@ -3225,15 +3309,11 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
         if cwd_only and launch_cwd:
             pool = [s for s in pool
                     if unicodedata.normalize("NFC", s.cwd or "").startswith(launch_cwd)]
-        if not query:
-            return pool
-        q = query.lower()
-        out = []
-        for s in pool:
-            hay = f"{s.session_id} {s.cwd} {s.first_user_msg}".lower()
-            if q in hay:
-                out.append(s)
-        return out
+        if query:
+            q = query.lower()
+            pool = [s for s in pool
+                    if q in f"{s.session_id} {s.cwd} {s.first_user_msg}".lower()]
+        return sort_sessions(pool, ctx, sort_key, sort_reverse)
 
     def confirm_delete(targets: list[SessionMeta]) -> bool:
         n = len(targets)
@@ -3614,6 +3694,8 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
         cwd_hint = f"  [📂 {shorten_path(launch_cwd)}]" if cwd_only else ""
         auto_hint = (f"  ⟳{auto_interval}s"
                      if (auto_enabled and auto_interval > 0) else "  ⟳off")
+        sort_hint = (f"  sort:{SORT_LABELS[sort_key]}"
+                     f"{'▼' if sort_reverse else '▲'}")
         header = (
             f" claude-session-tracker v{__version__}  "
             f"{len(items)}/{len(sessions)}  "
@@ -3622,9 +3704,9 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             f"{STATUS_IDLE}{scounts[STATUS_IDLE]} "
             f"{STATUS_ENDED}{scounts[STATUS_ENDED]} "
             f"{STATUS_DONE}{scounts[STATUS_DONE]}"
-            f"{auto_hint}"
+            f"{auto_hint}{sort_hint}"
             f"{mark_hint}{search_hint}{hide_hint}{cwd_hint}"
-            "   ? help  Enter open  / filter  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit "
+            "   ? help  Enter open  / filter  s sort  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit "
         )
         if search_mode:
             prompt = f"/ {query}"
@@ -3670,6 +3752,23 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             stdscr.addnstr(1, 0, prompt.ljust(w), w, prompt_attr)
             stdscr.addnstr(2, 0, col_header.ljust(w - 1), w - 1,
                            curses.A_DIM | curses.A_UNDERLINE)
+            # Highlight the active sort column's header label. col_header is
+            # pure ASCII, so character index == display column; the (x, width)
+            # of each sortable column is derived from the same field widths the
+            # f-string above used, so no width drift.
+            _sort_x = {
+                "status":  (num_w + 2, status_w),
+                "time":    (num_w + 2 + status_w + 1, ts_w),
+                "msgs":    (num_w + 2 + status_w + 1 + ts_w + 2 + sid_w + 1,
+                            msgs_w),
+                "project": (num_w + 2 + status_w + 1 + ts_w + 2 + sid_w + 1
+                            + msgs_w + 2 + msg_w + 2, len("PROJECT")),
+            }.get(sort_key)
+            if _sort_x:
+                _cx, _cw = _sort_x
+                stdscr.addnstr(2, _cx, col_header[_cx:_cx + _cw], _cw,
+                               curses.color_pair(6) | curses.A_BOLD
+                               | curses.A_UNDERLINE)
         except curses.error:
             pass
         if search_mode:
@@ -4064,6 +4163,22 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                 last_rescan = time.monotonic()
                 toast = ("Auto-rescan: off" if not auto_enabled
                          else f"Auto-rescan: every {auto_interval}s")
+        elif ch == ord('s'):  # cycle sort column → reset to its natural dir
+            i = SORT_KEYS.index(sort_key) if sort_key in SORT_KEYS else 0
+            sort_key = SORT_KEYS[(i + 1) % len(SORT_KEYS)]
+            sort_reverse = _SORT_DEFAULT_DESC[sort_key]
+            save_sort(sort_key, sort_reverse)
+            sel = 0
+            top = 0
+            toast = (f"Sort: {SORT_LABELS[sort_key]} "
+                     f"{'▼ desc' if sort_reverse else '▲ asc'}")
+        elif ch == ord('S'):  # reverse the current sort direction
+            sort_reverse = not sort_reverse
+            save_sort(sort_key, sort_reverse)
+            sel = 0
+            top = 0
+            toast = (f"Sort: {SORT_LABELS[sort_key]} "
+                     f"{'▼ desc' if sort_reverse else '▲ asc'}")
         elif ch in (ord('t'), ord('T')):
             # Live theme toggle (dark ↔ light): re-init the palette in place and
             # persist the concrete choice. The next render redraws the frame on
@@ -5056,6 +5171,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_list.add_argument("--limit", type=int, default=30)
     p_list.add_argument("--cwd", type=str, default=None, help="filter by cwd prefix")
     p_list.add_argument("--days", type=int, default=None, help="only last N days")
+    p_list.add_argument("--sort", choices=SORT_KEYS, default=None,
+                        help="sort column: time|status|msgs|project "
+                             "(default: saved TUI preference)")
+    p_list.add_argument("--reverse", action="store_true",
+                        help="reverse the sort direction")
     p_list.add_argument("--status", type=str, default=None,
                         choices=("working", "waiting", "idle", "ended",
                                  "done", "active"),
