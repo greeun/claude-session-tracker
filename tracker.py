@@ -2703,12 +2703,31 @@ HELP_LINES = [
 ]
 
 
+def _sanitize_cells(s: str) -> str:
+    """Make a single line safe for ``addnstr`` width accounting.
+
+    ``display_width`` counts a TAB / control char as 1 column, but curses
+    expands a TAB to the next tab stop and lets ESC & other C0/C1 controls
+    move the cursor unpredictably — so the rendered width exceeds what we
+    measured and the text spills past the box border. Expand tabs to spaces
+    (no tabs left → curses can't re-expand) and replace remaining control
+    chars with a space, so measured width == rendered width.
+    """
+    s = s.expandtabs(8)
+    return "".join(
+        " " if (o := ord(ch)) < 0x20 or 0x7f <= o <= 0x9f else ch
+        for ch in s
+    )
+
+
 def _wrap_display(s: str, width: int) -> list[str]:
     """Wrap a single logical line into chunks that fit within `width` display columns.
 
     Embedded newlines are split defensively: callers should pass single
     logical lines, but a stray ``\\n`` fed straight to ``addnstr()`` makes the
     curses cursor jump a row and spill past the box border, so we guard here.
+    Tabs and other control chars are neutralized via ``_sanitize_cells`` for
+    the same reason (a TAB makes the cursor jump horizontally to a tab stop).
     """
     if width <= 0:
         return [""]
@@ -2719,6 +2738,7 @@ def _wrap_display(s: str, width: int) -> list[str]:
         for part in s.splitlines():
             out.extend(_wrap_display(part, width))
         return out or [""]
+    s = _sanitize_cells(s)
     out: list[str] = []
     cur = ""
     used = 0
