@@ -128,7 +128,9 @@ stale `!` self-heals to `◦` to avoid a stuck state.
   orphan-relocate flow helps you find/pick the new home.
 - `Space` toggle mark · `Ctrl-A` mark all visible · `Ctrl-X` clear marks
   · `Del` delete marked/current (with confirmation)
-- **`v` / `V`** — preview modal (scrollable transcript, read-only)
+- **`v` / `V`** — preview modal (scrollable transcript, read-only);
+  inside it `←`/`→` (or `‹`/`›`, `[`/`]`) step to the prev/next session in the
+  list without closing
 - **`e` / `E`** — export focused session to `./<id>.md`
 - **`D` / `d` / `Ctrl-D`** — toggle done (or apply to all marked)
 - **`H` / `h`** — hide ✓ rows (no Ctrl-H alias — Backspace collision);

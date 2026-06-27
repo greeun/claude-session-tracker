@@ -2670,6 +2670,7 @@ HELP_LINES = [
     "  a / A                  auto-rescan interval popup (Off/5/10/30/60/120s)",
     "  v / V                  preview the focused session (read-only modal)",
     "                         ↑↓ scroll · PgUp/PgDn page · g/G top/bottom · q/Esc/v close",
+    "                         ←/→ (or ‹ › / [ ]) prev/next session in list",
     "                         / full-text search (literal, case-insensitive)",
     "                         n / N next/prev match · Esc clear search then close",
     "  e / E                  export focused session transcript to .md in cwd",
@@ -2785,6 +2786,14 @@ def _match_step(cur: int, total: int, forward: bool) -> int:
     return (cur + 1) % total if forward else (cur - 1) % total
 
 
+def _preview_step(sel: int, total: int, forward: bool) -> int:
+    """Cyclic next/prev session index for the preview modal. total<=0 -> 0;
+    wraps at both ends so ‹/› cycle through the whole list."""
+    if total <= 0:
+        return 0
+    return (sel + 1) % total if forward else (sel - 1) % total
+
+
 def _scroll_match_into_view(line_idx: int, top: int, view_h: int,
                             max_top: int) -> int:
     """Return a new `top` so `line_idx` is visible within [top, top+view_h-1],
@@ -2833,12 +2842,16 @@ def _read_key(win) -> tuple[int, str | None]:
     return (ord(s) if len(s) == 1 else -1, s)
 
 
-def _preview_modal(stdscr, target: SessionMeta, status: str) -> None:
+def _preview_modal(stdscr, items, sel: int, ctx) -> None:
     """Scrollable read-only preview of the focused session's transcript.
 
+    `‹`/`›` (or ←/→) switch to the previous/next session in `items` without
+    leaving the modal; the view, scroll and in-modal search reset per session.
     Closed by q/Q/Esc/v/V. No state mutation — purely informational.
     """
     import curses
+    if not items:
+        return
     h, w = stdscr.getmaxyx()
     box_w = min(120, max(60, w - 2))
     box_h = min(40, max(12, h - 2))
@@ -2848,187 +2861,216 @@ def _preview_modal(stdscr, target: SessionMeta, status: str) -> None:
     win.keypad(True)
 
     inner_w = box_w - 4
+    total = len(items)
+    multi = total > 1
+    sel = sel % total
 
-    # Build a flat list of (text, attr) display lines.
-    lines: list[tuple[str, int]] = []
     header_attr = curses.color_pair(2) | curses.A_BOLD
     cwd_attr = curses.color_pair(4)
     dim_attr = curses.A_DIM
     user_attr = curses.color_pair(2) | curses.A_BOLD
     asst_attr = curses.color_pair(3) | curses.A_BOLD
-
-    lines.append((truncate_display(f"Session  {target.session_id}", inner_w), header_attr))
-    lines.append((truncate_display(f"Status   {status_label(status)}", inner_w), 0))
-    lines.append((truncate_display(f"Cwd      {shorten_path(target.cwd)}", inner_w), cwd_attr))
-    if target.git_branch:
-        lines.append((truncate_display(f"Branch   {target.git_branch}", inner_w), cwd_attr))
-    lines.append((truncate_display(
-        f"Started  {fmt_ts(target.first_ts)}    Last  {fmt_ts(target.last_ts)}    Msgs  {target.msg_count}",
-        inner_w), dim_attr))
-    if target.first_user_msg:
-        lines.append(("", 0))
-        lines.append(("First user message:", curses.A_BOLD))
-        for raw_ln in target.first_user_msg.splitlines() or [""]:
-            for ln in _wrap_display(raw_ln, inner_w):
-                lines.append((ln, 0))
-    lines.append(("", 0))
-    lines.append(("─" * inner_w, dim_attr))
-
-    rendered = 0
-    try:
-        for evt in iter_jsonl(target.path):
-            etype = evt.get("type")
-            if etype not in ("user", "assistant"):
-                continue
-            text = extract_text((evt.get("message") or {}).get("content")).strip()
-            if not text:
-                continue
-            ts = fmt_ts(parse_ts(evt.get("timestamp")))
-            prefix = "🧑 user" if etype == "user" else "🤖 assistant"
-            attr = user_attr if etype == "user" else asst_attr
-            lines.append((truncate_display(f"{prefix}  [{ts}]", inner_w), attr))
-            for raw_ln in text.splitlines() or [""]:
-                for ln in _wrap_display(raw_ln, inner_w):
-                    lines.append((ln, 0))
-            lines.append(("", 0))
-            rendered += 1
-    except Exception as e:
-        lines.append((truncate_display(f"(read error: {e})", inner_w), curses.color_pair(5)))
-
-    if rendered == 0:
-        lines.append(("(no user/assistant messages)", dim_attr))
-
-    list_h = box_h - 3  # 1 top border + 1 bottom border + 1 footer line
-    view_h = max(1, list_h - 1)  # visible content rows (last inner row = footer)
-    max_top = max(0, len(lines) - list_h)
-    top = 0
-
-    # --- in-modal full-text search state ---
-    query = ""
-    searching = False                          # True while typing in the `/` prompt
-    matches: list[tuple[int, int, int]] = []   # (line_idx, col_start, col_end)
-    cur_match = -1
     # Distinct colors so the focused match stands out from the rest.
     # A_REVERSE is kept so matches stay visible even on colorless terminals.
     hl_attr = curses.color_pair(2) | curses.A_REVERSE              # all matches — yellow block
     cur_attr = curses.color_pair(9) | curses.A_REVERSE | curses.A_BOLD  # current — cyan block
 
-    def _recompute(new_top: int) -> tuple[int, int]:
-        """Recompute matches for the current `query`, then pick and scroll to a
-        match. Returns (cur_match, top)."""
-        nonlocal matches
-        matches = _preview_find_matches(lines, query)
-        if not matches:
-            return -1, max(0, min(new_top, max_top))
-        nxt = next((i for i, (ml, _, _) in enumerate(matches) if ml >= new_top), 0)
-        return nxt, _scroll_match_into_view(matches[nxt][0], new_top, view_h, max_top)
+    def _build_lines(target, status):
+        """Flat list of (text, attr) display lines for one session."""
+        lines: list[tuple[str, int]] = []
+        lines.append((truncate_display(f"Session  {target.session_id}", inner_w), header_attr))
+        lines.append((truncate_display(f"Status   {status_label(status)}", inner_w), 0))
+        lines.append((truncate_display(f"Cwd      {shorten_path(target.cwd)}", inner_w), cwd_attr))
+        if target.git_branch:
+            lines.append((truncate_display(f"Branch   {target.git_branch}", inner_w), cwd_attr))
+        lines.append((truncate_display(
+            f"Started  {fmt_ts(target.first_ts)}    Last  {fmt_ts(target.last_ts)}    Msgs  {target.msg_count}",
+            inner_w), dim_attr))
+        if target.first_user_msg:
+            lines.append(("", 0))
+            lines.append(("First user message:", curses.A_BOLD))
+            for raw_ln in target.first_user_msg.splitlines() or [""]:
+                for ln in _wrap_display(raw_ln, inner_w):
+                    lines.append((ln, 0))
+        lines.append(("", 0))
+        lines.append(("─" * inner_w, dim_attr))
 
-    while True:
+        rendered = 0
         try:
-            win.erase()
-            win.box()
-            title = f" Preview · {target.session_id[:8]} "
+            for evt in iter_jsonl(target.path):
+                etype = evt.get("type")
+                if etype not in ("user", "assistant"):
+                    continue
+                text = extract_text((evt.get("message") or {}).get("content")).strip()
+                if not text:
+                    continue
+                ts = fmt_ts(parse_ts(evt.get("timestamp")))
+                prefix = "🧑 user" if etype == "user" else "🤖 assistant"
+                attr = user_attr if etype == "user" else asst_attr
+                lines.append((truncate_display(f"{prefix}  [{ts}]", inner_w), attr))
+                for raw_ln in text.splitlines() or [""]:
+                    for ln in _wrap_display(raw_ln, inner_w):
+                        lines.append((ln, 0))
+                lines.append(("", 0))
+                rendered += 1
+        except Exception as e:
+            lines.append((truncate_display(f"(read error: {e})", inner_w), curses.color_pair(5)))
+
+        if rendered == 0:
+            lines.append(("(no user/assistant messages)", dim_attr))
+        return lines
+
+    # --- outer session-switch loop ---
+    while True:
+        target = items[sel]
+        status = ctx.resolve(target.session_id)
+        lines = _build_lines(target, status)
+
+        list_h = box_h - 3  # 1 top border + 1 bottom border + 1 footer line
+        view_h = max(1, list_h - 1)  # visible content rows (last inner row = footer)
+        max_top = max(0, len(lines) - list_h)
+        top = 0
+
+        # --- in-modal full-text search state (per session) ---
+        query = ""
+        searching = False                          # True while typing in the `/` prompt
+        matches: list[tuple[int, int, int]] = []   # (line_idx, col_start, col_end)
+        cur_match = -1
+
+        def _recompute(new_top: int) -> tuple[int, int]:
+            """Recompute matches for the current `query`, then pick and scroll to a
+            match. Returns (cur_match, top)."""
+            nonlocal matches
+            matches = _preview_find_matches(lines, query)
+            if not matches:
+                return -1, max(0, min(new_top, max_top))
+            nxt = next((i for i, (ml, _, _) in enumerate(matches) if ml >= new_top), 0)
+            return nxt, _scroll_match_into_view(matches[nxt][0], new_top, view_h, max_top)
+
+        switch = None  # 'prev' | 'next' set when the user jumps sessions, else close
+
+        # --- inner render + key loop for the current session ---
+        while True:
             try:
-                win.addnstr(0, max(2, (box_w - len(title)) // 2), title,
-                            box_w - 4, header_attr)
-            except curses.error:
-                pass
-            for i in range(list_h - 1):  # leave last inner row for footer
-                idx = top + i
-                if idx >= len(lines):
-                    break
-                text, attr = lines[idx]
+                win.erase()
+                win.box()
+                pos_tag = f" · {sel + 1}/{total}" if multi else ""
+                title = f" Preview · {target.session_id[:8]}{pos_tag} "
                 try:
-                    win.addnstr(1 + i, 2, text, box_w - 4, attr)
+                    win.addnstr(0, max(2, (box_w - len(title)) // 2), title,
+                                box_w - 4, header_attr)
                 except curses.error:
                     pass
-                # overlay search highlights for any matches on this line
-                for mi, (ml, cs, ce) in enumerate(matches):
-                    if ml != idx:
-                        continue
-                    col = 2 + display_width(text[:cs])
-                    if col >= box_w - 2:
-                        continue
-                    seg_attr = cur_attr if mi == cur_match else hl_attr
+                for i in range(list_h - 1):  # leave last inner row for footer
+                    idx = top + i
+                    if idx >= len(lines):
+                        break
+                    text, attr = lines[idx]
                     try:
-                        win.addnstr(1 + i, col, text[cs:ce], box_w - 2 - col, seg_attr)
+                        win.addnstr(1 + i, 2, text, box_w - 4, attr)
                     except curses.error:
                         pass
-            pos = f" {min(top + list_h - 1, len(lines))}/{len(lines)} "
-            if searching:
-                cnt = f"[{(cur_match + 1) if matches else 0}/{len(matches)}]"
-                prompt = f" /{query}▏  {cnt}  Enter find · Esc cancel "
-            elif query:
-                cnt = f"[{(cur_match + 1) if matches else 0}/{len(matches)}]"
-                prompt = f" /{query}  {cnt}  n/N next/prev · / edit · Esc clear "
-            else:
-                prompt = " ↑↓ scroll · PgUp/PgDn · g/G · / search · q/Esc/v close "
-            try:
-                win.addnstr(box_h - 2, 2, prompt, box_w - 4 - len(pos) - 1, dim_attr)
-                win.addnstr(box_h - 2, max(2, box_w - 2 - len(pos)), pos, len(pos), dim_attr)
-            except curses.error:
-                pass
-            win.refresh()
-            ch, ch_str = _read_key(win)
-        except KeyboardInterrupt:
-            break
-
-        if ch == -1 and ch_str is None:
-            continue
-
-        if searching:
-            # --- typing inside the `/` find prompt (incremental) ---
-            if ch in (10, 13):                       # Enter — confirm, keep highlights
-                searching = False
-            elif ch == 27:                           # Esc — cancel search
-                searching = False
-                query = ""
-                matches = []
-                cur_match = -1
-            elif ch in (curses.KEY_BACKSPACE, 127, 8):
-                query = query[:-1]
-                cur_match, top = _recompute(top)
-            elif ch == 21:                           # Ctrl-U — wipe query
-                query = ""
-                cur_match, top = _recompute(top)
-            elif ch_str is not None and ch_str.isprintable():
-                query += ch_str
-                cur_match, top = _recompute(top)
-            # any other key ignored while typing
-            continue
-
-        # --- normal preview navigation ---
-        if ch in (ord('q'), ord('Q'), ord('v'), ord('V')):
-            break
-        elif ch == 27:                               # Esc — clear search, else close
-            if query:
-                query = ""
-                matches = []
-                cur_match = -1
-            else:
+                    # overlay search highlights for any matches on this line
+                    for mi, (ml, cs, ce) in enumerate(matches):
+                        if ml != idx:
+                            continue
+                        col = 2 + display_width(text[:cs])
+                        if col >= box_w - 2:
+                            continue
+                        seg_attr = cur_attr if mi == cur_match else hl_attr
+                        try:
+                            win.addnstr(1 + i, col, text[cs:ce], box_w - 2 - col, seg_attr)
+                        except curses.error:
+                            pass
+                pos = f" {min(top + list_h - 1, len(lines))}/{len(lines)} "
+                if searching:
+                    cnt = f"[{(cur_match + 1) if matches else 0}/{len(matches)}]"
+                    prompt = f" /{query}▏  {cnt}  Enter find · Esc cancel "
+                elif query:
+                    cnt = f"[{(cur_match + 1) if matches else 0}/{len(matches)}]"
+                    prompt = f" /{query}  {cnt}  n/N next/prev · / edit · Esc clear "
+                else:
+                    nav = " · ←→ session" if multi else ""
+                    prompt = f" ↑↓ scroll · PgUp/PgDn · g/G{nav} · / search · q/Esc/v close "
+                try:
+                    win.addnstr(box_h - 2, 2, prompt, box_w - 4 - len(pos) - 1, dim_attr)
+                    win.addnstr(box_h - 2, max(2, box_w - 2 - len(pos)), pos, len(pos), dim_attr)
+                except curses.error:
+                    pass
+                win.refresh()
+                ch, ch_str = _read_key(win)
+            except KeyboardInterrupt:
                 break
-        elif ch == ord('/'):                         # start / re-edit search
-            searching = True
-        elif ch == ord('n'):                         # next match
-            if matches:
-                cur_match = _match_step(cur_match, len(matches), True)
-                top = _scroll_match_into_view(matches[cur_match][0], top, view_h, max_top)
-        elif ch == ord('N'):                         # previous match
-            if matches:
-                cur_match = _match_step(cur_match, len(matches), False)
-                top = _scroll_match_into_view(matches[cur_match][0], top, view_h, max_top)
-        elif ch in (curses.KEY_UP, 16):
-            top = max(0, top - 1)
-        elif ch in (curses.KEY_DOWN, 14):
-            top = min(max_top, top + 1)
-        elif ch == curses.KEY_PPAGE:
-            top = max(0, top - (list_h - 1))
-        elif ch == curses.KEY_NPAGE:
-            top = min(max_top, top + (list_h - 1))
-        elif ch in (curses.KEY_HOME, ord('g')):
-            top = 0
-        elif ch in (curses.KEY_END, ord('G')):
-            top = max_top
+
+            if ch == -1 and ch_str is None:
+                continue
+
+            if searching:
+                # --- typing inside the `/` find prompt (incremental) ---
+                if ch in (10, 13):                       # Enter — confirm, keep highlights
+                    searching = False
+                elif ch == 27:                           # Esc — cancel search
+                    searching = False
+                    query = ""
+                    matches = []
+                    cur_match = -1
+                elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                    query = query[:-1]
+                    cur_match, top = _recompute(top)
+                elif ch == 21:                           # Ctrl-U — wipe query
+                    query = ""
+                    cur_match, top = _recompute(top)
+                elif ch_str is not None and ch_str.isprintable():
+                    query += ch_str
+                    cur_match, top = _recompute(top)
+                # any other key ignored while typing
+                continue
+
+            # --- normal preview navigation ---
+            if ch in (ord('q'), ord('Q'), ord('v'), ord('V')):
+                break
+            elif ch == 27:                               # Esc — clear search, else close
+                if query:
+                    query = ""
+                    matches = []
+                    cur_match = -1
+                else:
+                    break
+            elif multi and ch in (ord('<'), ord('['), curses.KEY_LEFT):
+                switch = 'prev'
+                break
+            elif multi and ch in (ord('>'), ord(']'), curses.KEY_RIGHT):
+                switch = 'next'
+                break
+            elif ch == ord('/'):                         # start / re-edit search
+                searching = True
+            elif ch == ord('n'):                         # next match
+                if matches:
+                    cur_match = _match_step(cur_match, len(matches), True)
+                    top = _scroll_match_into_view(matches[cur_match][0], top, view_h, max_top)
+            elif ch == ord('N'):                         # previous match
+                if matches:
+                    cur_match = _match_step(cur_match, len(matches), False)
+                    top = _scroll_match_into_view(matches[cur_match][0], top, view_h, max_top)
+            elif ch in (curses.KEY_UP, 16):
+                top = max(0, top - 1)
+            elif ch in (curses.KEY_DOWN, 14):
+                top = min(max_top, top + 1)
+            elif ch == curses.KEY_PPAGE:
+                top = max(0, top - (list_h - 1))
+            elif ch == curses.KEY_NPAGE:
+                top = min(max_top, top + (list_h - 1))
+            elif ch in (curses.KEY_HOME, ord('g')):
+                top = 0
+            elif ch in (curses.KEY_END, ord('G')):
+                top = max_top
+
+        if switch == 'prev':
+            sel = _preview_step(sel, total, False)
+        elif switch == 'next':
+            sel = _preview_step(sel, total, True)
+        else:
+            break
 
     del win
     stdscr.touchwin()
@@ -4142,9 +4184,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             _show_help_modal(stdscr)
         elif ch in (ord('v'), ord('V')):
             if items:
-                target = items[sel]
-                st = ctx.resolve(target.session_id)
-                _preview_modal(stdscr, target, st)
+                _preview_modal(stdscr, items, sel, ctx)
         elif ch in (ord('e'), ord('E')):
             if items:
                 target = items[sel]

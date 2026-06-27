@@ -563,7 +563,7 @@ cst relocate <id> ~/project/actual-folder -y
 - **#** row-number column + **ST** glyph column + **PROJECT** column on every row
 - **`done`**, **`undone`**, **`live`**, **`export`**, **`bg`** / **`jobs`** / **`stop`** / **`logs`** (agent-view background sessions), **`install-hook`** / **`uninstall-hook`** / **`prompt-hook`** / **`status-hook`** subcommands
 - `cst list --sort time|status|msgs|project [--reverse]` column sort
-- TUI keys: `D/d/Ctrl-D` (toggle done) · `H/h` (hide done) · `C/c` (cwd-only) · `R/r/Ctrl-R` (rescan) · `e/E` (export) · `a/A` (auto-rescan) · `s`/`S` (column sort) · `t/T` (theme) · `Ctrl-A` (mark all) · `?` (help) · `v/V` (preview)
+- TUI keys: `D/d/Ctrl-D` (toggle done) · `H/h` (hide done) · `C/c` (cwd-only) · `R/r/Ctrl-R` (rescan) · `e/E` (export) · `a/A` (auto-rescan) · `s`/`S` (column sort) · `t/T` (theme) · `Ctrl-A` (mark all) · `?` (help) · `v/V` (preview; `←/→` prev/next session inside it)
 - Background/agent-view rows: `[bg]`/`[exec]`/`[bg ⎇branch]`/`[bg ∙]`/`[PR #N]` badges, `*` pin marker, `Enter` attaches (not forks)
 - Color themes (dark/light, `--theme` / `t`)
 - fzf-style `/` with live filter and typing-while-navigating
