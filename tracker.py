@@ -1428,9 +1428,11 @@ def save_theme(theme: str) -> None:
 # same way the theme is, so the TUI choice sticks across runs and `cst list`
 # (without an explicit --sort) mirrors it.
 
-SORT_KEYS = ("time", "status", "msgs", "project")
+# Ordered to match the on-screen column layout (ST → LAST ACTIVITY → MSGS →
+# PROJECT), so the `s` key cycles left-to-right across the visible columns.
+SORT_KEYS = ("status", "time", "msgs", "project")
 SORT_LABELS = {  # compact tag rendered in the TUI header / toasts
-    "time": "time", "status": "status", "msgs": "msgs", "project": "project",
+    "status": "status", "time": "time", "msgs": "msgs", "project": "project",
 }
 # Natural direction per column (True = descending). Time/msgs read best
 # newest-/most-first; status/project read best ascending (rank / A→Z).
@@ -2684,11 +2686,12 @@ HELP_LINES = [
     "",
     "Session actions (normal mode)",
     "  a / A                  auto-rescan interval popup (Off/5/10/30/60/120s)",
-    "  v / V                  preview the focused session (read-only modal)",
+    "  v / V                  preview the focused session (scroll/search modal)",
     "                         ↑↓ scroll · PgUp/PgDn page · g/G top/bottom · q/Esc/v close",
     "                         ←/→ (or ‹ › / [ ]) prev/next session in list",
     "                         / full-text search (literal, case-insensitive)",
     "                         n / N next/prev match · Esc clear search then close",
+    "                         Del delete the session being previewed (confirm first)",
     "  e / E                  export focused session transcript to .md in cwd",
     "  Space                  toggle mark on the current row",
     "  Ctrl-A                 toggle mark on ALL filtered rows (select all)",
@@ -2698,7 +2701,7 @@ HELP_LINES = [
     "                         (Ctrl-H is unavailable — it aliases Backspace)",
     "  C / c                  toggle: only show sessions under the TUI launch cwd",
     "                         (prefix match on the recorded session cwd)",
-    "  s                      cycle sort column (time→status→msgs→project) — saved",
+    "  s                      cycle sort column (status→time→msgs→project) — saved",
     "  S                      reverse the sort direction — saved",
     "  t / T                  toggle color theme (dark ↔ light) — saved",
     "  R / r / Ctrl-R         rescan sessions + live-process registry",
@@ -2875,16 +2878,19 @@ def _centered_win(stdscr, box_h, box_w):
     return win
 
 
-def _preview_modal(stdscr, items, sel: int, ctx) -> None:
-    """Scrollable read-only preview of the focused session's transcript.
+def _preview_modal(stdscr, items, sel: int, ctx):
+    """Scrollable preview of the focused session's transcript.
 
     `‹`/`›` (or ←/→) switch to the previous/next session in `items` without
     leaving the modal; the view, scroll and in-modal search reset per session.
-    Closed by q/Q/Esc/v/V. No state mutation — purely informational.
+    Closed by q/Q/Esc/v/V. Read-only except for `Del`, which shows the delete
+    confirmation in place: cancel returns to the preview, confirm closes the
+    modal and returns the (already-confirmed) `SessionMeta` for the caller to
+    delete. Every other path returns None.
     """
     import curses
     if not items:
-        return
+        return None
     h, w = stdscr.getmaxyx()
     box_w = min(120, max(60, w - 2))
     box_h = min(40, max(12, h - 2))
@@ -2949,6 +2955,8 @@ def _preview_modal(stdscr, items, sel: int, ctx) -> None:
         if rendered == 0:
             lines.append(("(no user/assistant messages)", dim_attr))
         return lines
+
+    delete_target = None  # set when the user presses Del; returned to the caller
 
     # --- outer session-switch loop ---
     while True:
@@ -3030,7 +3038,7 @@ def _preview_modal(stdscr, items, sel: int, ctx) -> None:
                     prompt = f" /{query}  {cnt}  n/N next/prev · / edit · Esc clear "
                 else:
                     nav = " · ←→ session" if multi else ""
-                    prompt = f" ↑↓ scroll · PgUp/PgDn · g/G{nav} · / search · q/Esc/v close "
+                    prompt = f" ↑↓ scroll · PgUp/PgDn · g/G{nav} · / search · Del delete · q/Esc/v close "
                 try:
                     win.addnstr(box_h - 2, 2, prompt, box_w - 4 - len(pos) - 1, dim_attr)
                     win.addnstr(box_h - 2, max(2, box_w - 2 - len(pos)), pos, len(pos), dim_attr)
@@ -3103,7 +3111,17 @@ def _preview_modal(stdscr, items, sel: int, ctx) -> None:
                 top = 0
             elif ch in (curses.KEY_END, ord('G')):
                 top = max_top
+            elif ch in (curses.KEY_DC, 330):     # Del — confirm, then delete viewed session
+                if _confirm_delete_modal(stdscr, [target], ctx):
+                    delete_target = target
+                    break
+                # cancelled: stay in preview — force a full repaint so the
+                # confirm box's leftovers don't bleed through (cmux/Ghostty
+                # only apply cell-diffs).
+                win.clearok(True)
 
+        if delete_target is not None:
+            break
         if switch == 'prev':
             sel = _preview_step(sel, total, False)
         elif switch == 'next':
@@ -3114,6 +3132,7 @@ def _preview_modal(stdscr, items, sel: int, ctx) -> None:
     del win
     stdscr.touchwin()
     stdscr.refresh()
+    return delete_target
 
 
 def _help_scroll(key: int, offset: int, total: int, view_h: int,
@@ -3600,6 +3619,40 @@ def _confirm_delete_modal(stdscr, targets: list[SessionMeta], ctx) -> bool:
         del win
         stdscr.touchwin()
         stdscr.refresh()
+
+
+def _delete_sessions(targets: list[SessionMeta], sessions: list[SessionMeta],
+                     marked: set[str], ctx) -> tuple[int, int]:
+    """Unlink the transcript files for `targets` and purge their cache/state/
+    mark traces. Mutates `sessions` (drops deleted rows in place), `marked`
+    (discards deleted ids), and `ctx.done`. Returns (deleted, errors).
+
+    Shared by the TUI list `Del` handler and the preview-modal delete so the
+    deletion side effects stay in one place. Only unlinks the transcript — a
+    live background process keeps running (see `bg_delete_warning`).
+    """
+    deleted = 0
+    errors = 0
+    cache = _load_cache()
+    entries = cache.setdefault("entries", {})
+    for s in targets:
+        try:
+            s.path.unlink()
+            entries.pop(str(s.path), None)
+            deleted += 1
+        except OSError:
+            errors += 1
+    _save_cache(cache)
+    state = load_state()
+    ds = state.setdefault("done", {})
+    for s in targets:
+        ds.pop(s.session_id, None)
+    save_state(state)
+    ctx.done = done_ids()
+    dead_ids = {s.session_id for s in targets}
+    sessions[:] = [s for s in sessions if s.session_id not in dead_ids]
+    marked -= dead_ids
+    return deleted, errors
 
 
 def _confirm_skip_perm_modal(stdscr, target: SessionMeta) -> bool | None:
@@ -4232,7 +4285,14 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             _show_help_modal(stdscr)
         elif ch in (ord('v'), ord('V')):
             if items:
-                _preview_modal(stdscr, items, sel, ctx)
+                # The preview modal already ran its own delete confirmation, so
+                # a non-None return is an explicit, confirmed delete request.
+                dreq = _preview_modal(stdscr, items, sel, ctx)
+                if dreq is not None:
+                    deleted, errors = _delete_sessions([dreq], sessions, marked, ctx)
+                    sel = max(0, min(sel, len(filtered()) - 1))
+                    top = max(0, min(top, max(0, len(filtered()) - 1)))
+                    toast = f"Deleted {deleted} session(s)" + (f", {errors} failed" if errors else "")
         elif ch in (ord('e'), ord('E')):
             if items:
                 target = items[sel]
@@ -4342,27 +4402,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             else:
                 targets = []
             if targets and _confirm_delete_modal(stdscr, targets, ctx):
-                deleted = 0
-                errors = 0
-                cache = _load_cache()
-                entries = cache.setdefault("entries", {})
-                for s in targets:
-                    try:
-                        s.path.unlink()
-                        entries.pop(str(s.path), None)
-                        deleted += 1
-                    except OSError:
-                        errors += 1
-                _save_cache(cache)
-                state = load_state()
-                ds = state.setdefault("done", {})
-                for s in targets:
-                    ds.pop(s.session_id, None)
-                save_state(state)
-                ctx.done = done_ids()
-                dead_ids = {s.session_id for s in targets}
-                sessions[:] = [s for s in sessions if s.session_id not in dead_ids]
-                marked -= dead_ids
+                deleted, errors = _delete_sessions(targets, sessions, marked, ctx)
                 sel = max(0, min(sel, len(filtered()) - 1))
                 top = max(0, min(top, max(0, len(filtered()) - 1)))
                 toast = f"Deleted {deleted} session(s)" + (f", {errors} failed" if errors else "")

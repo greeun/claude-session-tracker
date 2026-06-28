@@ -105,7 +105,9 @@ class TestStatusSortRank(unittest.TestCase):
 
 class TestSortDefaults(unittest.TestCase):
     def test_keys_and_natural_directions(self):
-        self.assertEqual(tk.SORT_KEYS, ("time", "status", "msgs", "project"))
+        # Cycle order mirrors the on-screen column layout (ST → LAST ACTIVITY →
+        # MSGS → PROJECT), so `s` walks left-to-right across the columns.
+        self.assertEqual(tk.SORT_KEYS, ("status", "time", "msgs", "project"))
         self.assertEqual(tk._SORT_DEFAULT_DESC,
                          {"time": True, "status": False, "msgs": True, "project": False})
 
