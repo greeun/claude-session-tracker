@@ -128,9 +128,10 @@ stale `!` self-heals to `◦` to avoid a stuck state.
   orphan-relocate flow helps you find/pick the new home.
 - `Space` toggle mark · `Ctrl-A` mark all visible · `Ctrl-X` clear marks
   · `Del` delete marked/current (with confirmation)
-- **`v` / `V`** — preview modal (scrollable transcript, read-only);
-  inside it `←`/`→` (or `‹`/`›`, `[`/`]`) step to the prev/next session in the
-  list without closing
+- **`v` / `V`** — preview modal (scrollable transcript); inside it `←`/`→`
+  (or `‹`/`›`, `[`/`]`) step to the prev/next session in the list without
+  closing, and `Del` deletes the previewed session (confirm in place — cancel
+  returns to the preview)
 - **`e` / `E`** — export focused session to `./<id>.md`
 - **`D` / `d` / `Ctrl-D`** — toggle done (or apply to all marked)
 - **`H` / `h`** — hide ✓ rows (no Ctrl-H alias — Backspace collision);
@@ -142,9 +143,10 @@ stale `!` self-heals to `◦` to avoid a stuck state.
   default ON 10s; persisted in `state.json`; `curses.beep()` + a sticky TUI
   toast when a session **newly** enters `!` waiting — no macOS desktop
   notification)
-- **`s`** — cycle sort column (time→status→msgs→project, resets to the column's
-  natural direction) · **`S`** — reverse sort direction. Header shows
-  `sort:<col>▼/▲` + highlights the active column; persisted in `state.json`.
+- **`s`** — cycle sort column (status→time→msgs→project, in on-screen column
+  order; resets to the column's natural direction) · **`S`** — reverse sort
+  direction. Header shows `sort:<col>▼/▲` + highlights the active column;
+  persisted in `state.json`.
 - **`t` / `T`** — toggle color theme (dark ↔ light), persisted in `state.json`
 - `?` — help modal · `/` — enter search mode · `Esc` — clear/quit
 

@@ -306,14 +306,14 @@ A curses picker with fzf-style filter, status glyphs, modals, and action keys. *
 | `Space` | Toggle mark on current row |
 | `Ctrl-A` | Toggle marks on **all** visible rows |
 | `Ctrl-X` | Clear all marks |
-| **`v`** / **`V`** | Preview the focused session (read-only modal). Inside: `↑↓/j/k` scroll · `PgUp/PgDn/Space` page · `g/G` top/bottom · `q/Esc/v` close |
+| **`v`** / **`V`** | Preview the focused session (scrollable modal). Inside: `↑↓/j/k` scroll · `PgUp/PgDn/Space` page · `g/G` top/bottom · `←/→` prev/next session · `Del` delete previewed session (confirm in place; cancel returns to preview) · `q/Esc/v` close |
 | **`e`** / **`E`** | Export focused session to `./<id>.md` (toast shows the path) |
 | **`D`** / **`d`** / **`Ctrl-D`** | Toggle **done** on current row (or all marked rows). Persists. |
 | **`H`** / **`h`** | Toggle hide-done — hide/show ✓ rows (no `Ctrl-H` alias — that's Backspace) |
 | **`C`** / **`c`** | Toggle cwd-only — show only sessions under the TUI's launch cwd (NFC-normalized prefix match) |
 | **`R`** / **`r`** / **`Ctrl-R`** | Rescan sessions + live-process registry |
 | **`a`** / **`A`** | Auto-rescan interval popup (Off / 5 / 10 / 30 / 60 / 120s; default ON 10s, persisted in `state.json`; `curses.beep()` + a sticky TUI toast when a session newly enters `!` waiting — no macOS desktop notification) |
-| **`s`** | Cycle sort column: `time → status → msgs → project` (resets to the column's natural direction). Header shows `sort:<col>▼/▲` and highlights the active column. Persisted. |
+| **`s`** | Cycle sort column in on-screen column order: `status → time → msgs → project` (resets to the column's natural direction). Header shows `sort:<col>▼/▲` and highlights the active column. Persisted. |
 | **`S`** | Reverse the current sort direction. Persisted. |
 | **`t`** / **`T`** | Toggle color theme (dark ↔ light). Persisted in `state.json`. |
 | `Del` / `Fn+Delete` | Delete marked/current session(s) (confirmation modal) |
@@ -363,7 +363,7 @@ Reflects the current state:
 ### Modal dialogs
 
 - **Help (`?`)** — scrollable cheat-sheet.
-- **Preview (`v`)** — read-only transcript with role colors; up to 1200 chars per message.
+- **Preview (`v`)** — transcript with role colors; up to 1200 chars per message; `Del` deletes in place (with confirmation).
 - **Auto-rescan interval (`a`)** — Off / 5 / 10 / 30 / 60 / 120s. `1`–`6` jumps directly to an option; Enter applies; saved to `state.json`.
 - **Delete confirmation (`Del`)** — `y` confirm · `n/Esc/Enter` cancel · shows up to 5 victims.
 - **Skip-permissions confirmation** — appears on `Enter` resume when you didn't pass `--skip-perm`. `y/Y/Enter` resumes with the flag · `n/N` without · `Esc` cancels.
