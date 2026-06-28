@@ -3657,6 +3657,88 @@ def _choose_cmux_mode_modal(stdscr) -> str | None:
         stdscr.refresh()
 
 
+def _tui_columns(n_items, n_sessions, w):
+    """List-view column widths: (num, status, ts, sid, msgs, msg, proj).
+
+    Pure layout math shared by the header row and `_tui_draw_rows`."""
+    num_w = max(3, len(str(n_items or n_sessions)))
+    ts_w = 16
+    sid_w = 8
+    msgs_w = 4
+    status_w = STATUS_WIDTH
+    # Fixed width up through MSGS column. Tight 1-space separators around
+    # ST (#→ST, ST→LAST ACTIVITY) and between SESSION→MSGS; the rest use
+    # 2-space separators.
+    fixed = (1 + num_w + 1) + (status_w + 1) + (ts_w + 2) + (sid_w + 1) + (msgs_w + 2) + 2
+    remaining = max(30, w - fixed - 1)
+    # split remaining: ~50% message, ~50% project (project at least 20)
+    proj_w = max(20, remaining // 2)
+    msg_w = max(20, remaining - proj_w - 2)
+    return num_w, status_w, ts_w, sid_w, msgs_w, msg_w, proj_w
+
+
+def _tui_draw_rows(stdscr, items, top, sel, list_top, list_h, marked,
+                   search_hits, ctx, w, cols):
+    """Draw the visible session rows [top, top+list_h) into stdscr.
+
+    Pure render — reads state, writes only to the screen (no state mutation)."""
+    import curses
+    num_w, status_w, ts_w, sid_w, msgs_w, msg_w, proj_w = cols
+    for i in range(list_h):
+        idx = top + i
+        if idx >= len(items):
+            break
+        s = items[idx]
+        st = ctx.resolve(s.session_id)
+        ts = fmt_ts(s.last_ts)
+        sid = s.session_id[:8]
+        is_sel = idx == sel
+        is_marked = s.session_id in marked
+        mark = "●" if is_marked else " "
+        if search_hits is not None and s.session_id in search_hits:
+            tail_raw = search_hits[s.session_id]
+        else:
+            tail_raw = s.first_user_msg or "(no user msg)"
+        msg_cell = pad_display(truncate_display(" ".join(tail_raw.split()), msg_w), msg_w)
+        proj_full = shorten_path(s.cwd)
+        if s.git_branch:
+            proj_full = f"{proj_full}  ⎇{s.git_branch}"
+        _job = ctx.jobs.get(s.session_id)
+        for _tag in (pin_marker((_job or {}).get("short"), ctx.pins),
+                     job_badge(_job), pr_badge(s.prs)):
+            if _tag:
+                proj_full = f"{proj_full}  {_tag}"
+        proj_cell = truncate_display_tail(proj_full, proj_w)
+
+        line_before_status = f"{mark}{idx + 1:>{num_w}} "
+        line_after_status = (
+            f" {ts:<{ts_w}}  {sid:<{sid_w}} "
+            f"{s.msg_count:>{msgs_w}}  {msg_cell}  {proj_cell}"
+        )
+
+        if is_sel:
+            attr = curses.color_pair(1)
+            try:
+                full = (line_before_status
+                        + pad_display(st, status_w)
+                        + line_after_status)
+                stdscr.addnstr(list_top + i, 0, pad_display(full, w), w, attr)
+            except curses.error:
+                pass
+        else:
+            try:
+                pre_attr = curses.color_pair(6) | curses.A_BOLD if is_marked else curses.A_NORMAL
+                stdscr.addnstr(list_top + i, 0, line_before_status, w, pre_attr)
+                pre_dw = display_width(line_before_status)
+                stdscr.addnstr(list_top + i, pre_dw,
+                               pad_display(st, status_w), w, _status_attr(st))
+                col = pre_dw + status_w
+                stdscr.addnstr(list_top + i, col, line_after_status, max(0, w - col),
+                               pre_attr)
+            except curses.error:
+                pass
+
+
 def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
              days: int | None, skip_perm_default: bool = False,
              hide_done_default: bool = False, theme: str = "dark"):
@@ -3787,19 +3869,8 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
         # Column widths — num, status, ts, sid, msgs, message, project
         # The mark column (1 char) lives in `line_before_status`, so header
         # starts with a leading space to match row alignment.
-        num_w = max(3, len(str(len(items) or len(sessions))))
-        ts_w = 16
-        sid_w = 8
-        msgs_w = 4
-        status_w = STATUS_WIDTH
-        # Fixed width up through MSGS column. Tight 1-space separators around
-        # ST (#→ST, ST→LAST ACTIVITY) and between SESSION→MSGS; the rest use
-        # 2-space separators.
-        fixed = (1 + num_w + 1) + (status_w + 1) + (ts_w + 2) + (sid_w + 1) + (msgs_w + 2) + 2
-        remaining = max(30, w - fixed - 1)
-        # split remaining: ~50% message, ~50% project (project at least 20)
-        proj_w = max(20, remaining // 2)
-        msg_w = max(20, remaining - proj_w - 2)
+        num_w, status_w, ts_w, sid_w, msgs_w, msg_w, proj_w = _tui_columns(
+            len(items), len(sessions), w)
 
         col_header = (
             f" {'#':>{num_w}} "
@@ -3855,59 +3926,9 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
         if sel >= top + list_h:
             top = sel - list_h + 1
 
-        for i in range(list_h):
-            idx = top + i
-            if idx >= len(items):
-                break
-            s = items[idx]
-            st = ctx.resolve(s.session_id)
-            ts = fmt_ts(s.last_ts)
-            sid = s.session_id[:8]
-            is_sel = idx == sel
-            is_marked = s.session_id in marked
-            mark = "●" if is_marked else " "
-            if search_hits is not None and s.session_id in search_hits:
-                tail_raw = search_hits[s.session_id]
-            else:
-                tail_raw = s.first_user_msg or "(no user msg)"
-            msg_cell = pad_display(truncate_display(" ".join(tail_raw.split()), msg_w), msg_w)
-            proj_full = shorten_path(s.cwd)
-            if s.git_branch:
-                proj_full = f"{proj_full}  ⎇{s.git_branch}"
-            _job = ctx.jobs.get(s.session_id)
-            for _tag in (pin_marker((_job or {}).get("short"), ctx.pins),
-                         job_badge(_job), pr_badge(s.prs)):
-                if _tag:
-                    proj_full = f"{proj_full}  {_tag}"
-            proj_cell = truncate_display_tail(proj_full, proj_w)
-
-            line_before_status = f"{mark}{idx + 1:>{num_w}} "
-            line_after_status = (
-                f" {ts:<{ts_w}}  {sid:<{sid_w}} "
-                f"{s.msg_count:>{msgs_w}}  {msg_cell}  {proj_cell}"
-            )
-
-            if is_sel:
-                attr = curses.color_pair(1)
-                try:
-                    full = (line_before_status
-                            + pad_display(st, status_w)
-                            + line_after_status)
-                    stdscr.addnstr(list_top + i, 0, pad_display(full, w), w, attr)
-                except curses.error:
-                    pass
-            else:
-                try:
-                    pre_attr = curses.color_pair(6) | curses.A_BOLD if is_marked else curses.A_NORMAL
-                    stdscr.addnstr(list_top + i, 0, line_before_status, w, pre_attr)
-                    pre_dw = display_width(line_before_status)
-                    stdscr.addnstr(list_top + i, pre_dw,
-                                   pad_display(st, status_w), w, _status_attr(st))
-                    col = pre_dw + status_w
-                    stdscr.addnstr(list_top + i, col, line_after_status, max(0, w - col),
-                                   pre_attr)
-                except curses.error:
-                    pass
+        _tui_draw_rows(stdscr, items, top, sel, list_top, list_h, marked,
+                       search_hits, ctx, w,
+                       (num_w, status_w, ts_w, sid_w, msgs_w, msg_w, proj_w))
 
         # footer line
         if toast:
