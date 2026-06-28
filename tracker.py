@@ -3520,6 +3520,143 @@ def _orphan_relocate_flow(stdscr, target: SessionMeta):
     return ("cancel", None)
 
 
+def _status_attr(st: str):
+    import curses
+    if st == STATUS_WORKING:
+        return curses.color_pair(3) | curses.A_BOLD   # green
+    if st == STATUS_WAITING:
+        return curses.color_pair(8) | curses.A_BOLD   # red — needs you
+    if st == STATUS_DONE:
+        return curses.color_pair(6) | curses.A_BOLD   # magenta
+    if st == STATUS_IDLE:
+        return curses.color_pair(9)                    # cyan
+    return curses.color_pair(7) | curses.A_DIM         # ended (dim)
+
+
+def _confirm_delete_modal(stdscr, targets: list[SessionMeta], ctx) -> bool:
+    import curses
+    n = len(targets)
+    _, w2 = stdscr.getmaxyx()
+    box_w = min(72, max(40, w2 - 6))
+    preview = targets[:5]
+    bg_warn = bg_delete_warning([s.session_id for s in targets], ctx.jobs)
+    box_h = 7 + len(preview) + (1 if bg_warn else 0)
+    win = _centered_win(stdscr, box_h, box_w)
+    try:
+        win.box()
+        title = f" Delete {n} session{'s' if n != 1 else ''}? "
+        win.addnstr(0, max(2, (box_w - len(title)) // 2), title,
+                    box_w - 4, curses.color_pair(5) | curses.A_BOLD)
+        for i, s in enumerate(preview):
+            label = truncate(
+                f"{s.session_id[:8]}  {shorten_path(s.cwd)}",
+                box_w - 6,
+            )
+            win.addnstr(2 + i, 3, f"• {label}", box_w - 6)
+        if n > len(preview):
+            win.addnstr(2 + len(preview), 3,
+                        f"  … +{n - len(preview)} more", box_w - 6)
+        if bg_warn:
+            win.addnstr(box_h - 4, 3, truncate(bg_warn, box_w - 6),
+                        box_w - 6, curses.color_pair(5) | curses.A_BOLD)
+        msg = "This cannot be undone."
+        win.addnstr(box_h - 3, 3, msg, box_w - 6,
+                    curses.color_pair(5))
+        prompt = " [y] Yes    [n/Esc] No "
+        win.addnstr(box_h - 2, 3, prompt, box_w - 6, curses.A_BOLD)
+        win.refresh()
+        while True:
+            k = win.getch()
+            if k in (ord("y"), ord("Y")):
+                return True
+            if k in (ord("n"), ord("N"), 27, 10, 13):
+                return False
+    finally:
+        del win
+        stdscr.touchwin()
+        stdscr.refresh()
+
+
+def _confirm_skip_perm_modal(stdscr, target: SessionMeta) -> bool | None:
+    """Ask whether to apply --dangerously-skip-permissions for this resume.
+
+    Returns True to resume with the flag, False to resume without it, None
+    to cancel (do not resume).
+    """
+    import curses
+    _, w2 = stdscr.getmaxyx()
+    box_w = min(72, max(48, w2 - 6))
+    box_h = 9
+    win = _centered_win(stdscr, box_h, box_w)
+    try:
+        win.box()
+        title = " --dangerously-skip-permissions? "
+        win.addnstr(0, max(2, (box_w - len(title)) // 2), title,
+                    box_w - 4, curses.color_pair(5) | curses.A_BOLD)
+        label = truncate(
+            f"{target.session_id[:8]}  {shorten_path(target.cwd)}",
+            box_w - 6,
+        )
+        win.addnstr(2, 3, f"Resume: {label}", box_w - 6)
+        win.addnstr(3, 3,
+                    "Apply --dangerously-skip-permissions for this resume?",
+                    box_w - 6)
+        win.addnstr(4, 3,
+                    "Skips all permission prompts inside Claude Code.",
+                    box_w - 6, curses.A_DIM)
+        prompt = " [y] Yes    [n] No    [Esc] Cancel "
+        win.addnstr(box_h - 2, 3, prompt, box_w - 6, curses.A_BOLD)
+        win.refresh()
+        while True:
+            k = win.getch()
+            if k in (ord("y"), ord("Y"), 10, 13):
+                return True
+            if k in (ord("n"), ord("N")):
+                return False
+            if k == 27:
+                return None
+    finally:
+        del win
+        stdscr.touchwin()
+        stdscr.refresh()
+
+
+def _choose_cmux_mode_modal(stdscr) -> str | None:
+    """Show cmux open-mode chooser: workspace tab vs new window.
+
+    Returns "workspace", "window", or None (cancel).
+    """
+    import curses
+    _, w2 = stdscr.getmaxyx()
+    box_w = min(56, max(40, w2 - 6))
+    box_h = 7
+    win = _centered_win(stdscr, box_h, box_w)
+    try:
+        win.box()
+        title = " cmux: Open Mode "
+        win.addnstr(0, max(2, (box_w - len(title)) // 2), title,
+                    box_w - 4, curses.color_pair(2) | curses.A_BOLD)
+        win.addnstr(2, 3, "[t] Workspace tab  (current window)",
+                    box_w - 6)
+        win.addnstr(3, 3, "[w] New window",
+                    box_w - 6)
+        win.addnstr(box_h - 2, 3, " t / w / Esc cancel ",
+                    box_w - 6, curses.A_BOLD)
+        win.refresh()
+        while True:
+            k = win.getch()
+            if k in (ord("t"), ord("T"), 10, 13):
+                return "workspace"
+            if k in (ord("w"), ord("W")):
+                return "window"
+            if k == 27:
+                return None
+    finally:
+        del win
+        stdscr.touchwin()
+        stdscr.refresh()
+
+
 def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
              days: int | None, skip_perm_default: bool = False,
              hide_done_default: bool = False, theme: str = "dark"):
@@ -3562,17 +3699,6 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
     except OSError:
         launch_cwd = ""
 
-    def status_attr(st: str):
-        if st == STATUS_WORKING:
-            return curses.color_pair(3) | curses.A_BOLD   # green
-        if st == STATUS_WAITING:
-            return curses.color_pair(8) | curses.A_BOLD   # red — needs you
-        if st == STATUS_DONE:
-            return curses.color_pair(6) | curses.A_BOLD   # magenta
-        if st == STATUS_IDLE:
-            return curses.color_pair(9)                    # cyan
-        return curses.color_pair(7) | curses.A_DIM         # ended (dim)
-
     def filtered() -> list[SessionMeta]:
         if search_hits is not None:
             pool = [s for s in sessions if s.session_id in search_hits]
@@ -3589,125 +3715,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                     if q in f"{s.session_id} {s.cwd} {s.first_user_msg}".lower()]
         return sort_sessions(pool, ctx, sort_key, sort_reverse)
 
-    def confirm_delete(targets: list[SessionMeta]) -> bool:
-        n = len(targets)
-        _, w2 = stdscr.getmaxyx()
-        box_w = min(72, max(40, w2 - 6))
-        preview = targets[:5]
-        bg_warn = bg_delete_warning([s.session_id for s in targets], ctx.jobs)
-        box_h = 7 + len(preview) + (1 if bg_warn else 0)
-        win = _centered_win(stdscr, box_h, box_w)
-        try:
-            win.box()
-            title = f" Delete {n} session{'s' if n != 1 else ''}? "
-            win.addnstr(0, max(2, (box_w - len(title)) // 2), title,
-                        box_w - 4, curses.color_pair(5) | curses.A_BOLD)
-            for i, s in enumerate(preview):
-                label = truncate(
-                    f"{s.session_id[:8]}  {shorten_path(s.cwd)}",
-                    box_w - 6,
-                )
-                win.addnstr(2 + i, 3, f"• {label}", box_w - 6)
-            if n > len(preview):
-                win.addnstr(2 + len(preview), 3,
-                            f"  … +{n - len(preview)} more", box_w - 6)
-            if bg_warn:
-                win.addnstr(box_h - 4, 3, truncate(bg_warn, box_w - 6),
-                            box_w - 6, curses.color_pair(5) | curses.A_BOLD)
-            msg = "This cannot be undone."
-            win.addnstr(box_h - 3, 3, msg, box_w - 6,
-                        curses.color_pair(5))
-            prompt = " [y] Yes    [n/Esc] No "
-            win.addnstr(box_h - 2, 3, prompt, box_w - 6, curses.A_BOLD)
-            win.refresh()
-            while True:
-                k = win.getch()
-                if k in (ord("y"), ord("Y")):
-                    return True
-                if k in (ord("n"), ord("N"), 27, 10, 13):
-                    return False
-        finally:
-            del win
-            stdscr.touchwin()
-            stdscr.refresh()
-
-    def confirm_skip_perm(target: SessionMeta) -> bool | None:
-        """Ask whether to apply --dangerously-skip-permissions for this resume.
-
-        Returns True to resume with the flag, False to resume without it, None
-        to cancel (do not resume).
-        """
-        _, w2 = stdscr.getmaxyx()
-        box_w = min(72, max(48, w2 - 6))
-        box_h = 9
-        win = _centered_win(stdscr, box_h, box_w)
-        try:
-            win.box()
-            title = " --dangerously-skip-permissions? "
-            win.addnstr(0, max(2, (box_w - len(title)) // 2), title,
-                        box_w - 4, curses.color_pair(5) | curses.A_BOLD)
-            label = truncate(
-                f"{target.session_id[:8]}  {shorten_path(target.cwd)}",
-                box_w - 6,
-            )
-            win.addnstr(2, 3, f"Resume: {label}", box_w - 6)
-            win.addnstr(3, 3,
-                        "Apply --dangerously-skip-permissions for this resume?",
-                        box_w - 6)
-            win.addnstr(4, 3,
-                        "Skips all permission prompts inside Claude Code.",
-                        box_w - 6, curses.A_DIM)
-            prompt = " [y] Yes    [n] No    [Esc] Cancel "
-            win.addnstr(box_h - 2, 3, prompt, box_w - 6, curses.A_BOLD)
-            win.refresh()
-            while True:
-                k = win.getch()
-                if k in (ord("y"), ord("Y"), 10, 13):
-                    return True
-                if k in (ord("n"), ord("N")):
-                    return False
-                if k == 27:
-                    return None
-        finally:
-            del win
-            stdscr.touchwin()
-            stdscr.refresh()
-
     _in_cmux = bool(os.environ.get("CMUX_WORKSPACE_ID"))
-
-    def choose_cmux_mode() -> str | None:
-        """Show cmux open-mode chooser: workspace tab vs new window.
-
-        Returns "workspace", "window", or None (cancel).
-        """
-        _, w2 = stdscr.getmaxyx()
-        box_w = min(56, max(40, w2 - 6))
-        box_h = 7
-        win = _centered_win(stdscr, box_h, box_w)
-        try:
-            win.box()
-            title = " cmux: Open Mode "
-            win.addnstr(0, max(2, (box_w - len(title)) // 2), title,
-                        box_w - 4, curses.color_pair(2) | curses.A_BOLD)
-            win.addnstr(2, 3, "[t] Workspace tab  (current window)",
-                        box_w - 6)
-            win.addnstr(3, 3, "[w] New window",
-                        box_w - 6)
-            win.addnstr(box_h - 2, 3, " t / w / Esc cancel ",
-                        box_w - 6, curses.A_BOLD)
-            win.refresh()
-            while True:
-                k = win.getch()
-                if k in (ord("t"), ord("T"), 10, 13):
-                    return "workspace"
-                if k in (ord("w"), ord("W")):
-                    return "window"
-                if k == 27:
-                    return None
-        finally:
-            del win
-            stdscr.touchwin()
-            stdscr.refresh()
 
     while True:
         if (auto_enabled and auto_interval > 0 and not search_mode
@@ -3894,7 +3902,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                     stdscr.addnstr(list_top + i, 0, line_before_status, w, pre_attr)
                     pre_dw = display_width(line_before_status)
                     stdscr.addnstr(list_top + i, pre_dw,
-                                   pad_display(st, status_w), w, status_attr(st))
+                                   pad_display(st, status_w), w, _status_attr(st))
                     col = pre_dw + status_w
                     stdscr.addnstr(list_top + i, col, line_after_status, max(0, w - col),
                                    pre_attr)
@@ -4113,7 +4121,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                     # Background session — attach to the live supervisor-hosted
                     # session (catch-up + live stream), not a transcript fork.
                     # No orphan-relocate / skip-perm: those are resume-only.
-                    cmux_m = choose_cmux_mode() if _in_cmux else None
+                    cmux_m = _choose_cmux_mode_modal(stdscr) if _in_cmux else None
                     if _in_cmux and cmux_m is None:
                         toast = "Attach cancelled"
                         continue
@@ -4135,14 +4143,14 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                 if skip_perm_default:
                     use_skip = True
                 else:
-                    choice = confirm_skip_perm(target)
+                    choice = _confirm_skip_perm_modal(stdscr, target)
                     if choice is None:
                         toast = "Resume cancelled"
                         continue
                     use_skip = choice
                 cmux_m = None
                 if _in_cmux:
-                    cmux_m = choose_cmux_mode()
+                    cmux_m = _choose_cmux_mode_modal(stdscr)
                     if cmux_m is None:
                         toast = "Resume cancelled"
                         continue
@@ -4287,7 +4295,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                 targets = [items[sel]]
             else:
                 targets = []
-            if targets and confirm_delete(targets):
+            if targets and _confirm_delete_modal(stdscr, targets, ctx):
                 deleted = 0
                 errors = 0
                 cache = _load_cache()
