@@ -983,6 +983,24 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
+def _iter_registry_records(sort: bool = False):
+    """Yield each parsed ~/.claude/sessions/*.json record (a dict), skipping
+    unreadable / malformed files. Yields nothing when the registry dir is
+    absent. sort=True iterates files in sorted order (stable CLI output)."""
+    if not SESSIONS_REGISTRY_DIR.is_dir():
+        return
+    files = SESSIONS_REGISTRY_DIR.glob("*.json")
+    if sort:
+        files = sorted(files)
+    for f in files:
+        try:
+            with f.open("r", encoding="utf-8") as fp:
+                data = json.load(fp)
+        except (OSError, json.JSONDecodeError):
+            continue
+        yield data
+
+
 def scan_live_sessions() -> tuple[set[str], set[str]]:
     """Return (live_session_ids, all_registered_session_ids).
 
@@ -993,14 +1011,7 @@ def scan_live_sessions() -> tuple[set[str], set[str]]:
     """
     live: set[str] = set()
     registered: set[str] = set()
-    if not SESSIONS_REGISTRY_DIR.is_dir():
-        return live, registered
-    for f in SESSIONS_REGISTRY_DIR.glob("*.json"):
-        try:
-            with f.open("r", encoding="utf-8") as fp:
-                data = json.load(fp)
-        except (OSError, json.JSONDecodeError):
-            continue
+    for data in _iter_registry_records():
         sid = data.get("sessionId")
         pid = data.get("pid")
         if not sid:
@@ -1015,14 +1026,7 @@ def scan_registry_status() -> dict[str, dict]:
     """sessionId -> {"status": str|None, "updatedAt": int|None} from the
     ~/.claude/sessions registry (Claude Code's own busy/idle signal)."""
     out: dict[str, dict] = {}
-    if not SESSIONS_REGISTRY_DIR.is_dir():
-        return out
-    for f in SESSIONS_REGISTRY_DIR.glob("*.json"):
-        try:
-            with f.open("r", encoding="utf-8") as fp:
-                data = json.load(fp)
-        except (OSError, json.JSONDecodeError):
-            continue
+    for data in _iter_registry_records():
         if not isinstance(data, dict):
             continue
         sid = data.get("sessionId")
@@ -1159,14 +1163,7 @@ def daemon_status_line(roster: dict | None) -> str:
 
 def get_live_session_info(session_id: str) -> dict | None:
     """Return the registry record (pid, cwd, ideName, …) for a live session."""
-    if not SESSIONS_REGISTRY_DIR.is_dir():
-        return None
-    for f in SESSIONS_REGISTRY_DIR.glob("*.json"):
-        try:
-            with f.open("r", encoding="utf-8") as fp:
-                data = json.load(fp)
-        except (OSError, json.JSONDecodeError):
-            continue
+    for data in _iter_registry_records():
         if data.get("sessionId") == session_id:
             pid = data.get("pid")
             if isinstance(pid, int) and _pid_alive(pid):
@@ -2227,12 +2224,7 @@ def cmd_live(args: argparse.Namespace) -> int:
         print("(no ~/.claude/sessions registry directory)")
         return 0
     rows: list[tuple[int, str, str, str, bool, str]] = []  # (pid, sid, cwd, started, alive, kind)
-    for f in sorted(SESSIONS_REGISTRY_DIR.glob("*.json")):
-        try:
-            with f.open("r", encoding="utf-8") as fp:
-                data = json.load(fp)
-        except (OSError, json.JSONDecodeError):
-            continue
+    for data in _iter_registry_records(sort=True):
         pid = data.get("pid")
         sid = data.get("sessionId", "")
         cwd = data.get("cwd", "")
@@ -4437,24 +4429,35 @@ def encode_cwd(cwd: str) -> str:
     return re.sub(r"[^A-Za-z0-9\-]", "-", cwd)
 
 
+def _rewrite_cwd_stream(src, dst, new_cwd: str) -> int:
+    """Copy jsonl lines src->dst, rewriting each event's `cwd` to new_cwd.
+
+    Returns the count of events rewritten; blank / non-JSON lines pass through
+    untouched. Shared by _rewrite_cwd_inplace and relocate_session."""
+    rewritten = 0
+    for line in src:
+        stripped = line.strip()
+        if not stripped:
+            dst.write(line)
+            continue
+        try:
+            evt = json.loads(stripped)
+        except json.JSONDecodeError:
+            dst.write(line)
+            continue
+        if "cwd" in evt:
+            evt["cwd"] = new_cwd
+            rewritten += 1
+        dst.write(json.dumps(evt, ensure_ascii=False) + "\n")
+    return rewritten
+
+
 def _rewrite_cwd_inplace(path: Path, new_cwd: str) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     try:
         with path.open("r", encoding="utf-8", errors="replace") as src, \
              tmp.open("w", encoding="utf-8") as dst:
-            for line in src:
-                stripped = line.strip()
-                if not stripped:
-                    dst.write(line)
-                    continue
-                try:
-                    evt = json.loads(stripped)
-                except json.JSONDecodeError:
-                    dst.write(line)
-                    continue
-                if "cwd" in evt:
-                    evt["cwd"] = new_cwd
-                dst.write(json.dumps(evt, ensure_ascii=False) + "\n")
+            _rewrite_cwd_stream(src, dst, new_cwd)
         tmp.replace(path)
     except OSError:
         tmp.unlink(missing_ok=True)
@@ -4500,6 +4503,17 @@ def _relocate_search_roots(old_cwd: str, launch_cwd: str | None = None) -> list[
     return keep or norm
 
 
+def _filter_basename_dirs(stdout: str, base: str) -> list[str]:
+    """Keep lines from a finder's stdout that are real dirs whose basename
+    matches `base`. Shared post-filter for _mdfind_dirs / _fd_dirs."""
+    res = []
+    for ln in stdout.splitlines():
+        ln = ln.strip()
+        if ln and os.path.isdir(ln) and os.path.basename(ln.rstrip("/")) == base:
+            res.append(ln)
+    return res
+
+
 def _mdfind_dirs(base: str, deadline: float) -> list[str]:
     """macOS Spotlight only. Empty list on any non-darwin / missing / error."""
     if sys.platform != "darwin":
@@ -4519,12 +4533,7 @@ def _mdfind_dirs(base: str, deadline: float) -> list[str]:
         )
     except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
         return []
-    res = []
-    for ln in out.stdout.splitlines():
-        ln = ln.strip()
-        if ln and os.path.isdir(ln) and os.path.basename(ln.rstrip("/")) == base:
-            res.append(ln)
-    return res
+    return _filter_basename_dirs(out.stdout, base)
 
 
 def _fd_dirs(base: str, roots: list[str], deadline: float) -> list[str]:
@@ -4541,12 +4550,7 @@ def _fd_dirs(base: str, roots: list[str], deadline: float) -> list[str]:
         out = subprocess.run(argv, capture_output=True, text=True, timeout=budget)
     except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
         return []
-    res = []
-    for ln in out.stdout.splitlines():
-        ln = ln.strip()
-        if ln and os.path.isdir(ln) and os.path.basename(ln.rstrip("/")) == base:
-            res.append(ln)
-    return res
+    return _filter_basename_dirs(out.stdout, base)
 
 
 def _walk_dirs(base: str, roots: list[str], deadline: float,
@@ -4785,20 +4789,7 @@ def relocate_session(target: "SessionMeta", new_cwd: str, *,
     try:
         with target.path.open("r", encoding="utf-8", errors="replace") as src, \
              tmp_path.open("w", encoding="utf-8") as dst:
-            for line in src:
-                stripped = line.strip()
-                if not stripped:
-                    dst.write(line)
-                    continue
-                try:
-                    evt = json.loads(stripped)
-                except json.JSONDecodeError:
-                    dst.write(line)
-                    continue
-                if "cwd" in evt:
-                    evt["cwd"] = new_cwd
-                    rewritten += 1
-                dst.write(json.dumps(evt, ensure_ascii=False) + "\n")
+            rewritten = _rewrite_cwd_stream(src, dst, new_cwd)
         tmp_path.replace(new_path)
     except OSError as e:
         tmp_path.unlink(missing_ok=True)
