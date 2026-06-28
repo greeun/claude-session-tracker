@@ -2956,6 +2956,15 @@ def _preview_modal(stdscr, items, sel: int, ctx) -> None:
         status = ctx.resolve(target.session_id)
         lines = _build_lines(target, status)
 
+        # Force a full repaint of the box on every session entry/switch. erase()
+        # keeps the window's logical buffer clean, but terminal multiplexers that
+        # only apply ncurses' cell-diff updates (cmux/Ghostty) can drop part of
+        # the diff on a ‹/› switch, leaving the previous session's text bleeding
+        # through. clearok makes the next refresh resend the whole window;
+        # ncurses auto-clears the flag afterwards, so per-key scrolling still
+        # uses cheap diff updates.
+        win.clearok(True)
+
         list_h = box_h - 3  # 1 top border + 1 bottom border + 1 footer line
         view_h = max(1, list_h - 1)  # visible content rows (last inner row = footer)
         max_top = max(0, len(lines) - list_h)
