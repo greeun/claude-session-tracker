@@ -2691,6 +2691,7 @@ HELP_LINES = [
     "                         ←/→ (or ‹ › / [ ]) prev/next session in list",
     "                         / full-text search (literal, case-insensitive)",
     "                         n / N next/prev match · Esc clear search then close",
+    "                         d / Ctrl-D toggle done on the previewed session",
     "                         Del delete the session being previewed (confirm first)",
     "  e / E                  export focused session transcript to .md in cwd",
     "  Space                  toggle mark on the current row",
@@ -2883,10 +2884,13 @@ def _preview_modal(stdscr, items, sel: int, ctx):
 
     `‹`/`›` (or ←/→) switch to the previous/next session in `items` without
     leaving the modal; the view, scroll and in-modal search reset per session.
-    Closed by q/Q/Esc/v/V. Read-only except for `Del`, which shows the delete
-    confirmation in place: cancel returns to the preview, confirm closes the
-    modal and returns the (already-confirmed) `SessionMeta` for the caller to
-    delete. Every other path returns None.
+    Closed by q/Q/Esc/v/V. `d`/`Ctrl-D` toggles the viewed session's 작업종료
+    (done) flag in place (refused on a ● working session, mirroring the list's
+    done guard); the Status line and a footer notice reflect the change without
+    leaving the modal. Read-only otherwise except for `Del`, which shows the
+    delete confirmation in place: cancel returns to the preview, confirm closes
+    the modal and returns the (already-confirmed) `SessionMeta` for the caller
+    to delete. Every other path returns None.
     """
     import curses
     if not items:
@@ -2957,6 +2961,7 @@ def _preview_modal(stdscr, items, sel: int, ctx):
         return lines
 
     delete_target = None  # set when the user presses Del; returned to the caller
+    notice = ""           # transient footer message (done toggle / guard); one keypress
 
     # --- outer session-switch loop ---
     while True:
@@ -3030,7 +3035,11 @@ def _preview_modal(stdscr, items, sel: int, ctx):
                         except curses.error:
                             pass
                 pos = f" {min(top + list_h - 1, len(lines))}/{len(lines)} "
-                if searching:
+                prompt_attr = dim_attr
+                if notice:
+                    prompt = notice
+                    prompt_attr = header_attr
+                elif searching:
                     cnt = f"[{(cur_match + 1) if matches else 0}/{len(matches)}]"
                     prompt = f" /{query}▏  {cnt}  Enter find · Esc cancel "
                 elif query:
@@ -3038,9 +3047,9 @@ def _preview_modal(stdscr, items, sel: int, ctx):
                     prompt = f" /{query}  {cnt}  n/N next/prev · / edit · Esc clear "
                 else:
                     nav = " · ←→ session" if multi else ""
-                    prompt = f" ↑↓ scroll · PgUp/PgDn · g/G{nav} · / search · Del delete · q/Esc/v close "
+                    prompt = f" ↑↓ scroll · PgUp/PgDn · g/G{nav} · / search · d done · Del delete · q/Esc/v close "
                 try:
-                    win.addnstr(box_h - 2, 2, prompt, box_w - 4 - len(pos) - 1, dim_attr)
+                    win.addnstr(box_h - 2, 2, prompt, box_w - 4 - len(pos) - 1, prompt_attr)
                     win.addnstr(box_h - 2, max(2, box_w - 2 - len(pos)), pos, len(pos), dim_attr)
                 except curses.error:
                     pass
@@ -3051,6 +3060,7 @@ def _preview_modal(stdscr, items, sel: int, ctx):
 
             if ch == -1 and ch_str is None:
                 continue
+            notice = ""  # any real keypress dismisses the transient notice
 
             if searching:
                 # --- typing inside the `/` find prompt (incremental) ---
@@ -3111,6 +3121,16 @@ def _preview_modal(stdscr, items, sel: int, ctx):
                 top = 0
             elif ch in (curses.KEY_END, ord('G')):
                 top = max_top
+            elif ch in (ord('d'), ord('D'), 4):  # d / D / Ctrl-D — toggle done on viewed session
+                st = ctx.resolve(target.session_id)
+                if done_guard_blocks(st):
+                    notice = " ● working — `claude stop` it or wait, then mark done "
+                else:
+                    now_done = mark_done(target.session_id)
+                    ctx.done = done_ids()
+                    notice = " ✓ Marked done " if now_done else " Cleared done "
+                    switch = 'reload'  # rebuild lines so the Status row reflects the toggle
+                    break
             elif ch in (curses.KEY_DC, 330):     # Del — confirm, then delete viewed session
                 if _confirm_delete_modal(stdscr, [target], ctx):
                     delete_target = target
@@ -3126,6 +3146,8 @@ def _preview_modal(stdscr, items, sel: int, ctx):
             sel = _preview_step(sel, total, False)
         elif switch == 'next':
             sel = _preview_step(sel, total, True)
+        elif switch == 'reload':
+            pass  # same session — re-enter to rebuild lines after a done toggle
         else:
             break
 

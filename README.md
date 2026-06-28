@@ -306,7 +306,7 @@ A curses picker with fzf-style filter, status glyphs, modals, and action keys. *
 | `Space` | Toggle mark on current row |
 | `Ctrl-A` | Toggle marks on **all** visible rows |
 | `Ctrl-X` | Clear all marks |
-| **`v`** / **`V`** | Preview the focused session (scrollable modal). Inside: `↑↓/j/k` scroll · `PgUp/PgDn/Space` page · `g/G` top/bottom · `←/→` prev/next session · `Del` delete previewed session (confirm in place; cancel returns to preview) · `q/Esc/v` close |
+| **`v`** / **`V`** | Preview the focused session (scrollable modal). Inside: `↑↓/j/k` scroll · `PgUp/PgDn/Space` page · `g/G` top/bottom · `←/→` prev/next session · `d/Ctrl-D` toggle done on previewed session · `Del` delete previewed session (confirm in place; cancel returns to preview) · `q/Esc/v` close |
 | **`e`** / **`E`** | Export focused session to `./<id>.md` (toast shows the path) |
 | **`D`** / **`d`** / **`Ctrl-D`** | Toggle **done** on current row (or all marked rows). Persists. |
 | **`H`** / **`h`** | Toggle hide-done — hide/show ✓ rows (no `Ctrl-H` alias — that's Backspace) |

@@ -130,8 +130,9 @@ stale `!` self-heals to `◦` to avoid a stuck state.
   · `Del` delete marked/current (with confirmation)
 - **`v` / `V`** — preview modal (scrollable transcript); inside it `←`/`→`
   (or `‹`/`›`, `[`/`]`) step to the prev/next session in the list without
-  closing, and `Del` deletes the previewed session (confirm in place — cancel
-  returns to the preview)
+  closing, `d`/`Ctrl-D` toggles done on the previewed session (same ● working
+  guard as the list), and `Del` deletes the previewed session (confirm in
+  place — cancel returns to the preview)
 - **`e` / `E`** — export focused session to `./<id>.md`
 - **`D` / `d` / `Ctrl-D`** — toggle done (or apply to all marked)
 - **`H` / `h`** — hide ✓ rows (no Ctrl-H alias — Backspace collision);
