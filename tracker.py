@@ -168,7 +168,6 @@ def open_in_new_terminal(cwd: str, session_id: str,
     """
     import shlex
     import shutil
-    import subprocess
 
     claude_bin = shutil.which("claude") or "claude"
 
@@ -239,212 +238,237 @@ def open_in_new_terminal(cwd: str, session_id: str,
     term_program = os.environ.get("TERM_PROGRAM", "")
 
     if cmux_mode:
-        cmux_bin = shutil.which("cmux")
-        if not cmux_bin:
-            return False, "cmux binary not found"
-        resume_cmd = (
-            f"mkdir -p {safe_cwd} && cd {safe_cwd} && "
-            f"{core_cmd}"
-        )
-        ws_name = f"claude:{session_id[:8]}"
-        try:
-            if cmux_mode == "window":
-                result = subprocess.run(
-                    [cmux_bin, "new-window"],
-                    capture_output=True, text=True, timeout=5,
-                )
-                if result.returncode != 0:
-                    return False, f"cmux new-window failed: {result.stderr.strip()}"
-                parts = result.stdout.strip().split()
-                win_id = parts[1] if len(parts) >= 2 else None
-                if not win_id:
-                    return False, "cmux new-window returned no window id"
-                ws_result = subprocess.run(
-                    [cmux_bin, "list-workspaces", "--window", win_id],
-                    capture_output=True, text=True, timeout=5,
-                )
-                ws_ref = None
-                for line in ws_result.stdout.strip().splitlines():
-                    tok = line.split()
-                    for t in tok:
-                        if t.startswith("workspace:"):
-                            ws_ref = t
-                            break
-                    if ws_ref:
-                        break
-                if ws_ref:
-                    subprocess.run(
-                        [cmux_bin, "send", "--workspace", ws_ref,
-                         resume_cmd + "\\n"],
-                        capture_output=True, timeout=5,
-                    )
-                    subprocess.run(
-                        [cmux_bin, "workspace-action", "--action", "rename",
-                         "--workspace", ws_ref, "--title", ws_name],
-                        capture_output=True, timeout=5,
-                    )
-                return True, "opened in cmux window"
-            else:
-                subprocess.Popen(
-                    [cmux_bin, "new-workspace", "--name", ws_name,
-                     "--cwd", cwd, "--command", resume_cmd],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                    close_fds=True,
-                )
-                return True, "opened in cmux workspace"
-        except OSError as e:
-            return False, f"cmux spawn failed: {e}"
-        except subprocess.TimeoutExpired:
-            return False, "cmux command timed out"
+        return _open_in_cmux(cmux_mode, cwd, safe_cwd, core_cmd, session_id)
 
     if sys.platform == "darwin":
-        tp = term_program
-        tp_l = tp.lower()
-        escaped = _applescript_escape(shell_cmd)
-        bash_args = ["bash", "-lc", shell_cmd]
-
-        def _run_osascript(script: str, label: str) -> tuple[bool, str]:
-            try:
-                subprocess.Popen(
-                    ["osascript", "-e", script],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                    close_fds=True,
-                )
-                return True, f"opened in {label}"
-            except OSError as e:
-                return False, f"osascript failed: {e}"
-
-        def _run_cli(argv: list[str], label: str,
-                     activate_name: str | None = None) -> tuple[bool, str]:
-            try:
-                subprocess.Popen(
-                    argv,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                    close_fds=True,
-                )
-                if activate_name:
-                    _activate_macos_app(activate_name)
-                return True, f"opened in {label}"
-            except OSError as e:
-                return False, f"{label} spawn failed: {e}"
-
-        terminal_app_script = (
-            'tell application "Terminal"\n'
-            '  activate\n'
-            f'  do script "{escaped}"\n'
-            "end tell"
-        )
-        iterm_script = (
-            'tell application "iTerm"\n'
-            '  activate\n'
-            '  set newWindow to (create window with default profile)\n'
-            f'  tell current session of newWindow to write text "{escaped}"\n'
-            "end tell"
-        )
-
-        # Match the user's current terminal first.
-        if "iterm" in tp_l:
-            return _run_osascript(iterm_script, "iTerm")
-        if "ghostty" in tp_l:
-            p = shutil.which("ghostty")
-            if p:
-                return _run_cli(
-                    [p, "--working-directory", cwd, "-e", *bash_args],
-                    "Ghostty", activate_name="Ghostty",
-                )
-        if "wezterm" in tp_l:
-            p = shutil.which("wezterm")
-            if p:
-                return _run_cli(
-                    [p, "start", "--cwd", cwd, "--", *bash_args],
-                    "WezTerm", activate_name="WezTerm",
-                )
-        if "kitty" in tp_l:
-            p = shutil.which("kitty")
-            if p:
-                return _run_cli(
-                    [p, "--detach", "--directory", cwd, *bash_args],
-                    "kitty", activate_name="kitty",
-                )
-        if "alacritty" in tp_l:
-            p = shutil.which("alacritty")
-            if p:
-                return _run_cli(
-                    [p, "--working-directory", cwd, "-e", *bash_args],
-                    "Alacritty", activate_name="Alacritty",
-                )
-        if tp == "Apple_Terminal":
-            return _run_osascript(terminal_app_script, "Terminal")
-        if "warp" in tp_l:
-            # Warp has no public scripting API for running commands; user
-            # must run the one-liner manually. Fall back to Terminal.app.
-            ok, info = _run_osascript(terminal_app_script, "Terminal.app")
-            return ok, f"{info}  (Warp is not scriptable)"
-        if tp_l in ("vscode", "cursor"):
-            ok, info = _run_osascript(terminal_app_script, "Terminal.app")
-            return ok, f"{info}  (from {tp} integrated terminal)"
-
-        # Unknown / unset TERM_PROGRAM → default to Terminal.app.
-        ok, info = _run_osascript(terminal_app_script, "Terminal.app")
-        suffix = f"  (unknown TERM_PROGRAM={tp!r})" if tp else ""
-        return ok, info + suffix
+        return _open_macos(term_program, shell_cmd, cwd)
 
     if sys.platform.startswith("linux"):
-        candidates: list[str] = []
-        env_term = os.environ.get("TERMINAL")
-        if env_term:
-            candidates.append(env_term)
-        candidates.extend([
-            "x-terminal-emulator", "gnome-terminal", "konsole",
-            "alacritty", "kitty", "wezterm", "xterm",
-        ])
-        # On Linux we hand `shell_cmd` to `bash -lc`; the cwd is already
-        # embedded in shell_cmd, but some terminals honor --working-directory
-        # too — harmless to pass both.
-        for term in candidates:
-            path = shutil.which(term)
-            if not path:
-                continue
-            try:
-                if term == "gnome-terminal":
-                    subprocess.Popen(
-                        [path, "--working-directory", cwd,
-                         "--", "bash", "-lc", shell_cmd],
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        start_new_session=True,
-                        close_fds=True,
-                    )
-                elif term == "konsole":
-                    subprocess.Popen(
-                        [path, "--workdir", cwd,
-                         "-e", "bash", "-lc", shell_cmd],
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        start_new_session=True,
-                        close_fds=True,
-                    )
-                else:
-                    # alacritty, kitty, wezterm, xterm, x-terminal-emulator, …
-                    subprocess.Popen(
-                        [path, "-e", "bash", "-lc", shell_cmd],
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        start_new_session=True,
-                        close_fds=True,
-                    )
-                return True, f"opened in {term}"
-            except OSError:
-                continue
-        return False, "no supported terminal emulator found"
+        return _open_linux(cwd, shell_cmd)
 
     return False, f"unsupported platform: {sys.platform}"
+
+
+def _open_in_cmux(cmux_mode, cwd, safe_cwd, core_cmd, session_id):
+    """cmux open-mode branch of open_in_new_terminal (workspace tab / new window)."""
+    import shutil
+    import subprocess
+
+    cmux_bin = shutil.which("cmux")
+    if not cmux_bin:
+        return False, "cmux binary not found"
+    resume_cmd = (
+        f"mkdir -p {safe_cwd} && cd {safe_cwd} && "
+        f"{core_cmd}"
+    )
+    ws_name = f"claude:{session_id[:8]}"
+    try:
+        if cmux_mode == "window":
+            result = subprocess.run(
+                [cmux_bin, "new-window"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode != 0:
+                return False, f"cmux new-window failed: {result.stderr.strip()}"
+            parts = result.stdout.strip().split()
+            win_id = parts[1] if len(parts) >= 2 else None
+            if not win_id:
+                return False, "cmux new-window returned no window id"
+            ws_result = subprocess.run(
+                [cmux_bin, "list-workspaces", "--window", win_id],
+                capture_output=True, text=True, timeout=5,
+            )
+            ws_ref = None
+            for line in ws_result.stdout.strip().splitlines():
+                tok = line.split()
+                for t in tok:
+                    if t.startswith("workspace:"):
+                        ws_ref = t
+                        break
+                if ws_ref:
+                    break
+            if ws_ref:
+                subprocess.run(
+                    [cmux_bin, "send", "--workspace", ws_ref,
+                     resume_cmd + "\\n"],
+                    capture_output=True, timeout=5,
+                )
+                subprocess.run(
+                    [cmux_bin, "workspace-action", "--action", "rename",
+                     "--workspace", ws_ref, "--title", ws_name],
+                    capture_output=True, timeout=5,
+                )
+            return True, "opened in cmux window"
+        else:
+            subprocess.Popen(
+                [cmux_bin, "new-workspace", "--name", ws_name,
+                 "--cwd", cwd, "--command", resume_cmd],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+            )
+            return True, "opened in cmux workspace"
+    except OSError as e:
+        return False, f"cmux spawn failed: {e}"
+    except subprocess.TimeoutExpired:
+        return False, "cmux command timed out"
+
+
+def _open_macos(term_program, shell_cmd, cwd):
+    """macOS branch of open_in_new_terminal: AppleScript / per-terminal CLI."""
+    import shutil
+    import subprocess
+
+    tp = term_program
+    tp_l = tp.lower()
+    escaped = _applescript_escape(shell_cmd)
+    bash_args = ["bash", "-lc", shell_cmd]
+
+    def _run_osascript(script: str, label: str) -> tuple[bool, str]:
+        try:
+            subprocess.Popen(
+                ["osascript", "-e", script],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+            )
+            return True, f"opened in {label}"
+        except OSError as e:
+            return False, f"osascript failed: {e}"
+
+    def _run_cli(argv: list[str], label: str,
+                 activate_name: str | None = None) -> tuple[bool, str]:
+        try:
+            subprocess.Popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+            )
+            if activate_name:
+                _activate_macos_app(activate_name)
+            return True, f"opened in {label}"
+        except OSError as e:
+            return False, f"{label} spawn failed: {e}"
+
+    terminal_app_script = (
+        'tell application "Terminal"\n'
+        '  activate\n'
+        f'  do script "{escaped}"\n'
+        "end tell"
+    )
+    iterm_script = (
+        'tell application "iTerm"\n'
+        '  activate\n'
+        '  set newWindow to (create window with default profile)\n'
+        f'  tell current session of newWindow to write text "{escaped}"\n'
+        "end tell"
+    )
+
+    # Match the user's current terminal first.
+    if "iterm" in tp_l:
+        return _run_osascript(iterm_script, "iTerm")
+    if "ghostty" in tp_l:
+        p = shutil.which("ghostty")
+        if p:
+            return _run_cli(
+                [p, "--working-directory", cwd, "-e", *bash_args],
+                "Ghostty", activate_name="Ghostty",
+            )
+    if "wezterm" in tp_l:
+        p = shutil.which("wezterm")
+        if p:
+            return _run_cli(
+                [p, "start", "--cwd", cwd, "--", *bash_args],
+                "WezTerm", activate_name="WezTerm",
+            )
+    if "kitty" in tp_l:
+        p = shutil.which("kitty")
+        if p:
+            return _run_cli(
+                [p, "--detach", "--directory", cwd, *bash_args],
+                "kitty", activate_name="kitty",
+            )
+    if "alacritty" in tp_l:
+        p = shutil.which("alacritty")
+        if p:
+            return _run_cli(
+                [p, "--working-directory", cwd, "-e", *bash_args],
+                "Alacritty", activate_name="Alacritty",
+            )
+    if tp == "Apple_Terminal":
+        return _run_osascript(terminal_app_script, "Terminal")
+    if "warp" in tp_l:
+        # Warp has no public scripting API for running commands; user
+        # must run the one-liner manually. Fall back to Terminal.app.
+        ok, info = _run_osascript(terminal_app_script, "Terminal.app")
+        return ok, f"{info}  (Warp is not scriptable)"
+    if tp_l in ("vscode", "cursor"):
+        ok, info = _run_osascript(terminal_app_script, "Terminal.app")
+        return ok, f"{info}  (from {tp} integrated terminal)"
+
+    # Unknown / unset TERM_PROGRAM → default to Terminal.app.
+    ok, info = _run_osascript(terminal_app_script, "Terminal.app")
+    suffix = f"  (unknown TERM_PROGRAM={tp!r})" if tp else ""
+    return ok, info + suffix
+
+
+def _open_linux(cwd, shell_cmd):
+    """Linux branch of open_in_new_terminal: first working terminal emulator."""
+    import os
+    import shutil
+    import subprocess
+
+    candidates: list[str] = []
+    env_term = os.environ.get("TERMINAL")
+    if env_term:
+        candidates.append(env_term)
+    candidates.extend([
+        "x-terminal-emulator", "gnome-terminal", "konsole",
+        "alacritty", "kitty", "wezterm", "xterm",
+    ])
+    # On Linux we hand `shell_cmd` to `bash -lc`; the cwd is already
+    # embedded in shell_cmd, but some terminals honor --working-directory
+    # too — harmless to pass both.
+    for term in candidates:
+        path = shutil.which(term)
+        if not path:
+            continue
+        try:
+            if term == "gnome-terminal":
+                subprocess.Popen(
+                    [path, "--working-directory", cwd,
+                     "--", "bash", "-lc", shell_cmd],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+            elif term == "konsole":
+                subprocess.Popen(
+                    [path, "--workdir", cwd,
+                     "-e", "bash", "-lc", shell_cmd],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+            else:
+                # alacritty, kitty, wezterm, xterm, x-terminal-emulator, …
+                subprocess.Popen(
+                    [path, "-e", "bash", "-lc", shell_cmd],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+            return True, f"opened in {term}"
+        except OSError:
+            continue
+    return False, "no supported terminal emulator found"
 
 
 # ── terminal-focus layer: raise an existing live session's window ──────────
