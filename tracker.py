@@ -2842,6 +2842,23 @@ def _read_key(win) -> tuple[int, str | None]:
     return (ord(s) if len(s) == 1 else -1, s)
 
 
+def _centered_win(stdscr, box_h, box_w):
+    """Create a `box_h`×`box_w` curses window centered on `stdscr`, keypad on.
+
+    Centralizes the box-placement math every TUI modal repeated. The caller
+    still computes `box_h`/`box_w` (content-dependent); this owns the centering
+    + ``newwin`` + ``keypad``. ``curses.error`` from an oversized ``newwin`` is
+    left to propagate so callers that already guard it keep their behavior.
+    """
+    import curses
+    h, w = stdscr.getmaxyx()
+    y0 = max(0, (h - box_h) // 2)
+    x0 = max(0, (w - box_w) // 2)
+    win = curses.newwin(box_h, box_w, y0, x0)
+    win.keypad(True)
+    return win
+
+
 def _preview_modal(stdscr, items, sel: int, ctx) -> None:
     """Scrollable read-only preview of the focused session's transcript.
 
@@ -2855,10 +2872,7 @@ def _preview_modal(stdscr, items, sel: int, ctx) -> None:
     h, w = stdscr.getmaxyx()
     box_w = min(120, max(60, w - 2))
     box_h = min(40, max(12, h - 2))
-    y0 = max(0, (h - box_h) // 2)
-    x0 = max(0, (w - box_w) // 2)
-    win = curses.newwin(box_h, box_w, y0, x0)
-    win.keypad(True)
+    win = _centered_win(stdscr, box_h, box_w)
 
     inner_w = box_w - 4
     total = len(items)
@@ -3107,13 +3121,10 @@ def _show_help_modal(stdscr):
     h, w = stdscr.getmaxyx()
     box_w = min(82, max(40, w - 4))
     box_h = min(len(HELP_LINES) + 4, max(10, h - 2))
-    y0 = max(0, (h - box_h) // 2)
-    x0 = max(0, (w - box_w) // 2)
     try:
-        win = curses.newwin(box_h, box_w, y0, x0)
+        win = _centered_win(stdscr, box_h, box_w)
     except curses.error:
         return
-    win.keypad(True)
     view_h = max(1, box_h - 2)
     total = len(HELP_LINES)
     offset = 0
@@ -3161,13 +3172,10 @@ def _auto_rescan_modal(stdscr, enabled: bool, interval: int):
     h, w = stdscr.getmaxyx()
     box_w = min(40, max(24, w - 4))
     box_h = min(len(rows) + 4, max(5, h - 2))
-    y0 = max(0, (h - box_h) // 2)
-    x0 = max(0, (w - box_w) // 2)
     try:
-        win = curses.newwin(box_h, box_w, y0, x0)
+        win = _centered_win(stdscr, box_h, box_w)
     except curses.error:
         return None
-    win.keypad(True)
     try:
         while True:
             win.erase()
@@ -3379,15 +3387,12 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
 
     def confirm_delete(targets: list[SessionMeta]) -> bool:
         n = len(targets)
-        h2, w2 = stdscr.getmaxyx()
+        _, w2 = stdscr.getmaxyx()
         box_w = min(72, max(40, w2 - 6))
         preview = targets[:5]
         bg_warn = bg_delete_warning([s.session_id for s in targets], ctx.jobs)
         box_h = 7 + len(preview) + (1 if bg_warn else 0)
-        y0 = max(0, (h2 - box_h) // 2)
-        x0 = max(0, (w2 - box_w) // 2)
-        win = curses.newwin(box_h, box_w, y0, x0)
-        win.keypad(True)
+        win = _centered_win(stdscr, box_h, box_w)
         try:
             win.box()
             title = f" Delete {n} session{'s' if n != 1 else ''}? "
@@ -3428,13 +3433,10 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
         Returns True to resume with the flag, False to resume without it, None
         to cancel (do not resume).
         """
-        h2, w2 = stdscr.getmaxyx()
+        _, w2 = stdscr.getmaxyx()
         box_w = min(72, max(48, w2 - 6))
         box_h = 9
-        y0 = max(0, (h2 - box_h) // 2)
-        x0 = max(0, (w2 - box_w) // 2)
-        win = curses.newwin(box_h, box_w, y0, x0)
-        win.keypad(True)
+        win = _centered_win(stdscr, box_h, box_w)
         try:
             win.box()
             title = " --dangerously-skip-permissions? "
@@ -3474,13 +3476,10 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
 
         Returns "workspace", "window", or None (cancel).
         """
-        h2, w2 = stdscr.getmaxyx()
+        _, w2 = stdscr.getmaxyx()
         box_w = min(56, max(40, w2 - 6))
         box_h = 7
-        y0 = max(0, (h2 - box_h) // 2)
-        x0 = max(0, (w2 - box_w) // 2)
-        win = curses.newwin(box_h, box_w, y0, x0)
-        win.keypad(True)
+        win = _centered_win(stdscr, box_h, box_w)
         try:
             win.box()
             title = " cmux: Open Mode "
@@ -3528,10 +3527,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             h3, w3 = stdscr.getmaxyx()
             box_w = min(86, max(54, w3 - 6))
             box_h = min(h3 - 2, max(9, len(lines) + 5))
-            y0 = max(0, (h3 - box_h) // 2)
-            x0 = max(0, (w3 - box_w) // 2)
-            win = curses.newwin(box_h, box_w, y0, x0)
-            win.keypad(True)
+            win = _centered_win(stdscr, box_h, box_w)
             try:
                 win.box()
                 title = " Folder moved? "
@@ -3567,9 +3563,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             h3, w3 = stdscr.getmaxyx()
             box_w = min(86, max(54, w3 - 6))
             box_h = min(h3 - 2, max(7, len(lines) + 4))
-            win = curses.newwin(box_h, box_w, max(0, (h3 - box_h) // 2),
-                                max(0, (w3 - box_w) // 2))
-            win.keypad(True)
+            win = _centered_win(stdscr, box_h, box_w)
             try:
                 win.box()
                 row = 1
@@ -3587,11 +3581,9 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                 stdscr.refresh()
 
         def _manual_entry():
-            h3, w3 = stdscr.getmaxyx()
+            _, w3 = stdscr.getmaxyx()
             box_w = min(86, max(54, w3 - 6))
-            win = curses.newwin(5, box_w, max(0, (h3 - 5) // 2),
-                                max(0, (w3 - box_w) // 2))
-            win.keypad(True)
+            win = _centered_win(stdscr, 5, box_w)
             try:
                 curses.echo()
                 try:
