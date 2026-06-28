@@ -4622,6 +4622,30 @@ def _session_file_fingerprint(path: "Path", *, limit: int = 40,
     return names
 
 
+def _scan_present(dpath: str, fp: set) -> set:
+    """Names from fingerprint `fp` found directly in `dpath` or one level below.
+
+    Bounded two-level os.scandir; never raises (returns whatever it found).
+    Extracted from find_relocation_candidates to keep that scan loop shallow."""
+    present: set[str] = set()
+    try:
+        with os.scandir(dpath) as it:
+            for e in it:
+                nm = e.name
+                if nm in fp:
+                    present.add(nm)
+                elif e.is_dir(follow_symlinks=False):
+                    try:
+                        for e2 in os.scandir(e.path):
+                            if e2.name in fp:
+                                present.add(e2.name)
+                    except OSError:
+                        pass
+    except OSError:
+        pass
+    return present
+
+
 def find_relocation_candidates(old_cwd: str, target: "SessionMeta", *,
                                 time_budget: float = 2.0,
                                 max_results: int = 8,
@@ -4680,22 +4704,7 @@ def find_relocation_candidates(old_cwd: str, target: "SessionMeta", *,
             proj = PROJECTS_DIR / encode_cwd(dpath)
             if (proj / target.path.name).exists():
                 continue
-            present: set[str] = set()
-            try:
-                with os.scandir(dpath) as it:
-                    for e in it:
-                        nm = e.name
-                        if nm in fp:
-                            present.add(nm)
-                        elif e.is_dir(follow_symlinks=False):
-                            try:
-                                for e2 in os.scandir(e.path):
-                                    if e2.name in fp:
-                                        present.add(e2.name)
-                            except OSError:
-                                pass
-            except OSError:
-                pass
+            present = _scan_present(dpath, fp)
             score = len(present)
             signals = sorted(present)
             # isdir() on the candidate dir itself; unrelated to _walk_dirs
