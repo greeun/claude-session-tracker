@@ -3316,6 +3316,210 @@ def tui_init_colors(theme: str, stdscr=None) -> None:
             pass
 
 
+def _orphan_relocate_flow(stdscr, target: SessionMeta):
+    """Recorded cwd is gone. Search for the moved folder and offer a
+    relocate. Returns ("relocate", new_cwd) | ("placeholder", old_cwd)
+    | ("cancel", None)."""
+    import curses
+    old_cwd = target.cwd
+
+    # status line while scanning
+    h2, w2 = stdscr.getmaxyx()
+    try:
+        stdscr.addnstr(h2 - 1, 0,
+                       " scanning for moved folder… ".ljust(w2 - 1),
+                       w2 - 1, curses.color_pair(2) | curses.A_BOLD)
+        stdscr.refresh()
+    except curses.error:
+        pass
+    cands = find_relocation_candidates(old_cwd, target)
+    kind, payload = classify_candidates(cands)
+
+    def _modal(lines: list[str], prompt: str, keymap: dict):
+        h3, w3 = stdscr.getmaxyx()
+        box_w = min(86, max(54, w3 - 6))
+        box_h = min(h3 - 2, max(9, len(lines) + 5))
+        win = _centered_win(stdscr, box_h, box_w)
+        try:
+            win.box()
+            title = " Folder moved? "
+            try:
+                win.addnstr(0, max(2, (box_w - len(title)) // 2), title,
+                            box_w - 4, curses.color_pair(5) | curses.A_BOLD)
+            except curses.error:
+                pass
+            row = 2
+            for ln in lines[:box_h - 4]:
+                try:
+                    win.addnstr(row, 3, truncate(ln, box_w - 6), box_w - 6)
+                except curses.error:
+                    pass
+                row += 1
+            try:
+                win.addnstr(box_h - 2, 3, prompt, box_w - 6, curses.A_BOLD)
+            except curses.error:
+                pass
+            win.refresh()
+            while True:
+                k = win.getch()
+                for keys, val in keymap.items():
+                    if k in keys:
+                        return val
+        finally:
+            del win
+            stdscr.touchwin()
+            stdscr.refresh()
+
+    def _notice(msg: str, sub: str):
+        lines = [msg, "", sub, "", "[press any key]"]
+        h3, w3 = stdscr.getmaxyx()
+        box_w = min(86, max(54, w3 - 6))
+        box_h = min(h3 - 2, max(7, len(lines) + 4))
+        win = _centered_win(stdscr, box_h, box_w)
+        try:
+            win.box()
+            row = 1
+            for ln in lines:
+                try:
+                    win.addnstr(row, 3, truncate(ln, box_w - 6), box_w - 6)
+                except curses.error:
+                    pass
+                row += 1
+            win.refresh()
+            win.getch()
+        finally:
+            del win
+            stdscr.touchwin()
+            stdscr.refresh()
+
+    def _manual_entry():
+        _, w3 = stdscr.getmaxyx()
+        box_w = min(86, max(54, w3 - 6))
+        win = _centered_win(stdscr, 5, box_w)
+        try:
+            curses.echo()
+            try:
+                curses.curs_set(1)
+            except curses.error:
+                pass
+            win.box()
+            try:
+                win.addnstr(1, 2, "New path for this session:", box_w - 4)
+            except curses.error:
+                pass
+            win.refresh()
+            raw = win.getstr(2, 2, box_w - 6).decode("utf-8", "replace")
+        except Exception:
+            raw = ""
+        finally:
+            curses.noecho()
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
+            del win
+            stdscr.touchwin()
+            stdscr.refresh()
+        p = os.path.expanduser(raw.strip())
+        return p if p and os.path.isdir(p) else None
+
+    def _do_relocate(new_cwd: str):
+        res = relocate_session(target, new_cwd, dry_run=False)
+        if res.ok and res.reason in ("ok", "samecwd"):
+            target.cwd = res.new_cwd or new_cwd
+            if res.new_path is not None:
+                target.path = res.new_path
+            return ("relocate", target.cwd)
+        return ("fail", res.message)
+
+    def _resolve(new_cwd: str):
+        r = _do_relocate(new_cwd)
+        if r[0] == "relocate":
+            return r
+        _notice(f"Relocate failed: {r[1]}",
+                "Opening an empty placeholder instead.")
+        return ("placeholder", old_cwd)
+
+    sp = shorten_path(old_cwd)
+    if kind == "confirm":
+        best = payload
+        sig = (", ".join(best.signals[:6]) or "name match")
+        lines = [
+            f"Recorded cwd is gone:  {sp}",
+            f"Best match (score {best.score}):",
+            f"  {shorten_path(best.path)}",
+            f"  signals: {sig}",
+            "",
+            "Relocate this session there and open?",
+        ]
+        choice = _modal(
+            lines,
+            " [y] relocate & open   [e] enter path   [o] placeholder   [Esc] cancel ",
+            {(ord("y"), ord("Y"), 10, 13): "y",
+             (ord("e"), ord("E")): "e",
+             (ord("o"), ord("O")): "o",
+             (27,): "esc"})
+        if choice == "y":
+            return _resolve(best.path)
+        if choice == "e":
+            p = _manual_entry()
+            return _resolve(p) if p else ("placeholder", old_cwd)
+        if choice == "o":
+            return ("placeholder", old_cwd)
+        return ("cancel", None)
+
+    if kind == "pick":
+        view = payload[:6]
+        pick_sel = 0
+        while True:
+            lines = [f"Recorded cwd is gone:  {sp}",
+                     "Pick the new location:", ""]
+            for i, c in enumerate(view):
+                mark = "›" if i == pick_sel else " "
+                sgl = (", ".join(c.signals[:4]) or "name only")
+                lines.append(f"{mark} [{i+1}] s{c.score}  "
+                             f"{shorten_path(c.path)}  ({sgl})")
+            lines += ["", "↑↓ select · Enter choose · e=enter path · "
+                          "o=placeholder · Esc=cancel"]
+            choice = _modal(
+                lines, " ↑↓  Enter  e  o  Esc ",
+                {(curses.KEY_UP, 16): "up",
+                 (curses.KEY_DOWN, 14): "down",
+                 (10, 13): "enter",
+                 (ord("e"), ord("E")): "e",
+                 (ord("o"), ord("O")): "o",
+                 (27,): "esc"})
+            if choice == "up":
+                pick_sel = (pick_sel - 1) % len(view)
+            elif choice == "down":
+                pick_sel = (pick_sel + 1) % len(view)
+            elif choice == "enter":
+                return _resolve(view[pick_sel].path)
+            elif choice == "e":
+                p = _manual_entry()
+                return _resolve(p) if p else ("placeholder", old_cwd)
+            elif choice == "o":
+                return ("placeholder", old_cwd)
+            else:
+                return ("cancel", None)
+
+    # kind == "none"
+    choice = _modal(
+        [f"Recorded cwd is gone:  {sp}",
+         "No moved-folder candidates found.", "",
+         "Enter a path, open an empty placeholder, or cancel."],
+        " [e] enter path   [o] placeholder   [Esc] cancel ",
+        {(ord("e"), ord("E")): "e",
+         (ord("o"), ord("O")): "o",
+         (27,): "esc"})
+    if choice == "e":
+        p = _manual_entry()
+        return _resolve(p) if p else ("placeholder", old_cwd)
+    if choice == "o":
+        return ("placeholder", old_cwd)
+    return ("cancel", None)
+
+
 def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
              days: int | None, skip_perm_default: bool = False,
              hide_done_default: bool = False, theme: str = "dark"):
@@ -3504,208 +3708,6 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             del win
             stdscr.touchwin()
             stdscr.refresh()
-
-    def _orphan_relocate_flow(target: SessionMeta):
-        """Recorded cwd is gone. Search for the moved folder and offer a
-        relocate. Returns ("relocate", new_cwd) | ("placeholder", old_cwd)
-        | ("cancel", None)."""
-        old_cwd = target.cwd
-
-        # status line while scanning
-        h2, w2 = stdscr.getmaxyx()
-        try:
-            stdscr.addnstr(h2 - 1, 0,
-                           " scanning for moved folder… ".ljust(w2 - 1),
-                           w2 - 1, curses.color_pair(2) | curses.A_BOLD)
-            stdscr.refresh()
-        except curses.error:
-            pass
-        cands = find_relocation_candidates(old_cwd, target)
-        kind, payload = classify_candidates(cands)
-
-        def _modal(lines: list[str], prompt: str, keymap: dict):
-            h3, w3 = stdscr.getmaxyx()
-            box_w = min(86, max(54, w3 - 6))
-            box_h = min(h3 - 2, max(9, len(lines) + 5))
-            win = _centered_win(stdscr, box_h, box_w)
-            try:
-                win.box()
-                title = " Folder moved? "
-                try:
-                    win.addnstr(0, max(2, (box_w - len(title)) // 2), title,
-                                box_w - 4, curses.color_pair(5) | curses.A_BOLD)
-                except curses.error:
-                    pass
-                row = 2
-                for ln in lines[:box_h - 4]:
-                    try:
-                        win.addnstr(row, 3, truncate(ln, box_w - 6), box_w - 6)
-                    except curses.error:
-                        pass
-                    row += 1
-                try:
-                    win.addnstr(box_h - 2, 3, prompt, box_w - 6, curses.A_BOLD)
-                except curses.error:
-                    pass
-                win.refresh()
-                while True:
-                    k = win.getch()
-                    for keys, val in keymap.items():
-                        if k in keys:
-                            return val
-            finally:
-                del win
-                stdscr.touchwin()
-                stdscr.refresh()
-
-        def _notice(msg: str, sub: str):
-            lines = [msg, "", sub, "", "[press any key]"]
-            h3, w3 = stdscr.getmaxyx()
-            box_w = min(86, max(54, w3 - 6))
-            box_h = min(h3 - 2, max(7, len(lines) + 4))
-            win = _centered_win(stdscr, box_h, box_w)
-            try:
-                win.box()
-                row = 1
-                for ln in lines:
-                    try:
-                        win.addnstr(row, 3, truncate(ln, box_w - 6), box_w - 6)
-                    except curses.error:
-                        pass
-                    row += 1
-                win.refresh()
-                win.getch()
-            finally:
-                del win
-                stdscr.touchwin()
-                stdscr.refresh()
-
-        def _manual_entry():
-            _, w3 = stdscr.getmaxyx()
-            box_w = min(86, max(54, w3 - 6))
-            win = _centered_win(stdscr, 5, box_w)
-            try:
-                curses.echo()
-                try:
-                    curses.curs_set(1)
-                except curses.error:
-                    pass
-                win.box()
-                try:
-                    win.addnstr(1, 2, "New path for this session:", box_w - 4)
-                except curses.error:
-                    pass
-                win.refresh()
-                raw = win.getstr(2, 2, box_w - 6).decode("utf-8", "replace")
-            except Exception:
-                raw = ""
-            finally:
-                curses.noecho()
-                try:
-                    curses.curs_set(0)
-                except curses.error:
-                    pass
-                del win
-                stdscr.touchwin()
-                stdscr.refresh()
-            p = os.path.expanduser(raw.strip())
-            return p if p and os.path.isdir(p) else None
-
-        def _do_relocate(new_cwd: str):
-            res = relocate_session(target, new_cwd, dry_run=False)
-            if res.ok and res.reason in ("ok", "samecwd"):
-                target.cwd = res.new_cwd or new_cwd
-                if res.new_path is not None:
-                    target.path = res.new_path
-                return ("relocate", target.cwd)
-            return ("fail", res.message)
-
-        def _resolve(new_cwd: str):
-            r = _do_relocate(new_cwd)
-            if r[0] == "relocate":
-                return r
-            _notice(f"Relocate failed: {r[1]}",
-                    "Opening an empty placeholder instead.")
-            return ("placeholder", old_cwd)
-
-        sp = shorten_path(old_cwd)
-        if kind == "confirm":
-            best = payload
-            sig = (", ".join(best.signals[:6]) or "name match")
-            lines = [
-                f"Recorded cwd is gone:  {sp}",
-                f"Best match (score {best.score}):",
-                f"  {shorten_path(best.path)}",
-                f"  signals: {sig}",
-                "",
-                "Relocate this session there and open?",
-            ]
-            choice = _modal(
-                lines,
-                " [y] relocate & open   [e] enter path   [o] placeholder   [Esc] cancel ",
-                {(ord("y"), ord("Y"), 10, 13): "y",
-                 (ord("e"), ord("E")): "e",
-                 (ord("o"), ord("O")): "o",
-                 (27,): "esc"})
-            if choice == "y":
-                return _resolve(best.path)
-            if choice == "e":
-                p = _manual_entry()
-                return _resolve(p) if p else ("placeholder", old_cwd)
-            if choice == "o":
-                return ("placeholder", old_cwd)
-            return ("cancel", None)
-
-        if kind == "pick":
-            view = payload[:6]
-            pick_sel = 0
-            while True:
-                lines = [f"Recorded cwd is gone:  {sp}",
-                         "Pick the new location:", ""]
-                for i, c in enumerate(view):
-                    mark = "›" if i == pick_sel else " "
-                    sgl = (", ".join(c.signals[:4]) or "name only")
-                    lines.append(f"{mark} [{i+1}] s{c.score}  "
-                                 f"{shorten_path(c.path)}  ({sgl})")
-                lines += ["", "↑↓ select · Enter choose · e=enter path · "
-                              "o=placeholder · Esc=cancel"]
-                choice = _modal(
-                    lines, " ↑↓  Enter  e  o  Esc ",
-                    {(curses.KEY_UP, 16): "up",
-                     (curses.KEY_DOWN, 14): "down",
-                     (10, 13): "enter",
-                     (ord("e"), ord("E")): "e",
-                     (ord("o"), ord("O")): "o",
-                     (27,): "esc"})
-                if choice == "up":
-                    pick_sel = (pick_sel - 1) % len(view)
-                elif choice == "down":
-                    pick_sel = (pick_sel + 1) % len(view)
-                elif choice == "enter":
-                    return _resolve(view[pick_sel].path)
-                elif choice == "e":
-                    p = _manual_entry()
-                    return _resolve(p) if p else ("placeholder", old_cwd)
-                elif choice == "o":
-                    return ("placeholder", old_cwd)
-                else:
-                    return ("cancel", None)
-
-        # kind == "none"
-        choice = _modal(
-            [f"Recorded cwd is gone:  {sp}",
-             "No moved-folder candidates found.", "",
-             "Enter a path, open an empty placeholder, or cancel."],
-            " [e] enter path   [o] placeholder   [Esc] cancel ",
-            {(ord("e"), ord("E")): "e",
-             (ord("o"), ord("O")): "o",
-             (27,): "esc"})
-        if choice == "e":
-            p = _manual_entry()
-            return _resolve(p) if p else ("placeholder", old_cwd)
-        if choice == "o":
-            return ("placeholder", old_cwd)
-        return ("cancel", None)
 
     while True:
         if (auto_enabled and auto_interval > 0 and not search_mode
@@ -4125,7 +4127,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                     continue
                 open_cwd = target.cwd
                 if target.cwd and not os.path.isdir(target.cwd):
-                    kind, new_cwd = _orphan_relocate_flow(target)
+                    kind, new_cwd = _orphan_relocate_flow(stdscr, target)
                     if kind == "cancel":
                         toast = "Resume cancelled"
                         continue
