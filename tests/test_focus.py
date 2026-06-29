@@ -227,6 +227,26 @@ class FocusCmuxTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(info, "cmux workspace")
 
+    def test_success_activates_cmux_app(self):
+        # focus-window only moves cmux's internal current-window; the success
+        # path must also OS-activate the app so the window visibly rises.
+        with mock.patch("shutil.which", return_value="/bin/cmux"), \
+             mock.patch("subprocess.run",
+                        side_effect=_fake_cmux_run(CMUX_DEBUG_SAMPLE)), \
+             mock.patch.object(tracker, "_activate_macos_app") as act:
+            ok, _ = tracker._focus_cmux("/dev/ttys005")
+        self.assertTrue(ok)
+        act.assert_called_once_with("cmux")
+
+    def test_no_app_activate_on_focus_failure(self):
+        with mock.patch("shutil.which", return_value="/bin/cmux"), \
+             mock.patch("subprocess.run",
+                        side_effect=_fake_cmux_run(CMUX_DEBUG_SAMPLE, focus_rc=1)), \
+             mock.patch.object(tracker, "_activate_macos_app") as act:
+            ok, _ = tracker._focus_cmux("/dev/ttys005")
+        self.assertFalse(ok)
+        act.assert_not_called()
+
     def test_no_surface_for_tty_returns_false(self):
         with mock.patch("shutil.which", return_value="/bin/cmux"), \
              mock.patch("subprocess.run",
@@ -250,6 +270,71 @@ class FocusCmuxTests(unittest.TestCase):
             ok, info = tracker._focus_cmux("/dev/ttys005")
         self.assertFalse(ok)
         self.assertEqual(info, "cmux focus-window failed")
+
+
+class ActivateMacosAppTests(unittest.TestCase):
+    def test_noop_off_darwin(self):
+        with mock.patch.object(tracker.sys, "platform", "linux"), \
+             mock.patch("subprocess.run") as run:
+            tracker._activate_macos_app("cmux")
+        run.assert_not_called()
+
+    def test_noop_when_no_osascript(self):
+        with mock.patch.object(tracker.sys, "platform", "darwin"), \
+             mock.patch("shutil.which", return_value=None), \
+             mock.patch("subprocess.run") as run:
+            tracker._activate_macos_app("cmux")
+        run.assert_not_called()
+
+    def test_runs_activate_applescript(self):
+        with mock.patch.object(tracker.sys, "platform", "darwin"), \
+             mock.patch("shutil.which", return_value="/usr/bin/osascript"), \
+             mock.patch("subprocess.run") as run:
+            tracker._activate_macos_app("cmux")
+        run.assert_called_once()
+        argv = run.call_args[0][0]
+        self.assertEqual(argv[0], "/usr/bin/osascript")
+        self.assertIn('tell application "cmux" to activate', argv[2])
+
+    def test_swallows_subprocess_error(self):
+        with mock.patch.object(tracker.sys, "platform", "darwin"), \
+             mock.patch("shutil.which", return_value="/usr/bin/osascript"), \
+             mock.patch("subprocess.run", side_effect=OSError):
+            tracker._activate_macos_app("cmux")  # must not raise
+
+
+class CmuxAvailableTests(unittest.TestCase):
+    def test_false_when_no_binary(self):
+        with mock.patch("shutil.which", return_value=None):
+            self.assertFalse(tracker._cmux_available())
+
+    def test_true_inside_workspace_without_ping(self):
+        # Env var is definitive — must not even spawn `cmux ping`.
+        with mock.patch("shutil.which", return_value="/bin/cmux"), \
+             mock.patch.dict(os.environ, {"CMUX_WORKSPACE_ID": "X"}), \
+             mock.patch("subprocess.run") as run:
+            self.assertTrue(tracker._cmux_available())
+        run.assert_not_called()
+
+    def test_true_when_ping_succeeds(self):
+        with mock.patch("shutil.which", return_value="/bin/cmux"), \
+             mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch("subprocess.run",
+                        return_value=mock.Mock(returncode=0)):
+            self.assertTrue(tracker._cmux_available())
+
+    def test_false_when_ping_fails(self):
+        with mock.patch("shutil.which", return_value="/bin/cmux"), \
+             mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch("subprocess.run",
+                        return_value=mock.Mock(returncode=1)):
+            self.assertFalse(tracker._cmux_available())
+
+    def test_false_when_ping_raises(self):
+        with mock.patch("shutil.which", return_value="/bin/cmux"), \
+             mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch("subprocess.run", side_effect=OSError):
+            self.assertFalse(tracker._cmux_available())
 
 
 class CmuxOrderTests(unittest.TestCase):

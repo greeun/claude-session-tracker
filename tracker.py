@@ -752,13 +752,64 @@ def _cmux_locate_surface(debug_out: str, tty_base: str) -> dict | None:
     return None
 
 
+def _activate_macos_app(app_name: str) -> None:
+    """Bring a macOS app to the foreground at the OS (NSApp) level. Best-effort,
+    no-op off macOS or when osascript is missing.
+
+    cmux's own focus-window / set-app-focus / simulate-app-active only move its
+    INTERNAL current-window — none of them activate the app process, so when
+    cmux isn't already frontmost (user in another app, or target in a different
+    OS window) the window never visibly rises. Only an AppleScript `activate`
+    (NSApplication activate) brings the current window forward."""
+    if sys.platform != "darwin":
+        return
+    import shutil
+    import subprocess
+    osa = shutil.which("osascript")
+    if not osa:
+        return
+    try:
+        subprocess.run(
+            [osa, "-e", f'tell application "{app_name}" to activate'],
+            capture_output=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _cmux_available() -> bool:
+    """True when the cmux GUI is reachable, used to gate the cmux focus backend.
+
+    `pgrep -x cmux` (the old check) is unreliable: the GUI's process name is its
+    full bundle path (/Applications/cmux.app/Contents/MacOS/cmux), so an exact
+    match never catches it — pgrep only ever sees transient `cmux` CLI
+    invocations, making the gate flaky (it passes only while a CLI call happens
+    to be mid-run). Inside a cmux workspace the env var is definitive and free;
+    otherwise fall back to `cmux ping` (a socket round-trip to the live GUI)."""
+    import shutil
+    cmux = shutil.which("cmux")
+    if cmux is None:
+        return False
+    if os.environ.get("CMUX_WORKSPACE_ID"):
+        return True
+    import subprocess
+    try:
+        r = subprocess.run([cmux, "ping"], capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
+
+
 def _focus_cmux(tty: str) -> tuple[bool, str]:
     """Raise the cmux workspace/window hosting the surface whose pty matches
     `tty` (e.g. /dev/ttys005). cmux is a Ghostty-based GUI multiplexer with no
     per-tty raise command, so we map tty -> surface -> (workspace, window) via
-    `debug-terminals`, then select-workspace + focus-pane + focus-window. Refs
-    like `window:1` are rejected by focus-window, so we drive everything by the
-    UUIDs that `--id-format both` prints."""
+    `debug-terminals`, then select-workspace + focus-pane + focus-window, and
+    finally activate the cmux app so the now-current window actually rises to
+    the macOS foreground (focus-window alone only moves cmux's internal
+    current-window — see `_activate_macos_app`). Refs like `window:1` are
+    rejected by focus-window, so we drive everything by the UUIDs that
+    `--id-format both` prints."""
     import shutil
     import subprocess
     cmux = shutil.which("cmux")
@@ -797,6 +848,7 @@ def _focus_cmux(tty: str) -> tuple[bool, str]:
         return False, "cmux focus failed"
     if fr.returncode != 0:
         return False, "cmux focus-window failed"
+    _activate_macos_app("cmux")  # OS-level raise; focus-window only sets internal current-window
     return True, "cmux workspace"
 
 
@@ -820,9 +872,7 @@ def focus_existing_window(session_id: str, live_info: dict) -> tuple[bool, str]:
     wez = ("WezTerm", lambda: shutil.which("wezterm") is not None, _focus_wezterm)
     term = ("Terminal.app", lambda: _macos_proc_running("Terminal"), _focus_terminal_app)
     iterm = ("iTerm2", lambda: _macos_proc_running("iTerm2"), _focus_iterm2)
-    cmux = ("cmux",
-            lambda: shutil.which("cmux") is not None and _macos_proc_running("cmux"),
-            _focus_cmux)
+    cmux = ("cmux", _cmux_available, _focus_cmux)
 
     # In cmux TERM_PROGRAM is "ghostty" (its embedded terminal), so cmux can't
     # be detected from $TERM_PROGRAM alone — probe it first when we're inside a
