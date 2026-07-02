@@ -16,7 +16,7 @@ struct SessionListWindow: View {
     }
 
     var body: some View {
-        HSplitView {
+        NavigationSplitView {
             VStack(spacing: 0) {
                 HStack {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -30,9 +30,10 @@ struct SessionListWindow: View {
                 Table(filtered, selection: $selection, sortOrder: $sortOrder) {
                     TableColumn("") { s in Text(s.glyph) }.width(24)
                     TableColumn("프로젝트", value: \.project) { s in Text(s.project) }
+                        .width(min: 120, ideal: 160)
                     TableColumn("메시지", value: \.summary) { s in
                         Text(s.summary).lineLimit(1).foregroundStyle(.secondary)
-                    }
+                    }.width(min: 160, ideal: 240)
                     TableColumn("#", value: \.messages) { s in Text("\(s.messages)") }
                         .width(44)
                     TableColumn("최근", value: \.lastTs) { s in
@@ -40,11 +41,12 @@ struct SessionListWindow: View {
                     }.width(120)
                 }
             }
-            .frame(minWidth: 520)
-
+            .navigationSplitViewColumnWidth(min: 520, ideal: 580)
+        } detail: {
             SessionDetailView(sessionId: selection)
-                .frame(minWidth: 320)
+                .frame(minWidth: 360)
         }
+        .navigationSplitViewStyle(.balanced)
     }
 
     static func shortDate(_ iso: String) -> String {
