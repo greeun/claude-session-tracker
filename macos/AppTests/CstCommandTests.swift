@@ -13,7 +13,7 @@ final class CstCommandTests: XCTestCase {
     }
 
     func testActionArgs() {
-        XCTAssertEqual(CstCommand.resumeArgs("s1"), ["resume", "s1"])
+        XCTAssertEqual(CstCommand.resumeArgs("s1"), ["resume", "s1", "--spawn"])
         XCTAssertEqual(CstCommand.doneArgs("s1"), ["done", "s1"])
         XCTAssertEqual(CstCommand.undoneArgs("s1"), ["undone", "s1"])
         XCTAssertEqual(CstCommand.showArgs("s1", maxChars: 4000),

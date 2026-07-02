@@ -2292,6 +2292,25 @@ def cmd_resume(args: argparse.Namespace) -> int:
         return 1
     cwd = target.cwd or "."
     short = job_short_for(target.session_id)
+    if getattr(args, "spawn", False):
+        # GUI/cst.app path: actually open (or focus) the session in a terminal,
+        # reusing the same logic as the TUI Enter handler. One-line result.
+        live = get_live_session_info(target.session_id)
+        if live:
+            ok, info = focus_existing_window(target.session_id, live)
+            if ok:
+                print(f"→ focused {target.session_id[:8]}  {info}")
+                return 0
+        ok, info = open_in_new_terminal(
+            target.cwd, target.session_id,
+            skip_perm=getattr(args, "skip_perm", False),
+            attach_short=short,
+        )
+        if ok:
+            print(f"→ {'attach' if short else 'resume'} {target.session_id[:8]}  {info}")
+            return 0
+        print(f"open failed: {info}", file=sys.stderr)
+        return 1
     if short:
         # background session — attach to the live process, not a transcript fork
         cmd = f"claude attach {short}"
@@ -5515,6 +5534,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_resume = sub.add_parser("resume", help="emit a cd+resume command")
     p_resume.add_argument("session_id")
     p_resume.add_argument("--print-only", action="store_true")
+    p_resume.add_argument("--spawn", action="store_true",
+                          help="actually open/attach the session in a new terminal (used by cst.app)")
     p_resume.set_defaults(func=cmd_resume)
 
     p_backup = sub.add_parser("backup", help="archive old sessions into tar.gz")

@@ -17,7 +17,7 @@ enum CstCommand {
         if let sort { a += ["--sort", sort] }
         return a
     }
-    static func resumeArgs(_ id: String) -> [String] { ["resume", id] }
+    static func resumeArgs(_ id: String) -> [String] { ["resume", id, "--spawn"] }
     static func doneArgs(_ id: String) -> [String] { ["done", id] }
     static func undoneArgs(_ id: String) -> [String] { ["undone", id] }
     static func showArgs(_ id: String, maxChars: Int) -> [String] {
