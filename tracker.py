@@ -1953,7 +1953,9 @@ def sessions_json_payload(sessions, ctx: "StatusContext") -> dict:
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    sessions = load_all_sessions(cwd_filter=args.cwd, days=args.days, progress=True)
+    as_json = getattr(args, "json", False)
+    sessions = load_all_sessions(cwd_filter=args.cwd, days=args.days,
+                                 progress=not as_json)
     ctx = StatusContext.capture()
     if args.status:
         wanted = {
@@ -1982,6 +1984,10 @@ def cmd_list(args: argparse.Namespace) -> int:
         sessions = sort_sessions(sessions, ctx, skey, srev)
     if args.limit:
         sessions = sessions[: args.limit]
+    if as_json:
+        print(json.dumps(sessions_json_payload(sessions, ctx),
+                         ensure_ascii=False, indent=2))
+        return 0
     if not sessions:
         print("(no sessions found)")
         return 0
@@ -5468,6 +5474,8 @@ def _build_parser() -> argparse.ArgumentParser:
                         choices=("working", "waiting", "idle", "ended",
                                  "done", "active"),
                         help="filter by status")
+    p_list.add_argument("--json", action="store_true",
+                        help="emit machine-readable JSON (for cst.app) instead of the table")
     p_list.set_defaults(func=cmd_list)
 
     p_search = sub.add_parser("search", help="keyword search across sessions")

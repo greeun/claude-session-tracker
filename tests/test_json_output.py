@@ -82,5 +82,21 @@ class TestPayload(unittest.TestCase):
         self.assertEqual(_json.loads(text)["schema"], 1)
 
 
+import subprocess
+
+
+class TestCliJson(unittest.TestCase):
+    def test_list_json_is_valid_and_shaped(self):
+        proc = subprocess.run(
+            [sys.executable, str(_TP), "list", "--json", "--limit", "3"],
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = _json.loads(proc.stdout)          # must parse cleanly (no progress noise)
+        self.assertEqual(data["schema"], 1)
+        self.assertIn("sessions", data)
+        self.assertIsInstance(data["sessions"], list)
+        self.assertIn("counts", data)
+
+
 if __name__ == "__main__":
     unittest.main()
