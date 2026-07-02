@@ -37,4 +37,17 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertEqual(captured.map(\.to), ["waiting"])
         XCTAssertEqual(store.sessions.first?.status, "waiting")
     }
+
+    func testBoundedPreviewShortUnchanged() {
+        XCTAssertEqual(SessionStore.boundedPreview("hello"), "hello")
+        XCTAssertEqual(SessionStore.boundedPreview(""), "")
+    }
+
+    func testBoundedPreviewTruncatesLarge() {
+        let big = String(repeating: "x", count: 700_000)
+        let out = SessionStore.boundedPreview(big)
+        XCTAssertLessThanOrEqual(out.count, SessionStore.previewCharLimit + 200)
+        XCTAssertTrue(out.hasPrefix(String(repeating: "x", count: 100)))
+        XCTAssertTrue(out.contains("잘림"))
+    }
 }

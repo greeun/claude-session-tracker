@@ -64,8 +64,21 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    static let previewCharLimit = 20_000
+
+    /// Bound the transcript preview so SwiftUI never lays out a huge Text
+    /// (a several-hundred-KB selectable Text hangs the app). Returns the text
+    /// unchanged when short; otherwise a head slice + a truncation notice.
+    static func boundedPreview(_ text: String) -> String {
+        if text.count <= previewCharLimit { return text }
+        let dropped = text.count - previewCharLimit
+        return String(text.prefix(previewCharLimit))
+            + "\n\n…(미리보기 잘림: +\(dropped)자. 전체는 Resume로 세션을 열어 확인하세요.)"
+    }
+
     func preview(_ id: String) async -> String {
-        (try? await source.preview(id, maxChars: 4000)) ?? ""
+        let raw = (try? await source.preview(id, maxChars: 4000)) ?? ""
+        return Self.boundedPreview(raw)
     }
 
     /// 메뉴바 라벨용 요약, 예: "● 1  ! 2".
