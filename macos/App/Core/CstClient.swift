@@ -72,8 +72,24 @@ struct CstClient: CstDataSource {
                 let deadline = DispatchTime.now() + timeout
                 let killer = DispatchWorkItem { if proc.isRunning { proc.terminate() } }
                 DispatchQueue.global().asyncAfter(deadline: deadline, execute: killer)
-                let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+
+                // stdout/stderr를 동시에 드레인한다. 순차로 읽으면 자식이 stderr 파이프의
+                // 커널 버퍼(macOS 기준 ~64KB)를 채운 뒤 stdout을 계속 채우는 경우, stdout
+                // readDataToEndOfFile()이 절대 끝나지 않는 파이프 데드락이 발생한다.
+                var outData = Data()
+                var errData = Data()
+                let drainGroup = DispatchGroup()
+                drainGroup.enter()
+                DispatchQueue.global(qos: .userInitiated).async {
+                    outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+                    drainGroup.leave()
+                }
+                drainGroup.enter()
+                DispatchQueue.global(qos: .userInitiated).async {
+                    errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                    drainGroup.leave()
+                }
+                drainGroup.wait()
                 proc.waitUntilExit()
                 killer.cancel()
                 if proc.terminationStatus != 0 {
