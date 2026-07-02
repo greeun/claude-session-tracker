@@ -34,17 +34,21 @@ struct SessionDetailView: View {
                                          systemImage: s.isDone ? "arrow.uturn.left" : "checkmark") }
                     }
                     Divider()
-                    if loading {
-                        ProgressView().frame(maxWidth: .infinity)
-                    } else {
-                        ScrollView {
-                            Text(preview.isEmpty ? "(미리보기 없음)" : preview)
-                                .font(.system(.body, design: .monospaced))
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                    Group {
+                        if loading {
+                            ProgressView().controlSize(.large)
+                        } else {
+                            ScrollView {
+                                Text(preview.isEmpty ? "(미리보기 없음)" : preview)
+                                    .font(.system(.body, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
                         }
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .padding()
             } else {
                 Text("세션을 선택하세요").foregroundStyle(.secondary)
