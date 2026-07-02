@@ -27,5 +27,8 @@ targets:
     type: bundle.unit-test
     platform: macOS
     sources: [AppTests]
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
     dependencies:
       - target: cst
