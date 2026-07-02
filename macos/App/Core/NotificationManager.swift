@@ -1,7 +1,12 @@
 import Foundation
 import UserNotifications
 
-final class NotificationManager {
+final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
+    override init() {
+        super.init()
+        UNUserNotificationCenter.current().delegate = self
+    }
+
     func requestAuthorization() {
         UNUserNotificationCenter.current()
             .requestAuthorization(options: [.alert, .sound]) { _, _ in }
@@ -18,5 +23,12 @@ final class NotificationManager {
                                             content: content, trigger: nil)
             center.add(req)
         }
+    }
+
+    // TODO(v1.1): didReceive → open "main" window + select notification.userInfo["sessionId"]
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
     }
 }
