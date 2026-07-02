@@ -29,12 +29,12 @@ final class SessionStoreTests: XCTestCase {
         var captured: [Transition] = []
         store.onTransitions = { captured += $0 }
 
-        await store.refreshOnce()                 // first snapshot: new session a->working
+        await store.refreshOnce()                 // first snapshot: silent baseline seed
         XCTAssertEqual(store.sessions.count, 1)
-        XCTAssertEqual(captured.map(\.to), ["working"])
+        XCTAssertTrue(captured.isEmpty)
 
         await store.refreshOnce()                 // second: working -> waiting
-        XCTAssertEqual(captured.map(\.to), ["working", "waiting"])
+        XCTAssertEqual(captured.map(\.to), ["waiting"])
         XCTAssertEqual(store.sessions.first?.status, "waiting")
     }
 }

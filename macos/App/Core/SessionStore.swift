@@ -10,6 +10,7 @@ final class SessionStore: ObservableObject {
 
     private let source: CstDataSource
     private var previous: [Session] = []
+    private var seeded = false
     private var loop: Task<Void, Never>?
     private var refreshing = false
     private var pendingRefresh = false
@@ -26,7 +27,8 @@ final class SessionStore: ObservableObject {
             pendingRefresh = false
             do {
                 let cur = try await source.list(limit: nil)
-                let trans = DiffEngine.transitions(previous: previous, current: cur)
+                let trans = seeded ? DiffEngine.transitions(previous: previous, current: cur) : []
+                seeded = true
                 previous = cur
                 sessions = cur
                 lastError = nil
