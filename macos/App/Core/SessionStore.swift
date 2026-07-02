@@ -42,8 +42,8 @@ final class SessionStore: ObservableObject {
         loop = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refreshOnce()
-                let clamped = max(0, interval) * 1_000_000_000
-                try? await Task.sleep(nanoseconds: UInt64(clamped))
+                let seconds = min(max(0, interval), Double(UInt64.max) / 1_000_000_000)
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             }
         }
     }
