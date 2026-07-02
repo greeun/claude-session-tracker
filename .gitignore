@@ -37,8 +37,3 @@ __pycache__/
 *-runs/
 *-output/
 # <<< skill-artifacts
-
-# cst.app (macOS) build artifacts — project.yml + sources만 추적
-macos/cst.xcodeproj/
-macos/build/
-macos/DerivedData/
