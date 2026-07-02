@@ -52,9 +52,11 @@ struct SessionDetailView: View {
             }
         }
         .task(id: sessionId) {
-            guard let id = sessionId else { preview = ""; return }
+            guard let id = sessionId else { preview = ""; loading = false; return }
             loading = true
-            preview = await store.preview(id)
+            let result = await store.preview(id)
+            guard sessionId == id else { return }   // selection moved on while awaiting — drop stale result
+            preview = result
             loading = false
         }
     }
