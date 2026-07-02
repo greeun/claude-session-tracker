@@ -9,23 +9,26 @@ struct CstApp: App {
     init() {
         let cfg = AppConfig.shared
         let client = CstClient(executablePath: cfg.resolvedCstPath)
+        let s = SessionStore(source: client)
         _config = StateObject(wrappedValue: cfg)
-        _store = StateObject(wrappedValue: SessionStore(source: client))
+        _store = StateObject(wrappedValue: s)
+
+        let notifier = self.notifier
+        Task { @MainActor in
+            notifier.requestAuthorization()
+            s.onTransitions = { transitions in
+                let specs = NotificationPolicy.specs(for: transitions,
+                                                     prefs: cfg.notifPrefs)
+                notifier.post(specs)
+            }
+            s.start(interval: cfg.pollInterval)
+        }
     }
 
     var body: some Scene {
         MenuBarExtra {
             MenuBarView()
                 .environmentObject(store)
-                .onAppear {
-                    notifier.requestAuthorization()
-                    store.onTransitions = { transitions in
-                        let specs = NotificationPolicy.specs(for: transitions,
-                                                             prefs: config.notifPrefs)
-                        notifier.post(specs)
-                    }
-                    store.start(interval: config.pollInterval)
-                }
         } label: {
             Text(store.statusSummary)
         }
