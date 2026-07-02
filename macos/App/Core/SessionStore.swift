@@ -11,20 +11,30 @@ final class SessionStore: ObservableObject {
     private let source: CstDataSource
     private var previous: [Session] = []
     private var loop: Task<Void, Never>?
+    private var refreshing = false
+    private var pendingRefresh = false
 
     init(source: CstDataSource) { self.source = source }
 
+    deinit { loop?.cancel() }
+
     func refreshOnce() async {
-        do {
-            let cur = try await source.list(limit: nil)
-            let trans = DiffEngine.transitions(previous: previous, current: cur)
-            previous = cur
-            sessions = cur
-            lastError = nil
-            if !trans.isEmpty { onTransitions?(trans) }
-        } catch {
-            lastError = Self.describe(error)
-        }
+        if refreshing { pendingRefresh = true; return }
+        refreshing = true
+        defer { refreshing = false }
+        repeat {
+            pendingRefresh = false
+            do {
+                let cur = try await source.list(limit: nil)
+                let trans = DiffEngine.transitions(previous: previous, current: cur)
+                previous = cur
+                sessions = cur
+                lastError = nil
+                if !trans.isEmpty { onTransitions?(trans) }
+            } catch {
+                lastError = Self.describe(error)
+            }
+        } while pendingRefresh
     }
 
     func start(interval: TimeInterval) {
@@ -32,7 +42,8 @@ final class SessionStore: ObservableObject {
         loop = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refreshOnce()
-                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                let clamped = max(0, interval) * 1_000_000_000
+                try? await Task.sleep(nanoseconds: UInt64(clamped))
             }
         }
     }
