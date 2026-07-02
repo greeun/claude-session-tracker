@@ -100,6 +100,16 @@ def status_label(st: str) -> str:
     return f"{st} {STATUS_LABELS.get(st, '')}".rstrip()
 
 
+# JSON output: glyph -> stable status name (cst.app / machine consumers).
+_JSON_STATUS_NAME = {
+    STATUS_WORKING: "working",
+    STATUS_WAITING: "waiting",
+    STATUS_IDLE:    "idle",
+    STATUS_ENDED:   "ended",
+    STATUS_DONE:    "done",
+}
+
+
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║ ADAPTER LAYER — OS/terminal integration. Domain-aware (knows resume    ║
 # ║ commands & session alarms) but isolated from data model / rendering.   ║
@@ -1891,6 +1901,56 @@ def load_all_sessions(
 # ╚══════════════════════════════════════════════════════════════════════╝
 
 # ---------- CLI: list ----------
+
+def _job_json(job: "dict | None") -> "dict | None":
+    if not job:
+        return None
+    return {
+        "short": job.get("short"),
+        "template": job.get("template") or "",
+        "branch": job.get("worktreeBranch") or "",
+        "worktreePath": job.get("worktreePath") or "",
+        "state": job.get("state"),
+        "tempo": job.get("tempo"),
+        "alive": job.get("tempo") == "active",
+    }
+
+
+def session_to_dict(s: "SessionMeta", ctx: "StatusContext") -> dict:
+    """One SessionMeta -> the cst.app JSON contract (schema 1)."""
+    glyph = ctx.resolve(s.session_id)
+    job = ctx.jobs.get(s.session_id)
+    short = (job or {}).get("short")
+    last = s.last_ts
+    return {
+        "sessionId": s.session_id,
+        "shortId": short,
+        "cwd": s.cwd,
+        "project": os.path.basename(s.cwd.rstrip("/")) if s.cwd else "",
+        "status": _JSON_STATUS_NAME.get(glyph, "ended"),
+        "glyph": glyph,
+        "isLive": s.session_id in ctx.live,
+        "isDone": s.session_id in ctx.done,
+        "messages": s.msg_count,
+        "summary": s.first_user_msg or "",
+        "lastActivity": last.astimezone().isoformat() if last else None,
+        "lastTs": int(last.timestamp()) if last else 0,
+        "gitBranch": s.git_branch or "",
+        "job": _job_json(job),
+        "prs": list(s.prs or []),
+        "pinned": bool(short and short in ctx.pins),
+    }
+
+
+def sessions_json_payload(sessions, ctx: "StatusContext") -> dict:
+    counts = ctx.counts(sessions)
+    return {
+        "schema": 1,
+        "version": __version__,
+        "sessions": [session_to_dict(s, ctx) for s in sessions],
+        "counts": {_JSON_STATUS_NAME[g]: counts[g] for g in STATUS_ALL},
+    }
+
 
 def cmd_list(args: argparse.Namespace) -> int:
     sessions = load_all_sessions(cwd_filter=args.cwd, days=args.days, progress=True)
