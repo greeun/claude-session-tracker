@@ -2356,6 +2356,51 @@ def cmd_undone(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rm(args: argparse.Namespace) -> int:
+    """Remove (unlink) a session's transcript and purge its cache/state/mark
+    traces, reusing the same `_delete_sessions` path as the TUI `Del` key.
+
+    Only unlinks the transcript — a live background process keeps running
+    (see `bg_delete_warning`). The menu-bar app calls this as `cst rm <id> -y`;
+    non-interactive callers MUST pass -y/--yes, otherwise we refuse rather than
+    hang on `input()` waiting for a tty that isn't there.
+    """
+    target = require_session(args.session_id)
+    if target is None:
+        return 1
+    id8 = target.session_id[:8]
+    label = f"{id8}  {shorten_path(target.cwd)}"
+    ctx = StatusContext.capture()
+
+    warn = bg_delete_warning([target.session_id], ctx.jobs)
+    if warn:
+        print(warn, file=sys.stderr)
+
+    if getattr(args, "dry_run", False):
+        print(f"Would remove: {label}  →  {target.path}")
+        return 0
+
+    if not (getattr(args, "yes", False) or getattr(args, "force", False)):
+        if not sys.stdin.isatty():
+            print(f"Refusing to remove {id8} without confirmation — "
+                  f"pass -y/--yes (non-interactive).", file=sys.stderr)
+            return 1
+        try:
+            reply = input(f"Remove {label}? [y/N] ").strip().lower()
+        except EOFError:
+            reply = ""
+        if reply not in ("y", "yes"):
+            print("Aborted.")
+            return 1
+
+    deleted, errors = _delete_sessions([target], [target], set(), ctx)
+    if not deleted or errors:
+        print(f"✗ failed to remove {id8}", file=sys.stderr)
+        return 1
+    print(f"✓ removed {id8}  {shorten_path(target.cwd)}")
+    return 0
+
+
 def cmd_live(args: argparse.Namespace) -> int:
     if not SESSIONS_REGISTRY_DIR.is_dir():
         print("(no ~/.claude/sessions registry directory)")
@@ -5591,6 +5636,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_undone = sub.add_parser("undone", help="clear done flag")
     p_undone.add_argument("session_id")
     p_undone.set_defaults(func=cmd_undone)
+
+    p_rm = sub.add_parser("rm", help="remove (unlink) a session transcript")
+    p_rm.add_argument("session_id")
+    p_rm.add_argument("--dry-run", dest="dry_run", action="store_true",
+                      help="show what would be removed without unlinking")
+    p_rm.add_argument("-y", "--yes", action="store_true",
+                      help="skip confirmation (required when non-interactive)")
+    p_rm.add_argument("--force", action="store_true",
+                      help="remove without confirmation (implies -y)")
+    p_rm.set_defaults(func=cmd_rm)
 
     p_live = sub.add_parser("live",
                             help="list live Claude Code processes (from ~/.claude/sessions/)")
