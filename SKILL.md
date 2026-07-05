@@ -137,6 +137,10 @@ stale `!` self-heals to `◦` to avoid a stuck state.
   guard as the list), and `Del` deletes the previewed session (confirm in
   place — cancel returns to the preview)
 - **`e` / `E`** — export focused session to `./<id>.md`
+- **`o` / `O`** — open the focused session's **folder** in a new terminal
+  window: a plain interactive shell at the recorded cwd, no `claude` command
+  (same terminal-app detection as Enter; cmux tab/window chooser inside cmux;
+  a missing cwd fails with a `cst relocate` hint instead of recreating it)
 - **`D` / `d` / `Ctrl-D`** — toggle done (or apply to all marked)
 - **`H` / `h`** — hide ✓ rows (no Ctrl-H alias — Backspace collision);
   start hidden with `cst --hide-done` / `cst pick --hide-done`
@@ -181,8 +185,9 @@ with manual-entry and placeholder escape hatches).
 - Top-level `--skip-perm` flag for resume; `--hide-done` to start the TUI with
   ✓ done sessions hidden
 - TUI: `D`/`d`/`Ctrl-D` toggle-done, `H`/`h` hide-done, `C`/`c` cwd-only,
-  `R`/`r`/`Ctrl-R` rescan, `e`/`E` export, `a`/`A` auto-rescan,
-  `s`/`S` column sort, `t`/`T` theme, `Ctrl-A` mark-all, `?` help, `v`/`V` preview
+  `R`/`r`/`Ctrl-R` rescan, `e`/`E` export, `o`/`O` open-folder,
+  `a`/`A` auto-rescan, `s`/`S` column sort, `t`/`T` theme,
+  `Ctrl-A` mark-all, `?` help, `v`/`V` preview
 - fzf-style `/` — type + ↑↓ at once, Enter commits (doesn't auto-open),
   Ctrl-D marks while filtering, Tab escalates to full-text
 - Unicode input in `/` (manual UTF-8 assembly bypasses Python curses bugs

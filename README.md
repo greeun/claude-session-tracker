@@ -308,6 +308,7 @@ A curses picker with fzf-style filter, status glyphs, modals, and action keys. *
 | `Ctrl-X` | Clear all marks |
 | **`v`** / **`V`** | Preview the focused session (scrollable modal). Inside: `↑↓/j/k` scroll · `PgUp/PgDn/Space` page · `g/G` top/bottom · `←/→` prev/next session · `d/Ctrl-D` toggle done on previewed session · `Del` delete previewed session (confirm in place; cancel returns to preview) · `q/Esc/v` close |
 | **`e`** / **`E`** | Export focused session to `./<id>.md` (toast shows the path) |
+| **`o`** / **`O`** | Open the focused session's **folder** in a new terminal window — a plain interactive shell at the recorded cwd, no `claude` command (same terminal-app detection as `Enter`; cmux tab/window chooser inside cmux; a missing cwd fails with a `cst relocate` hint) |
 | **`D`** / **`d`** / **`Ctrl-D`** | Toggle **done** on current row (or all marked rows). Persists. |
 | **`H`** / **`h`** | Toggle hide-done — hide/show ✓ rows (no `Ctrl-H` alias — that's Backspace) |
 | **`C`** / **`c`** | Toggle cwd-only — show only sessions under the TUI's launch cwd (NFC-normalized prefix match) |
@@ -563,7 +564,7 @@ cst relocate <id> ~/project/actual-folder -y
 - **#** row-number column + **ST** glyph column + **PROJECT** column on every row
 - **`done`**, **`undone`**, **`live`**, **`export`**, **`bg`** / **`jobs`** / **`stop`** / **`logs`** (agent-view background sessions), **`install-hook`** / **`uninstall-hook`** / **`prompt-hook`** / **`status-hook`** subcommands
 - `cst list --sort time|status|msgs|project [--reverse]` column sort
-- TUI keys: `D/d/Ctrl-D` (toggle done) · `H/h` (hide done) · `C/c` (cwd-only) · `R/r/Ctrl-R` (rescan) · `e/E` (export) · `a/A` (auto-rescan) · `s`/`S` (column sort) · `t/T` (theme) · `Ctrl-A` (mark all) · `?` (help) · `v/V` (preview; `←/→` prev/next session inside it)
+- TUI keys: `D/d/Ctrl-D` (toggle done) · `H/h` (hide done) · `C/c` (cwd-only) · `R/r/Ctrl-R` (rescan) · `e/E` (export) · `o/O` (open folder) · `a/A` (auto-rescan) · `s`/`S` (column sort) · `t/T` (theme) · `Ctrl-A` (mark all) · `?` (help) · `v/V` (preview; `←/→` prev/next session inside it)
 - Background/agent-view rows: `[bg]`/`[exec]`/`[bg ⎇branch]`/`[bg ∙]`/`[PR #N]` badges, `*` pin marker, `Enter` attaches (not forks)
 - Color themes (dark/light, `--theme` / `t`)
 - fzf-style `/` with live filter and typing-while-navigating

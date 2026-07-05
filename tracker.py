@@ -258,7 +258,8 @@ def open_in_new_terminal(cwd: str, session_id: str,
     return False, f"unsupported platform: {sys.platform}"
 
 
-def _open_in_cmux(cmux_mode, cwd, safe_cwd, core_cmd, session_id):
+def _open_in_cmux(cmux_mode, cwd, safe_cwd, core_cmd, session_id,
+                  ws_name: str | None = None):
     """cmux open-mode branch of open_in_new_terminal (workspace tab / new window)."""
     import shutil
     import subprocess
@@ -270,7 +271,7 @@ def _open_in_cmux(cmux_mode, cwd, safe_cwd, core_cmd, session_id):
         f"mkdir -p {safe_cwd} && cd {safe_cwd} && "
         f"{core_cmd}"
     )
-    ws_name = f"claude:{session_id[:8]}"
+    ws_name = ws_name or f"claude:{session_id[:8]}"
     try:
         if cmux_mode == "window":
             result = subprocess.run(
@@ -478,6 +479,45 @@ def _open_linux(cwd, shell_cmd):
         except OSError:
             continue
     return False, "no supported terminal emulator found"
+
+
+def open_folder_in_new_terminal(cwd: str,
+                                cmux_mode: str | None = None) -> tuple[bool, str]:
+    """Spawn a plain interactive shell (no claude command) in a new terminal
+    window at the session's `cwd` — the TUI `o` action.
+
+    Reuses the same per-terminal spawners as open_in_new_terminal(). Unlike
+    the resume path, a missing cwd is an error instead of a recreate: an empty
+    placeholder would *look* like the project folder, so point the user at
+    `cst relocate` instead.
+    """
+    import shlex
+
+    if not cwd:
+        return False, "session has no recorded cwd"
+    if not os.path.isdir(cwd):
+        return False, f"cwd missing (moved? try `cst relocate`): {cwd}"
+
+    safe_cwd = shlex.quote(cwd)
+    # The spawners run their command via `bash -lc` (or AppleScript `do
+    # script`), whose shell exits — and closes the window — when the command
+    # ends. `exec` swaps that wrapper for the user's own interactive shell so
+    # the window stays open at the target folder.
+    shell_core = 'exec "${SHELL:-bash}" -l'
+    shell_cmd = f"cd {safe_cwd} && {shell_core}"
+
+    if cmux_mode:
+        base = os.path.basename(cwd.rstrip("/")) or "/"
+        return _open_in_cmux(cmux_mode, cwd, safe_cwd, shell_core, "",
+                             ws_name=f"dir:{base}")
+
+    if sys.platform == "darwin":
+        return _open_macos(os.environ.get("TERM_PROGRAM", ""), shell_cmd, cwd)
+
+    if sys.platform.startswith("linux"):
+        return _open_linux(cwd, shell_cmd)
+
+    return False, f"unsupported platform: {sys.platform}"
 
 
 # ── terminal-focus layer: raise an existing live session's window ──────────
@@ -2988,6 +3028,9 @@ HELP_LINES = [
     "                         d / Ctrl-D toggle done on the previewed session",
     "                         Del delete the session being previewed (confirm first)",
     "  e / E                  export focused session transcript to .md in cwd",
+    "  o / O                  open the session's folder in a new terminal",
+    "                         (plain shell at the recorded cwd — no claude;",
+    "                          cmux: [t] tab / [w] window chooser as on Enter)",
     "  Space                  toggle mark on the current row",
     "  Ctrl-A                 toggle mark on ALL filtered rows (select all)",
     "  Ctrl-X                 clear all marks",
@@ -4246,7 +4289,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             f"{STATUS_DONE}{scounts[STATUS_DONE]}"
             f"{auto_hint}{sort_hint}"
             f"{mark_hint}{search_hint}{hide_hint}{cwd_hint}"
-            "   ? help  Enter open  / filter  s sort  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit "
+            "   ? help  Enter open  o folder  / filter  s sort  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit "
         )
         if search_mode:
             prompt = f"/ {query}"
@@ -4617,6 +4660,23 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                     toast = f"Exported: {dest}"
                 except Exception as exc:
                     toast = f"Export failed: {exc}"
+        elif ch in (ord('o'), ord('O')):
+            # Open the focused session's folder in a new terminal window —
+            # a plain interactive shell at the recorded cwd, no claude command.
+            if items:
+                target = items[sel]
+                cmux_m = None
+                # Skip the cmux chooser when the cwd is gone anyway; the
+                # spawn call below fails fast with the relocate hint.
+                if _in_cmux and target.cwd and os.path.isdir(target.cwd):
+                    cmux_m = _choose_cmux_mode_modal(stdscr)
+                    if cmux_m is None:
+                        toast = "Open folder cancelled"
+                        continue
+                ok, info = open_folder_in_new_terminal(target.cwd,
+                                                       cmux_mode=cmux_m)
+                toast = (f"→ folder {shorten_path(target.cwd)}  {info}" if ok
+                         else f"Open folder failed: {info}")
         elif ch in (ord('D'), ord('d'), 4):  # D / d / Ctrl-D
             if marked:
                 target_sids = [s.session_id for s in sessions if s.session_id in marked]

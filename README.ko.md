@@ -304,6 +304,7 @@ fzf 스타일 필터, 상태 글리프, 모달, 액션 키를 갖춘 curses 선�
 | `Ctrl-X` | 모든 마크 초기화 |
 | **`v`** / **`V`** | 포커스된 세션 미리보기 (스크롤 모달). 내부: `↑↓/j/k` 스크롤 · `PgUp/PgDn/Space` 페이지 · `g/G` 처음/끝 · `←/→` 이전/다음 세션 · `d/Ctrl-D` 미리보기 중인 세션 done 토글 · `Del` 미리보기 중인 세션 삭제 (그 자리에서 확인; 취소하면 미리보기로 복귀) · `q/Esc/v` 닫기 |
 | **`e`** / **`E`** | 포커스된 세션을 `./<id>.md`로 내보내기 (토스트에 경로 표시) |
+| **`o`** / **`O`** | 포커스된 세션의 **폴더**를 새 터미널 창에서 열기 — 기록된 cwd에서 순수 대화형 셸만 실행, `claude` 명령 없음 (`Enter`와 같은 터미널 앱 감지; cmux 안에서는 탭/창 선택 모달; cwd가 사라졌으면 `cst relocate` 안내와 함께 실패) |
 | **`D`** / **`d`** / **`Ctrl-D`** | 현재 행(또는 마크된 모든 행) **done** 토글. 영구 저장. |
 | **`H`** / **`h`** | hide-done 토글 — ✓ 행 숨김/표시 (`Ctrl-H`는 Backspace라 별칭 없음) |
 | **`C`** / **`c`** | cwd-only 토글 — TUI 실행 cwd 아래의 세션만 표시 (NFC-정규화 prefix 매치) |
@@ -559,7 +560,7 @@ cst relocate <id> ~/project/actual-folder -y
 - **#** 번호 컬럼 + **ST** 글리프 컬럼 + **PROJECT** 컬럼을 매 행에 표시
 - **`done`**, **`undone`**, **`live`**, **`export`**, **`bg`** / **`jobs`** / **`stop`** / **`logs`** (agent-view 백그라운드 세션), **`install-hook`** / **`uninstall-hook`** / **`prompt-hook`** / **`status-hook`** 서브커맨드
 - `cst list --sort time|status|msgs|project [--reverse]` 컬럼 정렬
-- TUI 키: `D/d/Ctrl-D` (done 토글) · `H/h` (숨김 토글) · `C/c` (cwd-only) · `R/r/Ctrl-R` (rescan) · `e/E` (내보내기) · `a/A` (자동 재스캔) · `s`/`S` (컬럼 정렬) · `t/T` (테마) · `Ctrl-A` (전체 마크) · `?` (도움말) · `v/V` (미리보기)
+- TUI 키: `D/d/Ctrl-D` (done 토글) · `H/h` (숨김 토글) · `C/c` (cwd-only) · `R/r/Ctrl-R` (rescan) · `e/E` (내보내기) · `o/O` (폴더 열기) · `a/A` (자동 재스캔) · `s`/`S` (컬럼 정렬) · `t/T` (테마) · `Ctrl-A` (전체 마크) · `?` (도움말) · `v/V` (미리보기)
 - 백그라운드/agent-view 행: `[bg]`/`[exec]`/`[bg ⎇branch]`/`[bg ∙]`/`[PR #N]` 배지, `*` 핀 마커, `Enter`는 attach(포크 아님)
 - 색 테마 (dark/light, `--theme` / `t`)
 - fzf 스타일 `/` — 타이핑하며 동시에 이동, 필터 확정 후 다양한 액션
