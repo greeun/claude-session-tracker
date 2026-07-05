@@ -32,7 +32,7 @@ ln -sf ~/.claude/skills/claude-session-tracker/tracker.py ~/.local/bin/cst
 
 # 3. 확인
 cst --version
-# claude-session-tracker v1.6.0
+# claude-session-tracker v1.10.0
 
 # 4. (선택) 토큰 0짜리 done!/undone! 프롬프트 훅 + 상태 정밀 레이어 설치
 cst install-hook
@@ -113,11 +113,11 @@ cst --theme light --tui       # TUI 색 테마 지정(auto|dark|light; `t`/`T`�
 ```bash
 cst list [--limit 30] [--cwd PREFIX] [--days N]
          [--status working|waiting|idle|ended|done|active]
-         [--sort time|status|msgs|project] [--reverse]
+         [--sort time|status|msgs|project] [--reverse] [--json]
 ```
 
 ```
-claude-session-tracker v1.6.0
+claude-session-tracker v1.10.0
   #  ST  LAST ACTIVITY     SESSION   MSGS  MESSAGE                   PROJECT
   1  ●   2026-05-24 01:17  960faaa8   261  claude-sessions 는…       ~/.claude/skills
   2  !   2026-05-24 01:16  06d116f7    34  proceed? (y/N)            ~/project/url-shortener
@@ -132,6 +132,8 @@ claude-session-tracker v1.6.0
   방향 반전. `status`는 working→waiting→idle→ended→done 순; 동점은 항상 최신순으로
   깨짐. 명시적 `--sort`는 일회성이고, `--sort` 없으면 저장된 TUI 정렬 설정을 사용.
   정렬은 `--limit` **이전**에 적용되어 선택된 순서의 상위 N개를 자름.
+- **`--json`** — 테이블 대신 기계가 읽는 JSON으로 출력
+  (cst.app macOS 컴패니언이 소비하는 계약).
 
 ### `cst pick` / `--tui` — 인터랙티브 TUI
 
@@ -155,9 +157,14 @@ cst search "nextjs|remix" --limit 10 -i --cwd ~/project
 
 ```bash
 cst show 960faaa8 --max-chars 500 --with-subagents
+cst show 960faaa8 --head-chars 4000        # 거대 세션의 빠른 헤드 미리보기
 ```
 
 헤더에 **Status**, cwd, 시작/마지막 타임스탬프, 메시지 수, 서브에이전트 수가 표시됩니다.
+
+- `--max-chars N`은 메시지별 자르기, `--head-chars N`은 **전체** 출력 총량을
+  제한하고 파일 읽기를 조기 중단 (0 = 무제한) — 수백 MB 트랜스크립트에서
+  cst.app이 쓰는 고속 미리보기 경로.
 
 ### `cst export <id>` — 트랜스크립트를 파일로 출력
 
@@ -175,7 +182,12 @@ cst export 960faaa8 --out ~/exports/x.md   # 정확한 경로로 생성
 ```bash
 cst resume 960faaa8 --print-only | bash
 cst --skip-perm resume 960faaa8 --print-only | bash   # skip-perm 플래그 포함
+cst resume 960faaa8 --spawn                # 실제로 새 터미널에서 열기/attach
 ```
+
+`--spawn`은 명령 출력 대신 세션을 직접 엽니다 — TUI `Enter`와 같은 로직
+(라이브 세션은 기존 창 포커스, 백그라운드 잡은 `claude attach`, 그 외에는
+새 터미널 창에서 `claude --resume`). cst.app이 사용.
 
 ### `cst done <id>` / `cst undone <id>` — done 플래그
 
@@ -231,6 +243,19 @@ JSONL의 모든 이벤트의 `cwd` 필드를 재작성하고 파일을 새 프�
 | `--force` | 새 cwd가 디스크에 존재하지 않아도 강행 |
 | `--dry-run` | 재작성 계획 표시 (변경 없음) |
 | `-y` / `--yes` | 확인 건너뛰기 |
+
+### `cst rm <id>` — 세션 트랜스크립트 하나 삭제
+
+```bash
+cst rm 960faaa8 --dry-run    # 무엇이 삭제될지 표시
+cst rm 960faaa8 -y           # 확인 없이 삭제
+```
+
+트랜스크립트 `.jsonl`을 unlink하고 캐시/done 플래그 흔적을 정리 — TUI `Del`
+키와 같은 동작의 스크립트 버전. **트랜스크립트만 삭제됩니다: 라이브
+백그라운드 프로세스는 계속 실행됨** (먼저 `cst stop <id>`로 중지).
+비대화식 호출은 `-y` 필수(tty 없이 입력 대기하는 대신 거부); `--force`도
+확인을 건너뜀.
 
 ### `cst stats [--top N]` — 전체 요약
 
@@ -339,7 +364,7 @@ fzf 스타일 필터, 상태 글리프, 모달, 액션 키를 갖춘 curses 선�
 ### 헤더
 
 ```
- claude-session-tracker v1.6.0  12/563  ●3 !1 ◦0 ○558 ✓1  ⟳10s  sort:time▼  [✓ hidden]  [📂 ~/project]   ? help  Enter open  / filter  s sort  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit
+ claude-session-tracker v1.10.0  12/563  ●3 !1 ◦0 ○558 ✓1  ⟳10s  sort:time▼  [✓ hidden]  [📂 ~/project]   ? help  Enter open  o folder  / filter  s sort  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit
 ```
 
 - `12/563` — 보이는 행 / 전체 세션 수
@@ -462,6 +487,11 @@ TUI에서 `Enter`를 누르면 **현재 쓰는 터미널 앱과 동일한 앱의
 | `~/.claude/jobs/pins.json` | agent-view 핀 집합 (읽기 전용; cst는 쓰지 않음) | 건드리지 말 것 |
 | `~/.cache/claude-session-tracker/index.json` | mtime/size 무효화 세션 메타 캐시 | 예 (다음 실행 시 재생성) |
 | `~/.cache/claude-session-tracker/state.json` | done 플래그 + 훅 상태 오버레이 + 사용자 설정(자동 재스캔·테마·정렬) | 예 (모든 `✓` 마크·오버레이·설정 초기화) |
+
+위 표의 `~/.claude/...` 경로는 모두 **`$CLAUDE_CONFIG_DIR`**를 따릅니다
+(Claude Code 자체와 같은 규약): 설정돼 있으면 `projects/`, `sessions/`,
+`jobs/`, `daemon/`, `settings.json`, 기본 백업 경로를 `~/.claude` 대신 그
+루트에서 읽습니다.
 
 ### `state.json` 스키마
 

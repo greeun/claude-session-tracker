@@ -32,7 +32,7 @@ ln -sf ~/.claude/skills/claude-session-tracker/tracker.py ~/.local/bin/cst
 
 # 3. Verify
 cst --version
-# claude-session-tracker v1.6.0
+# claude-session-tracker v1.10.0
 
 # 4. (optional) wire the 0-token done!/undone! prompt hook + status precision layer
 cst install-hook
@@ -113,11 +113,11 @@ Status is **computed fresh on every command invocation** — there is no backgro
 ```bash
 cst list [--limit 30] [--cwd PREFIX] [--days N]
          [--status working|waiting|idle|ended|done|active]
-         [--sort time|status|msgs|project] [--reverse]
+         [--sort time|status|msgs|project] [--reverse] [--json]
 ```
 
 ```
-claude-session-tracker v1.6.0
+claude-session-tracker v1.10.0
   #  ST  LAST ACTIVITY     SESSION   MSGS  MESSAGE                   PROJECT
   1  ●   2026-05-24 01:17  960faaa8   261  claude-sessions 는…       ~/.claude/skills
   2  !   2026-05-24 01:16  06d116f7    34  proceed? (y/N)            ~/project/url-shortener
@@ -133,6 +133,8 @@ claude-session-tracker v1.6.0
   ties always break by recency. An explicit `--sort` is a one-off; with no
   `--sort` the saved TUI sort preference is used. Sort runs **before** `--limit`,
   so the slice is the top-N of the chosen order.
+- **`--json`** emits the list as machine-readable JSON instead of the table
+  (the contract consumed by the cst.app macOS companion).
 
 ### `cst pick` / `--tui` — interactive TUI
 
@@ -156,9 +158,14 @@ cst search "nextjs|remix" --limit 10 -i --cwd ~/project
 
 ```bash
 cst show 960faaa8 --max-chars 500 --with-subagents
+cst show 960faaa8 --head-chars 4000        # fast head preview of a huge session
 ```
 
 Header shows **Status**, cwd, first/last timestamps, message count, subagent count.
+
+- `--max-chars N` truncates each message; `--head-chars N` caps the **total**
+  transcript output and stops reading the file early (0 = unlimited) — the
+  fast-preview path used by cst.app on multi-hundred-MB transcripts.
 
 ### `cst export <id>` — write transcript to file
 
@@ -176,7 +183,13 @@ Formats: `md` (default, with role headings) · `txt` (plain). The `--out` argume
 ```bash
 cst resume 960faaa8 --print-only | bash
 cst --skip-perm resume 960faaa8 --print-only | bash   # add the skip-perm flag
+cst resume 960faaa8 --spawn                # actually open/attach in a new terminal
 ```
+
+`--spawn` opens the session itself instead of printing the command — same logic
+as the TUI `Enter` key (focus a live session's window, `claude attach` for a
+background job, else spawn `claude --resume` in a new terminal window). Used by
+cst.app.
 
 ### `cst done <id>` / `cst undone <id>` — done flag
 
@@ -232,6 +245,19 @@ Rewrites `cwd` on every event in the JSONL and moves the file into the new proje
 | `--force` | Proceed even if the new cwd doesn't exist on disk |
 | `--dry-run` | Show the rewrite plan; no changes |
 | `-y` / `--yes` | Skip confirmation |
+
+### `cst rm <id>` — unlink one session transcript
+
+```bash
+cst rm 960faaa8 --dry-run    # show what would be removed
+cst rm 960faaa8 -y           # remove without prompting
+```
+
+Unlinks the transcript `.jsonl` and purges its cache/done-flag traces — the
+same operation as the TUI `Del` key, scriptable. **Only the transcript is
+removed: a live background process keeps running** (stop it with `cst stop
+<id>` first). Non-interactive callers must pass `-y` (it refuses rather than
+hang waiting for a tty); `--force` also skips confirmation.
 
 ### `cst stats [--top N]` — overview
 
@@ -343,7 +369,7 @@ A cursor appears on the prompt line. Live filtering happens as you type.
 ### Header bar
 
 ```
- claude-session-tracker v1.6.0  12/563  ●3 !1 ◦0 ○558 ✓1  ⟳10s  sort:time▼  [✓ hidden]  [📂 ~/project]   ? help  Enter open  / filter  s sort  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit
+ claude-session-tracker v1.10.0  12/563  ●3 !1 ◦0 ○558 ✓1  ⟳10s  sort:time▼  [✓ hidden]  [📂 ~/project]   ? help  Enter open  o folder  / filter  s sort  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit
 ```
 
 - `12/563` — visible rows / total sessions
@@ -466,6 +492,11 @@ Equivalent manual entry (one event shown):
 | `~/.claude/jobs/pins.json` | Agent-view pin set (read-only; cst never writes) | Leave alone |
 | `~/.cache/claude-session-tracker/index.json` | mtime/size-invalidated session-metadata cache | Yes — regenerates on next run |
 | `~/.cache/claude-session-tracker/state.json` | done flags + hook status overlay + user prefs (auto-rescan, theme, sort) | Yes — clears all `✓` marks, overlay, and prefs |
+
+All `~/.claude/...` paths above honor **`$CLAUDE_CONFIG_DIR`** (same convention
+as Claude Code itself): when set, cst reads `projects/`, `sessions/`, `jobs/`,
+`daemon/`, `settings.json`, and default backups from that root instead of
+`~/.claude`.
 
 ### `state.json` schema
 

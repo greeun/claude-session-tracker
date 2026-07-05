@@ -1,7 +1,7 @@
 ---
 name: claude-session-tracker
 description: Track live/waiting/ended/done status of Claude Code sessions. List, search, resume, export, backup, restore sessions via `cst` CLI or TUI. Use when user says "list sessions", "세션 상태", "cst", "session tracker", or wants to resume/search/export/backup sessions.
-version: 1.0.0
+version: 1.10.0
 ---
 
 # claude-session-tracker
@@ -21,8 +21,9 @@ process is ended/job-state; a live one resolves overlay → registry → `●`):
   in TUI, `cst done <id>`, or the `done!` prompt hook). Persists in
   `~/.cache/claude-session-tracker/state.json`.
 
-Main script: `tracker.py` (stdlib only, Python 3.10+, v1.9.1). Installed as
-`~/.local/bin/cst`.
+Main script: `tracker.py` (stdlib only, Python 3.10+, v1.10.0). Installed as
+`~/.local/bin/cst`. All `~/.claude/...` data paths honor `$CLAUDE_CONFIG_DIR`
+(same convention as Claude Code itself).
 
 ## When to Use
 
@@ -51,10 +52,13 @@ cst list --status working # working|waiting|idle|ended|done (active = alias for 
 cst list --cwd ~/p --days 7 --limit 50
 cst list --sort msgs      # sort column: time(default)|status|msgs|project; --reverse flips
                           #   no --sort uses the saved TUI sort pref
+cst list --json           # machine-readable JSON instead of the table (cst.app contract)
 cst search "<query>"      # full-text transcript search (OR via `|`, -i = ignore case)
-cst show <id>             # transcript with Status header (--max-chars, --with-subagents)
+cst show <id>             # transcript with Status header (--max-chars, --with-subagents;
+                          #   --head-chars N caps TOTAL output & stops reading early — fast preview)
 cst export <id>           # write transcript to <id>.md (--format md|txt, --out PATH|DIR)
 cst resume <id> --print-only | bash
+cst resume <id> --spawn   # actually open/attach in a new terminal (TUI Enter logic; cst.app)
 cst done <id> / cst undone <id>
 cst live [--all]          # live Claude Code processes (--all shows stale entries)
 cst stats [--top N]       # counts + top projects

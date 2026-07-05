@@ -12,7 +12,7 @@ Data sources:
 """
 from __future__ import annotations
 
-__version__ = "1.9.1"
+__version__ = "1.10.0"
 
 import argparse
 import json
