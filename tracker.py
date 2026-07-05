@@ -21,20 +21,35 @@ import re
 import sys
 import tarfile
 import unicodedata
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 
-PROJECTS_DIR = Path.home() / ".claude" / "projects"
-SESSIONS_REGISTRY_DIR = Path.home() / ".claude" / "sessions"
-# Agent-view background sessions: ~/.claude/jobs/<short>/state.json.
+try:
+    import fcntl  # POSIX advisory file locking (macOS/Linux); absent on Windows
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None  # type: ignore
+
+def _claude_config_dir() -> Path:
+    """Claude Code의 설정/데이터 루트. 환경변수 CLAUDE_CONFIG_DIR가 설정돼 있으면
+    그 경로를, 없으면 기존 기본값 ~/.claude를 쓴다(Claude Code 자체 규약과 동일).
+    projects/sessions/jobs/daemon/settings.json/backups가 모두 이 루트 밑에 있다."""
+    env = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(env).expanduser() if env else Path.home() / ".claude"
+
+
+CONFIG_DIR = _claude_config_dir()
+PROJECTS_DIR = CONFIG_DIR / "projects"
+SESSIONS_REGISTRY_DIR = CONFIG_DIR / "sessions"
+# Agent-view background sessions: <config-dir>/jobs/<short>/state.json.
 # Hosted by the supervisor, not the pid registry above, so once an idle bg
 # process is stopped they leave no registry entry — the jobs scanner reads
 # their persisted agent-view `state` instead (see scan_jobs / classify_status).
-JOBS_DIR = Path.home() / ".claude" / "jobs"
+JOBS_DIR = CONFIG_DIR / "jobs"
 # Supervisor (daemon) state: roster.json lists the running background workers.
-DAEMON_DIR = Path.home() / ".claude" / "daemon"
+DAEMON_DIR = CONFIG_DIR / "daemon"
 HOME = str(Path.home())
 CACHE_DIR = Path.home() / ".cache" / "claude-session-tracker"
 CACHE_PATH = CACHE_DIR / "index.json"
@@ -127,22 +142,6 @@ def _applescript_escape(s: str) -> str:
 # terminal-notifier/PyObjC violate the zero-dependency constraint. The
 # waiting-edge signal is instead carried by curses.beep() + a sticky toast
 # in the TUI loop (see the `if _new:` block).
-
-
-def _activate_macos_app(app_name: str) -> None:
-    """Bring a macOS app to the foreground via AppleScript. Fire-and-forget;
-    failures are silent."""
-    import subprocess
-    try:
-        subprocess.Popen(
-            ["osascript", "-e", f'tell application "{app_name}" to activate'],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True,
-            close_fds=True,
-        )
-    except OSError:
-        pass
 
 
 def session_open_invocation(claude_bin: str, session_id: str,
@@ -1245,12 +1244,38 @@ def load_state() -> dict:
 def save_state(state: dict) -> None:
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = STATE_PATH.with_suffix(".tmp")
+        tmp = STATE_PATH.with_suffix(f".{os.getpid()}.tmp")
         with tmp.open("w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
         tmp.replace(STATE_PATH)
     except OSError:
         pass
+
+
+@contextmanager
+def _state_lock():
+    """Serialize the read-modify-write of state.json across concurrently
+    running hook processes (many sessions can fire status hooks at once).
+    Advisory and best-effort: if fcntl is unavailable or the lock can't be
+    acquired, proceed unlocked rather than block a status update."""
+    f = None
+    if fcntl is not None:
+        try:
+            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            f = open(STATE_PATH.with_suffix(".lock"), "w")
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        except OSError:
+            if f is not None:
+                f.close()
+            f = None
+    try:
+        yield
+    finally:
+        if f is not None:
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            finally:
+                f.close()
 
 
 def done_ids() -> set[str]:
@@ -1260,25 +1285,27 @@ def done_ids() -> set[str]:
 
 def mark_done(session_id: str) -> bool:
     """Toggle done state; return True if now marked done, False if unmarked."""
-    state = load_state()
-    done = state.setdefault("done", {})
-    if session_id in done:
-        del done[session_id]
+    with _state_lock():
+        state = load_state()
+        done = state.setdefault("done", {})
+        if session_id in done:
+            del done[session_id]
+            save_state(state)
+            return False
+        done[session_id] = datetime.now(timezone.utc).isoformat()
         save_state(state)
-        return False
-    done[session_id] = datetime.now(timezone.utc).isoformat()
-    save_state(state)
-    return True
+        return True
 
 
 def set_done(session_id: str, value: bool) -> None:
-    state = load_state()
-    done = state.setdefault("done", {})
-    if value:
-        done[session_id] = datetime.now(timezone.utc).isoformat()
-    else:
-        done.pop(session_id, None)
-    save_state(state)
+    with _state_lock():
+        state = load_state()
+        done = state.setdefault("done", {})
+        if value:
+            done[session_id] = datetime.now(timezone.utc).isoformat()
+        else:
+            done.pop(session_id, None)
+        save_state(state)
 
 
 # Refusing done on an actively-working (●) session: the task is still running,
@@ -1309,20 +1336,21 @@ def status_overlay() -> dict:
 
 def set_status(session_id: str, state: str | None, event: str) -> None:
     """Record (or clear, when state is None) a session's hook status."""
-    st = load_state()
-    bucket = st.get("status")
-    if not isinstance(bucket, dict):
-        bucket = {}
-        st["status"] = bucket
-    if state is None:
-        bucket.pop(session_id, None)
-    else:
-        bucket[session_id] = {
-            "state": state,
-            "event": event,
-            "ts": datetime.now(timezone.utc).isoformat(),
-        }
-    save_state(st)
+    with _state_lock():
+        st = load_state()
+        bucket = st.get("status")
+        if not isinstance(bucket, dict):
+            bucket = {}
+            st["status"] = bucket
+        if state is None:
+            bucket.pop(session_id, None)
+        else:
+            bucket[session_id] = {
+                "state": state,
+                "event": event,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+        save_state(st)
 
 
 def resolve_status(session_id: str, live: set[str], done: set[str],
@@ -1766,6 +1794,50 @@ def load_session_meta(path: Path, fast: bool = False) -> SessionMeta | None:
     return meta
 
 
+def last_message_ts(path: Path) -> "datetime | None":
+    """Timestamp of the last user/assistant message, read from the file *tail*
+    so it stays O(tail) on a huge transcript (the fast index cache stores an
+    mtime-based `last_ts`, which is wrong for restored/relocated sessions; this
+    recovers the precise value for `cst show` without a full-file parse).
+
+    Scans growing tail windows (64KB → 1MB → whole file) from the end until a
+    parseable user/assistant event with a timestamp is found. Returns None when
+    there is none (empty/message-less file)."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size == 0:
+        return None
+    for window in (65536, 1 << 20, size):
+        chunk = min(window, size)
+        try:
+            with path.open("rb") as f:
+                f.seek(size - chunk)
+                data = f.read(chunk)
+        except OSError:
+            return None
+        lines = data.decode("utf-8", errors="replace").split("\n")
+        if chunk < size:
+            lines = lines[1:]           # drop the partial leading line
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                evt = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if evt.get("type") not in ("user", "assistant"):
+                continue
+            ts = parse_ts(evt.get("timestamp"))
+            if ts:
+                return ts
+        if chunk >= size:
+            break
+    return None
+
+
 def all_session_files(include_subagents: bool = False) -> list[Path]:
     if not PROJECTS_DIR.exists():
         return []
@@ -1800,7 +1872,7 @@ def _save_cache(cache: dict) -> None:
     try:
         CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         cache["schema"] = _CACHE_SCHEMA
-        tmp = CACHE_PATH.with_suffix(".tmp")
+        tmp = CACHE_PATH.with_suffix(f".{os.getpid()}.tmp")
         with tmp.open("w", encoding="utf-8") as f:
             json.dump(cache, f)
         tmp.replace(CACHE_PATH)
@@ -1835,6 +1907,36 @@ def _meta_from_cache(d: dict, path: Path) -> SessionMeta:
     )
 
 
+def _meta_for_path(
+    path: Path, entries: dict, fast: bool = True
+) -> "tuple[SessionMeta | None, bool]":
+    """Resolve a SessionMeta for `path` via the mtime/size index cache.
+
+    Returns `(meta, parsed_fresh)`. A fresh index entry (matching mtime+size)
+    is served from `entries` without re-reading the file; otherwise the file is
+    parsed and `entries` is updated in place (caller persists the cache). This
+    is the shared cache gate for both `load_all_sessions` (bulk) and
+    `find_session` (single lookup), so a warm cache — e.g. cst.app polling
+    `cst list --json` every few seconds — makes a subsequent `cst show` skip
+    the full transcript parse."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None, False
+    key = str(path)
+    cached = entries.get(key)
+    if cached and cached.get("mtime") == st.st_mtime and cached.get("size") == st.st_size:
+        return _meta_from_cache(cached, path), False
+    meta = load_session_meta(path, fast=fast)
+    if meta:
+        entries[key] = {
+            **_meta_to_cache(meta),
+            "mtime": st.st_mtime,
+            "size": st.st_size,
+        }
+    return meta, True
+
+
 def load_all_sessions(
     cwd_filter: str | None = None,
     days: int | None = None,
@@ -1852,27 +1954,12 @@ def load_all_sessions(
     total = len(files)
     show = progress and sys.stderr.isatty()
     for i, p in enumerate(files, 1):
-        try:
-            st = p.stat()
-        except OSError:
-            continue
-        key = str(p)
-        cached = entries.get(key)
-        meta: SessionMeta | None
-        if cached and cached.get("mtime") == st.st_mtime and cached.get("size") == st.st_size:
-            meta = _meta_from_cache(cached, p)
-        else:
-            if show:
-                sys.stderr.write(f"\rIndexing sessions… {i}/{total}")
-                sys.stderr.flush()
-            meta = load_session_meta(p, fast=fast)
-            if meta:
-                entries[key] = {
-                    **_meta_to_cache(meta),
-                    "mtime": st.st_mtime,
-                    "size": st.st_size,
-                }
-                dirty = True
+        if show and str(p) not in entries:
+            sys.stderr.write(f"\rIndexing sessions… {i}/{total}")
+            sys.stderr.flush()
+        meta, fresh = _meta_for_path(p, entries, fast=fast)
+        if fresh:
+            dirty = True
         if not meta:
             continue
         if cwd_filter and not meta.cwd.startswith(cwd_filter):
@@ -2127,15 +2214,29 @@ def iter_messages(path: Path) -> "Iterator[tuple[str, str, str]]":
         yield etype, ts, text
 
 
-def _print_transcript(path: Path, max_chars: int, indent: str = "") -> int:
+def _print_transcript(path: Path, max_chars: int, indent: str = "",
+                      head_chars: int = 0) -> int:
+    """Render user/assistant messages. `max_chars` truncates each message;
+    `head_chars` (0 = unlimited) caps the *total* message text emitted and
+    stops iterating — so a huge transcript is never fully read when only a
+    head preview is wanted (the cst.app fast-preview path)."""
     count = 0
+    emitted = 0
     for etype, ts, text in iter_messages(path):
+        if head_chars and emitted >= head_chars:
+            print(f"\n{indent}… (미리보기 상한 {head_chars}자 도달; 이후 메시지 생략)")
+            break
         if len(text) > max_chars:
             text = text[:max_chars] + f"… (+{len(text) - max_chars} chars)"
+        if head_chars:
+            remaining = head_chars - emitted
+            if len(text) > remaining:
+                text = text[:remaining] + "…"
         prefix = "🧑" if etype == "user" else "🤖"
         print(f"\n{indent}{prefix} [{ts}]")
         for line in text.splitlines() or [""]:
             print(f"{indent}{line}")
+        emitted += len(text)
         count += 1
     return count
 
@@ -2151,15 +2252,20 @@ def cmd_show(args: argparse.Namespace) -> int:
     print(f"Cwd:      {target.cwd}")
     if target.git_branch:
         print(f"Branch:   {target.git_branch}")
+    # The cache-first lookup yields an mtime-based last_ts (fast); recover the
+    # precise last-message timestamp from the file tail so `show` stays accurate
+    # for restored/relocated sessions without giving up the fast preview.
+    precise_last = last_message_ts(target.path)
     print(f"Started:  {fmt_ts(target.first_ts)}")
-    print(f"Last:     {fmt_ts(target.last_ts)}")
+    print(f"Last:     {fmt_ts(precise_last or target.last_ts)}")
     print(f"Messages: {target.msg_count}")
     subs = list_subagents(target.path)
     if subs:
         print(f"Subagents: {len(subs)}"
               + ("  (use --with-subagents to expand)" if not args.with_subagents else ""))
     print("-" * 80)
-    _print_transcript(target.path, args.max_chars)
+    head_chars = getattr(args, "head_chars", 0) or 0
+    _print_transcript(target.path, args.max_chars, head_chars=head_chars)
     if args.with_subagents and subs:
         print("\n" + "=" * 80)
         print(f"  SUBAGENTS ({len(subs)})")
@@ -2171,7 +2277,8 @@ def cmd_show(args: argparse.Namespace) -> int:
             print(f"│  type: {agent_type}")
             print(f"│  desc: {desc}")
             print("└" + "─" * 79)
-            _print_transcript(sub_path, args.max_chars, indent="  ")
+            _print_transcript(sub_path, args.max_chars, indent="  ",
+                              head_chars=head_chars)
     return 0
 
 
@@ -2315,8 +2422,9 @@ def cmd_resume(args: argparse.Namespace) -> int:
         # background session — attach to the live process, not a transcript fork
         cmd = f"claude attach {short}"
     else:
+        import shlex
         skip_flag = " --dangerously-skip-permissions" if getattr(args, "skip_perm", False) else ""
-        cmd = f'cd "{cwd}" && claude --resume {target.session_id}{skip_flag}'
+        cmd = f'cd {shlex.quote(cwd)} && claude --resume {target.session_id}{skip_flag}'
     if args.print_only:
         print(cmd)
         return 0
@@ -2538,7 +2646,7 @@ def cmd_jobs(args: argparse.Namespace) -> int:
 
 HOOK_EVENT = "UserPromptSubmit"
 HOOK_CMD = "cst prompt-hook"
-SETTINGS_PATH_DEFAULT = Path.home() / ".claude" / "settings.json"
+SETTINGS_PATH_DEFAULT = CONFIG_DIR / "settings.json"
 PROMPT_HOOK_RE = re.compile(
     r"^(?:(done|undone)!|/(done|undone))(?:\s+(\S+))?\s*$")
 
@@ -2696,11 +2804,17 @@ def _strip_our_entries(hook_list: list) -> tuple[list, int]:
 
 def cmd_install_hook(args: argparse.Namespace) -> int:
     path = Path(os.path.expanduser(args.settings))
-    before, err = _load_settings(path)
-    if before is None:
-        print(err, file=sys.stderr)
-        return 1
-    work, _ = _load_settings(path)            # independent copy to mutate
+    if not path.exists():
+        # No settings file yet — start from an empty structure and create it so
+        # a first-time install doesn't fail on a missing ~/.claude/settings.json.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        before, work = {}, {}
+    else:
+        before, err = _load_settings(path)
+        if before is None:
+            print(err, file=sys.stderr)
+            return 1
+        work, _ = _load_settings(path)            # independent copy to mutate
     hooks = work.setdefault("hooks", {})
     specs = _our_hook_specs()
     other_total = 0
@@ -5203,7 +5317,7 @@ def cmd_backup(args: argparse.Namespace) -> int:
         out_path = Path(args.out).expanduser()
     else:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        out_path = Path.home() / ".claude" / "backups" / f"sessions-{stamp}.tar.gz"
+        out_path = CONFIG_DIR / "backups" / f"sessions-{stamp}.tar.gz"
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     if not args.yes:
@@ -5345,11 +5459,22 @@ def cmd_restore(args: argparse.Namespace) -> int:
         print(f"Files:   {len(members)} ({_human(total_bytes)})")
 
         dest_root = PROJECTS_DIR
+        dest_root_real = os.path.realpath(dest_root)
         conflicts: list[tuple[tarfile.TarInfo, Path]] = []
         plans: list[tuple[tarfile.TarInfo, Path, str]] = []
+        unsafe = 0
         for m in members:
             rel = m.name[len("projects/"):]
             dest = dest_root / rel
+            # Guard against tar path traversal: a crafted member name like
+            # projects/../../../x.jsonl would otherwise land outside PROJECTS_DIR.
+            dest_real = os.path.realpath(dest)
+            if dest_real != dest_root_real and \
+                    not dest_real.startswith(dest_root_real + os.sep):
+                print(f"  Skipping unsafe path outside "
+                      f"{shorten_path(str(dest_root))}: {m.name}", file=sys.stderr)
+                unsafe += 1
+                continue
             action = "write"
             if dest.exists():
                 if args.on_conflict == "skip":
@@ -5423,8 +5548,9 @@ def cmd_restore(args: argparse.Namespace) -> int:
 
         print(f"✓ Restored {written} file(s)" +
               (f", skipped {skipped}" if skipped else "") +
+              (f", {unsafe} unsafe" if unsafe else "") +
               (f", {errors} error(s)" if errors else ""))
-        return 1 if errors else 0
+        return 1 if (errors or unsafe) else 0
     finally:
         tar.close()
 
@@ -5470,7 +5596,20 @@ def find_session(prefix: str) -> SessionMeta | None:
         for m in matches[:10]:
             print(f"  {m.stem}", file=sys.stderr)
         return None
-    return load_session_meta(matches[0])
+    match = matches[0]
+    # Subagent transcripts aren't in the session index (load_all_sessions
+    # excludes them and would prune any entry we wrote → churn), so parse them
+    # directly instead of through the persistent cache.
+    if "subagents" in match.parts:
+        return load_session_meta(match)
+    # Cache-first: a warm index (populated by the last `cst list`) lets a
+    # single `cst show`/`resume`/… lookup skip the full transcript parse.
+    cache = _load_cache()
+    entries = cache.setdefault("entries", {})
+    meta, fresh = _meta_for_path(match, entries)
+    if fresh and meta:
+        _save_cache(cache)
+    return meta
 
 
 def require_session(prefix: str) -> "SessionMeta | None":
@@ -5552,6 +5691,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_show = sub.add_parser("show", help="print a session transcript")
     p_show.add_argument("session_id")
     p_show.add_argument("--max-chars", type=int, default=500)
+    p_show.add_argument("--head-chars", type=int, default=0,
+                        help="cap TOTAL transcript output (0 = unlimited); "
+                             "stops reading the file early for fast previews")
     p_show.add_argument("--with-subagents", action="store_true")
     p_show.set_defaults(func=cmd_show)
 

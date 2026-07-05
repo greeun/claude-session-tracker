@@ -1,6 +1,7 @@
 ---
 name: claude-session-tracker
 description: Track live/waiting/ended/done status of Claude Code sessions. List, search, resume, export, backup, restore sessions via `cst` CLI or TUI. Use when user says "list sessions", "세션 상태", "cst", "session tracker", or wants to resume/search/export/backup sessions.
+version: 1.0.0
 ---
 
 # claude-session-tracker
@@ -20,7 +21,7 @@ process is ended/job-state; a live one resolves overlay → registry → `●`):
   in TUI, `cst done <id>`, or the `done!` prompt hook). Persists in
   `~/.cache/claude-session-tracker/state.json`.
 
-Main script: `tracker.py` (stdlib only, Python 3.10+, v1.6.0). Installed as
+Main script: `tracker.py` (stdlib only, Python 3.10+, v1.9.1). Installed as
 `~/.local/bin/cst`.
 
 ## When to Use
@@ -63,6 +64,8 @@ cst backup [--days N|--before YYYY-MM-DD] [--cwd PFX] [--out PATH]
 cst restore <archive.tar.gz> [--cwd PFX]
             [--on-conflict skip|overwrite|rename] [--dry-run] [-y]
 cst relocate <id> <new-cwd> [--keep-original] [--force] [--dry-run] [-y]
+cst rm <id> [--dry-run] [-y] [--force]   # unlink one session transcript
+                          #   (only removes the transcript; a live bg process keeps running)
 
 # Background (agent-view) sessions — claude --bg / `claude agents`:
 cst jobs                  # ALL agent-view jobs incl exec/transcript-less ones,
