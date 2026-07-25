@@ -50,7 +50,7 @@ cst uninstall-hook
 rm ~/.local/bin/cst
 
 # 3. (선택) 캐시 + done 플래그 오버레이 제거
-rm -rf ~/.cache/claude-session-tracker
+rm -rf ~/.cst
 
 # 4. (선택) 클론한 저장소 제거
 rm -rf ~/.claude/skills/claude-session-tracker
@@ -88,7 +88,7 @@ cst --theme light --tui       # TUI 색 테마 지정(auto|dark|light; `t`/`T`�
 | **!** | waiting (대기중) | Claude가 당신의 입력 또는 권한 결정을 기다리는 중 — 시간이 새는 곳. Claude Code 레지스트리에서 기본값으로 감지 (`status: "waiting"`); `cst install-hook`는 정밀 오버레이를 추가. |
 | **◦** | idle (유휴) | 턴이 끝났고 프로세스는 아직 살아 있음. |
 | **○** | ended (종료됨) | 프로세스가 없음 (정상 종료 또는 등록된 적 없음). 트랜스크립트는 그대로 읽을 수 있음. |
-| **✓** | done (완료) | 사용자가 명시적으로 끝났다고 표시. TUI의 `D`/`d`/`Ctrl-D`, `cst done <id>`, 또는 `done!` 프롬프트 훅. `~/.cache/claude-session-tracker/state.json`에 영구 저장. |
+| **✓** | done (완료) | 사용자가 명시적으로 끝났다고 표시. TUI의 `D`/`d`/`Ctrl-D`, `cst done <id>`, 또는 `done!` 프롬프트 훅. `~/.cst/state.json`에 영구 저장. |
 
 상태는 **매 명령 실행마다 새로 계산**됩니다 — 백그라운드 데몬 없음. TUI는 기본 10초 간격으로 자동 재스캔합니다 (`a` 키로 변경/끔).
 
@@ -216,8 +216,8 @@ cst restore ~/.claude/backups/sessions-20260524.tar.gz --on-conflict rename -y
 
 | 플래그 | 의미 |
 |---|---|
-| `--days N` | 최종 활동이 N일 이전인 세션을 아카이브 |
-| `--before YYYY-MM-DD` | 특정 날짜 이전 세션을 아카이브 (`--days` 우선) |
+| `--days N` | 최종 활동이 N일 이전인 세션을 아카이브 (기본: `--days`·`--before` 모두 생략 시 90일) |
+| `--before YYYY-MM-DD` | 특정 날짜 이전 세션을 아카이브 (`--days`보다 우선) |
 | `--cwd PREFIX` | 해당 cwd 아래 세션으로 제한 |
 | `--out PATH` | 아카이브 경로 (기본: `~/.claude/backups/sessions-<timestamp>.tar.gz`) |
 | `--delete` | 성공적으로 아카이브된 원본 제거 |
@@ -385,7 +385,7 @@ fzf 스타일 필터, 상태 글리프, 모달, 액션 키를 갖춘 curses 선�
 ### 모달 다이얼로그
 
 - **도움말 (`?`)** — 스크롤 가능한 치트시트
-- **미리보기 (`v`)** — 역할별 색상의 트랜스크립트, 메시지당 최대 1200자; `d`/`Ctrl-D`로 done 토글, `Del`로 그 자리에서 삭제(확인)
+- **미리보기 (`v`)** — 역할별 색상의 트랜스크립트, 메시지 전문 표시(줄바꿈 처리); `d`/`Ctrl-D`로 done 토글, `Del`로 그 자리에서 삭제(확인)
 - **자동 재스캔 간격 (`a`)** — Off / 5 / 10 / 30 / 60 / 120초. `1`–`6`로 직접 점프, Enter 적용; `state.json`에 저장
 - **삭제 확인 (`Del`)** — `y` 확정 · `n/Esc/Enter` 취소 · 최대 5개 미리 표시
 - **권한 건너뛰기 확인** — `--skip-perm` 없이 재개할 때 Enter에서 표시. `y/Y/Enter` 플래그 적용 · `n/N` 미적용 · `Esc` 취소
@@ -485,13 +485,18 @@ TUI에서 `Enter`를 누르면 **현재 쓰는 터미널 앱과 동일한 앱의
 | `~/.claude/settings.json` | Claude Code 설정 (cst가 훅 항목을 기록) | 아니오 — `cst uninstall-hook`로 cst 항목만 제거 |
 | `~/.claude/jobs/<short>/state.json` | agent-view 백그라운드 잡 상태 (읽기 전용) | 건드리지 말 것 |
 | `~/.claude/jobs/pins.json` | agent-view 핀 집합 (읽기 전용; cst는 쓰지 않음) | 건드리지 말 것 |
-| `~/.cache/claude-session-tracker/index.json` | mtime/size 무효화 세션 메타 캐시 | 예 (다음 실행 시 재생성) |
-| `~/.cache/claude-session-tracker/state.json` | done 플래그 + 훅 상태 오버레이 + 사용자 설정(자동 재스캔·테마·정렬) | 예 (모든 `✓` 마크·오버레이·설정 초기화) |
+| `~/.cst/index.json` | mtime/size 무효화 세션 메타 캐시 | 예 (다음 실행 시 재생성) |
+| `~/.cst/state.json` | done 플래그 + 훅 상태 오버레이 + 사용자 설정(자동 재스캔·테마·정렬) | 예 (모든 `✓` 마크·오버레이·설정 초기화) |
 
 위 표의 `~/.claude/...` 경로는 모두 **`$CLAUDE_CONFIG_DIR`**를 따릅니다
 (Claude Code 자체와 같은 규약): 설정돼 있으면 `projects/`, `sessions/`,
 `jobs/`, `daemon/`, `settings.json`, 기본 백업 경로를 `~/.claude` 대신 그
 루트에서 읽습니다.
+
+cst 자체 파일(`index.json`, `state.json`)은 **`~/.cst`** 아래에 저장되며
+**`$CST_HOME`** 환경변수로 재지정할 수 있습니다. v1.11+ 첫 실행 시 이전
+위치 `~/.cache/claude-session-tracker/`의 파일을 `~/.cst`로 자동 이전합니다
+(done 플래그·설정은 업그레이드 후에도 유지).
 
 ### `state.json` 스키마
 
@@ -642,7 +647,7 @@ A: 네. 직전 틱에 없었는데 이번 틱에 **새로** `!` 대기로 들어
 A: Linux: 동작 (순수 stdlib). Windows: curses TUI는 `windows-curses` 패키지 필요, CLI 명령은 그대로 동작.
 
 **Q: cst를 완전히 제거하려면?**
-A: 위 [제거](#제거) 섹션 참조 — `cst uninstall-hook` → 심볼릭 링크 제거 → 선택적으로 `~/.cache/claude-session-tracker` 삭제.
+A: 위 [제거](#제거) 섹션 참조 — `cst uninstall-hook` → 심볼릭 링크 제거 → 선택적으로 `~/.cst` 삭제.
 
 ---
 

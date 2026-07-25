@@ -1,7 +1,7 @@
 ---
 name: claude-session-tracker
 description: Track live/waiting/ended/done status of Claude Code sessions. List, search, resume, export, backup, restore sessions via `cst` CLI or TUI. Use when user says "list sessions", "세션 상태", "cst", "session tracker", or wants to resume/search/export/backup sessions.
-version: 1.10.0
+version: 1.11.0
 ---
 
 # claude-session-tracker
@@ -19,11 +19,13 @@ process is ended/job-state; a live one resolves overlay → registry → `●`):
 - **○** ended — process is gone (or was never registered).
 - **✓** done — user explicitly marked the session finished (`D`/`d`/`Ctrl-D`
   in TUI, `cst done <id>`, or the `done!` prompt hook). Persists in
-  `~/.cache/claude-session-tracker/state.json`.
+  `~/.cst/state.json`.
 
-Main script: `tracker.py` (stdlib only, Python 3.10+, v1.10.0). Installed as
+Main script: `tracker.py` (stdlib only, Python 3.10+, v1.11.0). Installed as
 `~/.local/bin/cst`. All `~/.claude/...` data paths honor `$CLAUDE_CONFIG_DIR`
-(same convention as Claude Code itself).
+(same convention as Claude Code itself); cst's own files live under `~/.cst`
+(override with `$CST_HOME`), auto-migrated once from the pre-1.11 location
+`~/.cache/claude-session-tracker`.
 
 ## When to Use
 
@@ -64,7 +66,7 @@ cst live [--all]          # live Claude Code processes (--all shows stale entrie
 cst stats [--top N]       # counts + top projects
 cst subagents <parent-id> # Task-tool subagents
 cst backup [--days N|--before YYYY-MM-DD] [--cwd PFX] [--out PATH]
-           [--delete] [--force] [--dry-run] [-y]
+           [--delete] [--force] [--dry-run] [-y]   # default: --days 90
 cst restore <archive.tar.gz> [--cwd PFX]
             [--on-conflict skip|overwrite|rename] [--dry-run] [-y]
 cst relocate <id> <new-cwd> [--keep-original] [--force] [--dry-run] [-y]
@@ -200,7 +202,7 @@ with manual-entry and placeholder escape hatches).
   brings it to the foreground (instead of replacing the TUI process)
 - Orphan-relocate flow when a session's recorded cwd is missing
 - ESCDELAY tuned to 25 ms so Esc is instant
-- State files under `~/.cache/claude-session-tracker/` (was `claude-sessions`)
+- State files under `~/.cst/` (was `claude-sessions`)
 
 Every other `claude-sessions` feature is preserved: search with OR, subagent
 transcripts, backup tar.gz + manifest, restore with conflict policy,
@@ -234,9 +236,9 @@ relocate with cwd rewrite, interactive delete, multi-select marks.
   `alive` boolean: not-alive → `○` ended; alive feeds the 5-state classifier
   (working/waiting/idle resolved from the hook overlay, else the registry).
 - `~/.claude/settings.json` — cst's hook entries live here under `hooks`.
-- `~/.cache/claude-session-tracker/index.json` — mtime/size-invalidated
+- `~/.cst/index.json` — mtime/size-invalidated
   indexing cache. Safe to delete.
-- `~/.cache/claude-session-tracker/state.json` — overlay storing
+- `~/.cst/state.json` — overlay storing
   `{done: {sid: ts}, status: {sid: {state, event, ts}}, auto_rescan: {enabled, interval}, theme: "auto"|"dark"|"light", sort: {key, reverse}}`.
   Safe to delete (clears all ✓ marks, status overlay, auto-rescan / theme /
   sort prefs).

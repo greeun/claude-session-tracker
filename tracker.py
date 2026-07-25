@@ -7,17 +7,18 @@ detection (세션사용중 / 세션종료) and a user-driven 작업종료 flag.
 Data sources:
   ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl  — transcripts
   ~/.claude/sessions/<pid>.json                        — live process registry
-  ~/.cache/claude-session-tracker/state.json           — done-state overlay
-  ~/.cache/claude-session-tracker/index.json           — indexing cache
+  ~/.cst/state.json                                    — done-state overlay
+  ~/.cst/index.json                                    — indexing cache
 """
 from __future__ import annotations
 
-__version__ = "1.10.0"
+__version__ = "1.11.0"
 
 import argparse
 import json
 import os
 import re
+import shutil
 import sys
 import tarfile
 import unicodedata
@@ -51,12 +52,65 @@ JOBS_DIR = CONFIG_DIR / "jobs"
 # Supervisor (daemon) state: roster.json lists the running background workers.
 DAEMON_DIR = CONFIG_DIR / "daemon"
 HOME = str(Path.home())
-CACHE_DIR = Path.home() / ".cache" / "claude-session-tracker"
+
+
+def _cst_home() -> Path:
+    """cst의 영속 데이터 루트(캐시+상태+prefs). 환경변수 CST_HOME이 설정돼
+    있으면 그 경로를, 없으면 ~/.cst를 쓴다. state.json은 done 플래그·테마·정렬
+    같은 영속 데이터라 언제든 비워질 수 있는 ~/.cache에 두지 않는다."""
+    env = os.environ.get("CST_HOME")
+    return Path(env).expanduser() if env else Path.home() / ".cst"
+
+
+CACHE_DIR = _cst_home()
 CACHE_PATH = CACHE_DIR / "index.json"
 # Bumped whenever the cached SessionMeta shape or extraction logic changes,
 # so stale entries are re-indexed instead of serving wrong snippets.
 _CACHE_SCHEMA = 4
 STATE_PATH = CACHE_DIR / "state.json"
+
+# Pre-1.11 location; migrate_legacy_dir() moves its files into CACHE_DIR once.
+_LEGACY_CACHE_DIR = Path.home() / ".cache" / "claude-session-tracker"
+
+
+def migrate_legacy_dir() -> bool:
+    """~/.cache/claude-session-tracker의 파일을 CST 홈으로 1회 이전.
+
+    파일 단위로 대상이 없을 때만 옮기므로 멱등이고, 이미 새 파일이 있으면
+    레거시 쪽을 남겨둔다(사용자 데이터는 삭제하지 않음). CACHE_DIR가
+    _cst_home()과 다르면(테스트 스텁 등) 아무 것도 하지 않는다."""
+    if CACHE_DIR != _cst_home():
+        return False
+    legacy = _LEGACY_CACHE_DIR
+    if not legacy.is_dir():
+        return False
+    moved = False
+    for name in ("state.json", "index.json"):
+        src, dst = legacy / name, CACHE_DIR / name
+        if not src.exists():
+            continue
+        if not dst.exists():
+            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dst))
+            moved = True
+        elif name == "index.json":
+            # Regenerable cache superseded by the new home's copy — drop it.
+            # state.json is user data and is kept when un-migrated.
+            try:
+                src.unlink()
+            except OSError:
+                pass
+    # Lock/tmp leftovers are disposable — clear them so the dir can go away.
+    for stale in (*legacy.glob("state.*.tmp"), legacy / "state.lock"):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+    try:
+        legacy.rmdir()
+    except OSError:
+        pass  # non-migrated files remain; leave them untouched
+    return moved
 
 # Compact glyphs shown in tables (display width 1 each).
 STATUS_WORKING = "●"   # actively producing (hook working / registry busy)
@@ -5888,6 +5942,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    migrate_legacy_dir()
     ap = _build_parser()
     args = ap.parse_args()
 

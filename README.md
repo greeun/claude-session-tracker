@@ -50,7 +50,7 @@ cst uninstall-hook
 rm ~/.local/bin/cst
 
 # 3. (optional) Drop cache + done-state overlay
-rm -rf ~/.cache/claude-session-tracker
+rm -rf ~/.cst
 
 # 4. (optional) Remove the cloned repo
 rm -rf ~/.claude/skills/claude-session-tracker
@@ -88,7 +88,7 @@ Compact one-column glyphs in the `ST` column. Resolution order in `classify_stat
 | **!** | waiting | Claude is waiting for your input or a permission decision — this is where time leaks. Detected from Claude Code's own registry (`status: "waiting"`); `cst install-hook` adds a precision overlay. |
 | **◦** | idle | Turn finished, process still alive. |
 | **○** | ended | Process is gone (clean exit) or was never registered. Transcript remains readable. |
-| **✓** | done | You explicitly marked it done (`D`/`d`/`Ctrl-D` in TUI, `cst done <id>`, or the `done!` prompt hook). Persists in `~/.cache/claude-session-tracker/state.json`. |
+| **✓** | done | You explicitly marked it done (`D`/`d`/`Ctrl-D` in TUI, `cst done <id>`, or the `done!` prompt hook). Persists in `~/.cst/state.json`. |
 
 Status is **computed fresh on every command invocation** — there is no background daemon. The TUI auto-rescans every 10s by default (configurable / off via `a`).
 
@@ -218,7 +218,7 @@ cst restore ~/.claude/backups/sessions-20260524.tar.gz --on-conflict rename -y
 
 | Flag | Meaning |
 |---|---|
-| `--days N` | Archive sessions whose last activity is older than N days |
+| `--days N` | Archive sessions whose last activity is older than N days (default: 90 when neither `--days` nor `--before` is given) |
 | `--before YYYY-MM-DD` | Archive sessions before a specific date (overrides `--days`) |
 | `--cwd PREFIX` | Restrict to sessions under this cwd |
 | `--out PATH` | Output archive path (default: `~/.claude/backups/sessions-<timestamp>.tar.gz`) |
@@ -390,7 +390,7 @@ Reflects the current state:
 ### Modal dialogs
 
 - **Help (`?`)** — scrollable cheat-sheet.
-- **Preview (`v`)** — transcript with role colors; up to 1200 chars per message; `Del` deletes in place (with confirmation).
+- **Preview (`v`)** — transcript with role colors, full message text (wrapped); `d`/`Ctrl-D` toggles done in place; `Del` deletes in place (with confirmation).
 - **Auto-rescan interval (`a`)** — Off / 5 / 10 / 30 / 60 / 120s. `1`–`6` jumps directly to an option; Enter applies; saved to `state.json`.
 - **Delete confirmation (`Del`)** — `y` confirm · `n/Esc/Enter` cancel · shows up to 5 victims.
 - **Skip-permissions confirmation** — appears on `Enter` resume when you didn't pass `--skip-perm`. `y/Y/Enter` resumes with the flag · `n/N` without · `Esc` cancels.
@@ -490,13 +490,18 @@ Equivalent manual entry (one event shown):
 | `~/.claude/settings.json` | Claude Code settings (cst writes hook entries here) | No — `cst uninstall-hook` only removes cst entries |
 | `~/.claude/jobs/<short>/state.json` | Agent-view background-job state (read-only) | Leave alone |
 | `~/.claude/jobs/pins.json` | Agent-view pin set (read-only; cst never writes) | Leave alone |
-| `~/.cache/claude-session-tracker/index.json` | mtime/size-invalidated session-metadata cache | Yes — regenerates on next run |
-| `~/.cache/claude-session-tracker/state.json` | done flags + hook status overlay + user prefs (auto-rescan, theme, sort) | Yes — clears all `✓` marks, overlay, and prefs |
+| `~/.cst/index.json` | mtime/size-invalidated session-metadata cache | Yes — regenerates on next run |
+| `~/.cst/state.json` | done flags + hook status overlay + user prefs (auto-rescan, theme, sort) | Yes — clears all `✓` marks, overlay, and prefs |
 
 All `~/.claude/...` paths above honor **`$CLAUDE_CONFIG_DIR`** (same convention
 as Claude Code itself): when set, cst reads `projects/`, `sessions/`, `jobs/`,
 `daemon/`, `settings.json`, and default backups from that root instead of
 `~/.claude`.
+
+cst's own files (`index.json`, `state.json`) live under **`~/.cst`**, overridable
+with **`$CST_HOME`**. On first run, v1.11+ automatically moves any files from the
+old location `~/.cache/claude-session-tracker/` into `~/.cst` (done flags and
+prefs survive the upgrade).
 
 ### `state.json` schema
 
@@ -647,7 +652,7 @@ A: Yes. When the rescan detects a session **newly entering** `!` waiting (i.e. n
 A: Linux: yes (pure stdlib). Windows: the curses TUI needs `windows-curses`; CLI commands work as-is.
 
 **Q: How do I get rid of cst entirely?**
-A: See [Uninstall](#uninstall) above — `cst uninstall-hook`, remove the symlink, optionally clear `~/.cache/claude-session-tracker`.
+A: See [Uninstall](#uninstall) above — `cst uninstall-hook`, remove the symlink, optionally clear `~/.cst`.
 
 ---
 
