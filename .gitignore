@@ -8,7 +8,7 @@ __pycache__/
 
 # Local tooling / workspace (not project source)
 .claude/
-.axt-profile.json
+.axt*
 
 # Skill work products generated under this dir (not part of cst)
 linkedin-post/
