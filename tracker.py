@@ -12,7 +12,7 @@ Data sources:
 """
 from __future__ import annotations
 
-__version__ = "1.11.0"
+__version__ = "1.11.1"
 
 import argparse
 import json
@@ -215,6 +215,43 @@ def session_open_invocation(claude_bin: str, session_id: str,
         return f"{q(claude_bin)} attach {q(short)}"
     skip = " --dangerously-skip-permissions" if skip_perm else ""
     return f"{q(claude_bin)} --resume {q(session_id)}{skip}"
+
+
+# macOS terminal apps ship their CLI inside the .app bundle and never touch
+# PATH (WezTerm, Ghostty, kitty, Alacritty alike), so a bare shutil.which()
+# misses them — spawn would silently fall back to Terminal.app and focus would
+# skip the backend entirely. Probe the well-known bundle paths after PATH.
+_MACOS_TERM_APP_CLIS: dict[str, tuple[str, ...]] = {
+    "wezterm": (
+        "/Applications/WezTerm.app/Contents/MacOS/wezterm",
+        "~/Applications/WezTerm.app/Contents/MacOS/wezterm",
+    ),
+    "ghostty": (
+        "/Applications/Ghostty.app/Contents/MacOS/ghostty",
+        "~/Applications/Ghostty.app/Contents/MacOS/ghostty",
+    ),
+    "kitty": (
+        "/Applications/kitty.app/Contents/MacOS/kitty",
+        "~/Applications/kitty.app/Contents/MacOS/kitty",
+    ),
+    "alacritty": (
+        "/Applications/Alacritty.app/Contents/MacOS/alacritty",
+        "~/Applications/Alacritty.app/Contents/MacOS/alacritty",
+    ),
+}
+
+
+def _find_terminal_cli(name: str) -> str | None:
+    """Locate a terminal emulator's CLI: PATH first, then app-bundle paths."""
+    import shutil
+    p = shutil.which(name)
+    if p:
+        return p
+    for cand in _MACOS_TERM_APP_CLIS.get(name, ()):
+        cand = os.path.expanduser(cand)
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return None
 
 
 def open_in_new_terminal(cwd: str, session_id: str,
@@ -436,28 +473,28 @@ def _open_macos(term_program, shell_cmd, cwd):
     if "iterm" in tp_l:
         return _run_osascript(iterm_script, "iTerm")
     if "ghostty" in tp_l:
-        p = shutil.which("ghostty")
+        p = _find_terminal_cli("ghostty")
         if p:
             return _run_cli(
                 [p, "--working-directory", cwd, "-e", *bash_args],
                 "Ghostty", activate_name="Ghostty",
             )
     if "wezterm" in tp_l:
-        p = shutil.which("wezterm")
+        p = _find_terminal_cli("wezterm")
         if p:
             return _run_cli(
                 [p, "start", "--cwd", cwd, "--", *bash_args],
                 "WezTerm", activate_name="WezTerm",
             )
     if "kitty" in tp_l:
-        p = shutil.which("kitty")
+        p = _find_terminal_cli("kitty")
         if p:
             return _run_cli(
                 [p, "--detach", "--directory", cwd, *bash_args],
                 "kitty", activate_name="kitty",
             )
     if "alacritty" in tp_l:
-        p = shutil.which("alacritty")
+        p = _find_terminal_cli("alacritty")
         if p:
             return _run_cli(
                 [p, "--working-directory", cwd, "-e", *bash_args],
@@ -755,9 +792,8 @@ def _focus_wezterm(tty: str) -> tuple[bool, str]:
     pane (helps multi-pane windows); it is best-effort since the window raise is
     what matters (and AXRaise already scans all wezterm-gui processes).
     """
-    import shutil
     import subprocess
-    wez = shutil.which("wezterm")
+    wez = _find_terminal_cli("wezterm")
     if not wez:
         return False, "wezterm not found"
     sockets: list[str | None] = [None]
@@ -963,7 +999,6 @@ def focus_existing_window(session_id: str, live_info: dict) -> tuple[bool, str]:
     match. Returns (False, reason) when no backend can find/raise the window, so
     the caller falls back to opening a new window.
     """
-    import shutil
     pid = live_info.get("pid")
     if not isinstance(pid, int):
         return False, "no pid"
@@ -972,7 +1007,8 @@ def focus_existing_window(session_id: str, live_info: dict) -> tuple[bool, str]:
         return False, "no controlling tty"
 
     tp = os.environ.get("TERM_PROGRAM", "").lower()
-    wez = ("WezTerm", lambda: shutil.which("wezterm") is not None, _focus_wezterm)
+    wez = ("WezTerm", lambda: _find_terminal_cli("wezterm") is not None,
+           _focus_wezterm)
     term = ("Terminal.app", lambda: _macos_proc_running("Terminal"), _focus_terminal_app)
     iterm = ("iTerm2", lambda: _macos_proc_running("iTerm2"), _focus_iterm2)
     cmux = ("cmux", _cmux_available, _focus_cmux)
