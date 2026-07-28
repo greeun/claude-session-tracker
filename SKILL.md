@@ -61,7 +61,12 @@ cst show <id>             # transcript with Status header (--max-chars, --with-s
 cst export <id>           # write transcript to <id>.md (--format md|txt, --out PATH|DIR)
 cst resume <id> --print-only | bash
 cst resume <id> --spawn   # actually open/attach in a new terminal (TUI Enter logic; cst.app)
-cst done <id> / cst undone <id>
+cst done <id> [<id> ...] / cst undone <id>
+cst done --filter TEXT [-y] [--force] [--cwd PFX] [--days N] [--status S]
+                          # bulk done: case-insensitive substring over
+                          #   id+cwd+first-msg (the TUI /-filter → Ctrl-A → d
+                          #   flow); skips ● working unless --force; non-tty
+                          #   callers MUST pass -y
 cst live [--all]          # live Claude Code processes (--all shows stale entries)
 cst stats [--top N]       # counts + top projects
 cst subagents <parent-id> # Task-tool subagents

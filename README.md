@@ -68,6 +68,7 @@ cst --tui                     # interactive TUI (same as `cst pick`)
 cst live                      # only sessions with a live Claude Code process
 cst search "auth refactor"    # full-text search across every transcript
 cst done <id>                 # mark a session as done
+cst done --filter "text" -y   # bulk done every session matching text (TUI Ctrl-A+d)
 cst export <id>               # write transcript to ./<id>.md
 cst stats                     # counts, top projects, status breakdown
 cst list --sort msgs          # sort by a column (time|status|msgs|project; --reverse flips)
@@ -195,8 +196,24 @@ cst.app.
 
 ```bash
 cst done 06d116f7      # ✓ Marked done
+cst done 06d116f7 9c01a2b3          # multiple ids at once
 cst undone 06d116f7    # ✓ Cleared done
 ```
+
+Bulk mode — the TUI "`/` filter → `Ctrl-A` → `d`" flow as one command.
+`--filter` matches a case-insensitive substring of `sessionId + cwd + first
+user message` (exactly like the TUI filter); already-done sessions are
+excluded and ● working ones are skipped unless `--force`:
+
+```bash
+cst done --filter "heyhey"                 # list matches, confirm, mark
+cst done --filter "heyhey" -y              # skip the prompt (scripts)
+cst done --filter "버그" --days 7 --status ended
+cst done --filter "x" --cwd ~/project/old  # narrow by cwd prefix
+```
+
+Non-interactive callers must pass `-y/--yes`, otherwise the command refuses
+instead of hanging on the confirmation prompt.
 
 ### `cst live [--all]` — live process registry
 

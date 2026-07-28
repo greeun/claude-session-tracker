@@ -68,6 +68,7 @@ cst --tui                     # 인터랙티브 TUI (cst pick과 동일)
 cst live                      # 지금 실행중인 Claude Code 프로세스만
 cst search "인증 리팩토링"     # 모든 세션 트랜스크립트 본문 검색
 cst done <id>                 # 세션을 done으로 표시
+cst done --filter "문자열" -y  # 매칭 세션 일괄 done (TUI Ctrl-A+d와 동일)
 cst export <id>               # 트랜스크립트를 ./<id>.md로 출력
 cst stats                     # 요약 (프로젝트·상태 분포)
 cst list --sort msgs          # 컬럼 정렬 (time|status|msgs|project; --reverse로 방향 반전)
@@ -193,8 +194,24 @@ cst resume 960faaa8 --spawn                # 실제로 새 터미널에서 열�
 
 ```bash
 cst done 06d116f7      # ✓ Marked done
+cst done 06d116f7 9c01a2b3          # 여러 ID 한 번에
 cst undone 06d116f7    # ✓ Cleared done
 ```
+
+일괄 모드 — TUI의 "`/` 필터 → `Ctrl-A` → `d`" 흐름을 명령 한 번으로.
+`--filter`는 `세션ID + cwd + 첫 사용자 메시지`에 대한 대소문자 무시 부분
+문자열 매칭(TUI 필터와 동일). 이미 done인 세션은 제외되고, ● working
+세션은 `--force` 없이는 건너뛴다:
+
+```bash
+cst done --filter "heyhey"                 # 매칭 목록 출력 → 확인 → 마킹
+cst done --filter "heyhey" -y              # 확인 생략 (스크립트용)
+cst done --filter "버그" --days 7 --status ended
+cst done --filter "x" --cwd ~/project/old  # cwd 접두어로 범위 제한
+```
+
+비대화형 호출은 `-y/--yes`를 명시해야 하며, 없으면 확인 프롬프트에서
+멈추는 대신 거부한다.
 
 ### `cst live [--all]` — 라이브 프로세스 레지스트리
 

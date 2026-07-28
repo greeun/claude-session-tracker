@@ -12,7 +12,7 @@ Data sources:
 """
 from __future__ import annotations
 
-__version__ = "1.11.1"
+__version__ = "1.12.0"
 
 import argparse
 import json
@@ -140,6 +140,15 @@ STATUS_LABELS: dict[str, str] = {
 # Ordered list of all status glyphs (for counts / filters / stats).
 STATUS_ALL = (STATUS_WORKING, STATUS_WAITING, STATUS_IDLE,
               STATUS_ENDED, STATUS_DONE)
+
+# CLI --status argument name -> glyph (cst list / cst done --filter).
+_STATUS_ARG = {
+    "active":  STATUS_WORKING, "working": STATUS_WORKING,
+    "waiting": STATUS_WAITING,
+    "idle":    STATUS_IDLE,
+    "ended":   STATUS_ENDED,
+    "done":    STATUS_DONE,
+}
 
 # state.json overlay state-name -> glyph
 _STATE_GLYPH = {
@@ -2175,13 +2184,7 @@ def cmd_list(args: argparse.Namespace) -> int:
                                  progress=not as_json)
     ctx = StatusContext.capture()
     if args.status:
-        wanted = {
-            "active": STATUS_WORKING, "working": STATUS_WORKING,
-            "waiting": STATUS_WAITING,
-            "idle": STATUS_IDLE,
-            "ended": STATUS_ENDED,
-            "done": STATUS_DONE,
-        }.get(args.status.lower())
+        wanted = _STATUS_ARG.get(args.status.lower())
         if wanted:
             sessions = [s for s in sessions
                         if ctx.resolve(s.session_id) == wanted]
@@ -2572,17 +2575,98 @@ def cmd_resume(args: argparse.Namespace) -> int:
 
 # ---------- CLI: done / undone / live ----------
 
-def cmd_done(args: argparse.Namespace) -> int:
-    target = require_session(args.session_id)
-    if target is None:
+def _bulk_done(args: argparse.Namespace, needle: str) -> int:
+    """`cst done --filter TEXT` — the TUI "`/` filter → Ctrl-A → d" flow as
+    one CLI call. Matches exactly like the TUI pool filter: case-insensitive
+    substring over "sessionId cwd first_user_msg". Already-done sessions are
+    excluded; ● working ones are skipped unless --force (done_guard_blocks);
+    the candidate list is printed and confirmed before marking — non-tty
+    callers must pass -y/--yes (mirrors cmd_rm)."""
+    sessions = load_all_sessions(cwd_filter=getattr(args, "cwd", None),
+                                 days=getattr(args, "days", None),
+                                 progress=True)
+    ctx = StatusContext.capture()
+    q = needle.lower()
+    pool = [s for s in sessions
+            if s.session_id not in ctx.done
+            and q in f"{s.session_id} {s.cwd} {s.first_user_msg}".lower()]
+    status_arg = getattr(args, "status", None)
+    if status_arg:
+        wanted = _STATUS_ARG.get(status_arg.lower())
+        if wanted:
+            pool = [s for s in pool if ctx.resolve(s.session_id) == wanted]
+    if not pool:
+        print(f"(no sessions matching {needle!r})")
         return 1
-    status = StatusContext.capture().resolve(target.session_id)
-    if done_guard_blocks(status, getattr(args, "force", False)):
-        print(f"{target.session_id[:8]}  {DONE_WORKING_REASON}", file=sys.stderr)
+    force = getattr(args, "force", False)
+    markable = [s for s in pool
+                if not done_guard_blocks(ctx.resolve(s.session_id), force)]
+    skipped = [s for s in pool if done_guard_blocks(ctx.resolve(s.session_id), force)]
+    for s in markable:
+        print(f"  {ctx.resolve(s.session_id)} {s.session_id[:8]}  "
+              f"{shorten_path(s.cwd)}  "
+              f"{truncate_display(s.first_user_msg or '', 40)}")
+    if skipped:
+        ids8 = ", ".join(s.session_id[:8] for s in skipped)
+        print(f"({len(skipped)} skipped — ● actively working: {ids8}; "
+              f"pass --force to include)", file=sys.stderr)
+    if not markable:
+        print("Nothing to mark — every match is actively working.",
+              file=sys.stderr)
         return 1
-    set_done(target.session_id, True)
-    print(f"✓ Marked done: {target.session_id[:8]}  {shorten_path(target.cwd)}")
+    if not getattr(args, "yes", False):
+        if not sys.stdin.isatty():
+            print(f"Refusing to mark {len(markable)} session(s) done without "
+                  f"confirmation — pass -y/--yes (non-interactive).",
+                  file=sys.stderr)
+            return 1
+        try:
+            reply = input(f"Mark {len(markable)} session(s) done? [y/N] ").strip().lower()
+        except EOFError:
+            reply = ""
+        if reply not in ("y", "yes"):
+            print("Aborted.")
+            return 1
+    for s in markable:
+        set_done(s.session_id, True)
+    print(f"✓ Marked done: {len(markable)} session(s)")
     return 0
+
+
+def cmd_done(args: argparse.Namespace) -> int:
+    ids = args.session_id
+    if isinstance(ids, str):  # pre-1.12 callers pass a plain string
+        ids = [ids]
+    needle = getattr(args, "filter", None)
+    if needle and ids:
+        print("Pass session id(s) OR --filter, not both.", file=sys.stderr)
+        return 1
+    narrow = [n for n in ("cwd", "days", "status") if getattr(args, n, None)]
+    if narrow and not needle:
+        print(f"--{narrow[0]} only narrows a bulk --filter match; "
+              f"add --filter TEXT.", file=sys.stderr)
+        return 1
+    if needle:
+        return _bulk_done(args, needle)
+    if not ids:
+        print("session_id (or --filter TEXT) required.", file=sys.stderr)
+        return 1
+    ctx = StatusContext.capture()
+    rc = 0
+    for prefix in ids:
+        target = require_session(prefix)
+        if target is None:
+            rc = 1
+            continue
+        if done_guard_blocks(ctx.resolve(target.session_id),
+                             getattr(args, "force", False)):
+            print(f"{target.session_id[:8]}  {DONE_WORKING_REASON}",
+                  file=sys.stderr)
+            rc = 1
+            continue
+        set_done(target.session_id, True)
+        print(f"✓ Marked done: {target.session_id[:8]}  {shorten_path(target.cwd)}")
+    return rc
 
 
 def cmd_undone(args: argparse.Namespace) -> int:
@@ -5899,8 +5983,22 @@ def _build_parser() -> argparse.ArgumentParser:
     p_stats.add_argument("--top", type=int, default=15)
     p_stats.set_defaults(func=cmd_stats)
 
-    p_done = sub.add_parser("done", help="mark session as done")
-    p_done.add_argument("session_id")
+    p_done = sub.add_parser("done",
+                            help="mark session(s) as done (bulk via --filter)")
+    p_done.add_argument("session_id", nargs="*",
+                        help="session id prefix(es); omit when using --filter")
+    p_done.add_argument("--filter", metavar="TEXT",
+                        help="bulk mode: mark every session whose id+cwd+first "
+                             "user message contains TEXT — same matching as "
+                             "the TUI / filter (case-insensitive)")
+    p_done.add_argument("--cwd", help="with --filter: restrict to this cwd prefix")
+    p_done.add_argument("--days", type=int,
+                        help="with --filter: only last N days")
+    p_done.add_argument("--status",
+                        choices=["working", "waiting", "idle", "ended", "active"],
+                        help="with --filter: restrict to this status")
+    p_done.add_argument("-y", "--yes", action="store_true",
+                        help="skip the bulk confirmation prompt")
     p_done.add_argument("--force", action="store_true",
                         help="mark done even if the session is actively working")
     p_done.set_defaults(func=cmd_done)
