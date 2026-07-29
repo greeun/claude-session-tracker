@@ -65,6 +65,8 @@ cst show <id>             # transcript with Status header (--max-chars, --with-s
 cst export <id>           # write transcript to <id>.md (--format md|txt, --out PATH|DIR)
 cst resume <id> --print-only | bash
 cst resume <id> --spawn   # actually open/attach in a new terminal (TUI Enter logic; cst.app)
+cst open <id>             # open the session's FOLDER in a new terminal (TUI `o`;
+                          #   plain shell at the recorded cwd, no claude; cst.app)
 cst done <id> [<id> ...] / cst undone <id>
 cst done --filter TEXT [-y] [--force] [--cwd PFX] [--days N] [--status S]
                           # bulk done: case-insensitive substring over

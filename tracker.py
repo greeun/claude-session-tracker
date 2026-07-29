@@ -2664,6 +2664,22 @@ def cmd_resume(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_open(args: argparse.Namespace) -> int:
+    """`cst open <id>` — open the session's folder in a new terminal window:
+    the TUI `o` key as a subcommand (plain interactive shell at the recorded
+    cwd, no claude command). Used by cst.app's folder-open action. A missing
+    cwd fails with the relocate hint from open_folder_in_new_terminal()."""
+    target = require_session(args.session_id)
+    if target is None:
+        return 1
+    ok, info = open_folder_in_new_terminal(target.cwd)
+    if ok:
+        print(f"→ folder {shorten_path(target.cwd)}  {info}")
+        return 0
+    print(f"open folder failed: {info}", file=sys.stderr)
+    return 1
+
+
 # ---------- CLI: done / undone / live ----------
 
 def _bulk_done(args: argparse.Namespace, needle: str) -> int:
@@ -6266,6 +6282,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_resume.add_argument("--spawn", action="store_true",
                           help="actually open/attach the session in a new terminal (used by cst.app)")
     p_resume.set_defaults(func=cmd_resume)
+
+    p_open = sub.add_parser("open",
+                            help="open the session's folder in a new terminal "
+                                 "(the TUI `o` key; plain shell, no claude)")
+    p_open.add_argument("session_id")
+    p_open.set_defaults(func=cmd_open)
 
     p_backup = sub.add_parser("backup", help="archive old sessions into tar.gz")
     p_backup.add_argument("--days", type=int, default=None)

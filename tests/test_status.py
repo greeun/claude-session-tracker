@@ -375,7 +375,7 @@ class TestTopLevelFlags(unittest.TestCase):
                 if getattr(a, "dest", None) == "cmd"][0].choices.keys()
         expected = {
             "pick", "list", "search", "show", "subagents", "relocate",
-            "export", "resume", "backup", "restore", "stats",
+            "export", "resume", "open", "backup", "restore", "stats",
             "done", "undone", "rm", "live", "stop", "logs", "bg", "jobs",
             "prompt-hook", "status-hook", "install-hook", "uninstall-hook",
         }
