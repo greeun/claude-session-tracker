@@ -25,6 +25,18 @@ class CmdResumeSpawnTests(unittest.TestCase):
         base.update(overrides)
         return argparse.Namespace(**base)
 
+    def test_spawn_passes_terminal_override(self):
+        stub = _StubSession()
+        with mock.patch.object(tracker, "require_session", return_value=stub), \
+             mock.patch.object(tracker, "job_short_for", return_value=None), \
+             mock.patch.object(tracker, "get_live_session_info", return_value=None), \
+             mock.patch.object(tracker, "open_in_new_terminal",
+                               return_value=(True, "WezTerm")) as spawn_mock:
+            rc = tracker.cmd_resume(self._args(terminal="wezterm"))
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(spawn_mock.call_args.kwargs.get("terminal"), "wezterm")
+
     def test_spawn_resume_opens_new_terminal(self):
         stub = _StubSession()
         with mock.patch.object(tracker, "require_session", return_value=stub), \

@@ -20,8 +20,8 @@ class CmdOpenTests(unittest.TestCase):
     folder-open action): spawn a plain shell at the session's cwd via
     open_folder_in_new_terminal(), no claude command involved."""
 
-    def _args(self, session_id="s1"):
-        return argparse.Namespace(session_id=session_id)
+    def _args(self, session_id="s1", terminal=None):
+        return argparse.Namespace(session_id=session_id, terminal=terminal)
 
     def test_open_spawns_folder_terminal(self):
         stub = _StubSession()
@@ -31,7 +31,17 @@ class CmdOpenTests(unittest.TestCase):
             rc = tracker.cmd_open(self._args())
 
         self.assertEqual(rc, 0)
-        spawn_mock.assert_called_once_with(stub.cwd)
+        spawn_mock.assert_called_once_with(stub.cwd, terminal=None)
+
+    def test_open_passes_terminal_override(self):
+        stub = _StubSession()
+        with mock.patch.object(tracker, "require_session", return_value=stub), \
+             mock.patch.object(tracker, "open_folder_in_new_terminal",
+                               return_value=(True, "WezTerm")) as spawn_mock:
+            rc = tracker.cmd_open(self._args(terminal="wezterm"))
+
+        self.assertEqual(rc, 0)
+        spawn_mock.assert_called_once_with(stub.cwd, terminal="wezterm")
 
     def test_open_unknown_session_fails(self):
         with mock.patch.object(tracker, "require_session", return_value=None), \
@@ -55,6 +65,15 @@ class CmdOpenTests(unittest.TestCase):
         args = parser.parse_args(["open", "abc123"])
         self.assertIs(args.func, tracker.cmd_open)
         self.assertEqual(args.session_id, "abc123")
+        self.assertIsNone(args.terminal)
+
+    def test_parser_accepts_terminal_flag(self):
+        parser = tracker._build_parser()
+        args = parser.parse_args(["open", "abc123", "--terminal", "ghostty"])
+        self.assertEqual(args.terminal, "ghostty")
+        args = parser.parse_args(["resume", "abc123", "--spawn",
+                                  "--terminal", "iterm"])
+        self.assertEqual(args.terminal, "iterm")
 
 
 if __name__ == "__main__":

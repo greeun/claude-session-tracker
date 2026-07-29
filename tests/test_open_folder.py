@@ -47,6 +47,20 @@ class OpenFolderTests(unittest.TestCase):
         # plain shell only — no resume/attach
         self.assertNotIn("claude", shell_cmd)
 
+    def test_terminal_override_beats_term_program_env(self):
+        # cst.app passes --terminal; it must win over (or replace the absent)
+        # $TERM_PROGRAM when picking the macOS spawner.
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(sys, "platform", "darwin"), \
+                 mock.patch.dict(os.environ, {"TERM_PROGRAM": "Apple_Terminal"}), \
+                 mock.patch.object(tracker, "_open_macos",
+                                   return_value=(True, "opened in WezTerm")) as mac:
+                ok, _info = tracker.open_folder_in_new_terminal(
+                    d, terminal="wezterm")
+        self.assertTrue(ok)
+        tp, _shell_cmd, _cwd = mac.call_args[0]
+        self.assertEqual(tp, "wezterm")
+
     def test_linux_spawns_plain_interactive_shell_at_cwd(self):
         with tempfile.TemporaryDirectory() as d:
             with mock.patch.object(sys, "platform", "linux"), \

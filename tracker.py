@@ -266,7 +266,8 @@ def _find_terminal_cli(name: str) -> str | None:
 def open_in_new_terminal(cwd: str, session_id: str,
                          skip_perm: bool = False,
                          cmux_mode: str | None = None,
-                         attach_short: str | None = None) -> tuple[bool, str]:
+                         attach_short: str | None = None,
+                         terminal: str | None = None) -> tuple[bool, str]:
     """Spawn `cd <cwd> && claude --resume <session_id>` in a new terminal window.
 
     Returns (ok, info). On success, `info` names the terminal used; on failure,
@@ -274,6 +275,11 @@ def open_in_new_terminal(cwd: str, session_id: str,
 
     When `cmux_mode` is "workspace" or "window", use cmux to open in the
     respective mode instead of spawning a native terminal window.
+
+    `terminal` overrides the $TERM_PROGRAM-based terminal pick (same names the
+    _open_macos dispatch matches: wezterm/iterm/ghostty/kitty/alacritty/
+    terminal). GUI callers (cst.app) have no $TERM_PROGRAM, so without this
+    they always land on the Terminal.app fallback.
     """
     import shlex
     import shutil
@@ -344,7 +350,7 @@ def open_in_new_terminal(cwd: str, session_id: str,
         f"read -r; fi"
     )
 
-    term_program = os.environ.get("TERM_PROGRAM", "")
+    term_program = terminal or os.environ.get("TERM_PROGRAM", "")
 
     if cmux_mode:
         return _open_in_cmux(cmux_mode, cwd, safe_cwd, core_cmd, session_id)
@@ -509,7 +515,7 @@ def _open_macos(term_program, shell_cmd, cwd):
                 [p, "--working-directory", cwd, "-e", *bash_args],
                 "Alacritty", activate_name="Alacritty",
             )
-    if tp == "Apple_Terminal":
+    if tp == "Apple_Terminal" or tp_l == "terminal":
         return _run_osascript(terminal_app_script, "Terminal")
     if "warp" in tp_l:
         # Warp has no public scripting API for running commands; user
@@ -582,7 +588,8 @@ def _open_linux(cwd, shell_cmd):
 
 
 def open_folder_in_new_terminal(cwd: str,
-                                cmux_mode: str | None = None) -> tuple[bool, str]:
+                                cmux_mode: str | None = None,
+                                terminal: str | None = None) -> tuple[bool, str]:
     """Spawn a plain interactive shell (no claude command) in a new terminal
     window at the session's `cwd` — the TUI `o` action.
 
@@ -612,7 +619,8 @@ def open_folder_in_new_terminal(cwd: str,
                              ws_name=f"dir:{base}")
 
     if sys.platform == "darwin":
-        return _open_macos(os.environ.get("TERM_PROGRAM", ""), shell_cmd, cwd)
+        return _open_macos(terminal or os.environ.get("TERM_PROGRAM", ""),
+                           shell_cmd, cwd)
 
     if sys.platform.startswith("linux"):
         return _open_linux(cwd, shell_cmd)
@@ -2636,6 +2644,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
             target.cwd, target.session_id,
             skip_perm=getattr(args, "skip_perm", False),
             attach_short=short,
+            terminal=getattr(args, "terminal", None),
         )
         if ok:
             print(f"→ {'attach' if short else 'resume'} {target.session_id[:8]}  {info}")
@@ -2672,7 +2681,8 @@ def cmd_open(args: argparse.Namespace) -> int:
     target = require_session(args.session_id)
     if target is None:
         return 1
-    ok, info = open_folder_in_new_terminal(target.cwd)
+    ok, info = open_folder_in_new_terminal(
+        target.cwd, terminal=getattr(args, "terminal", None))
     if ok:
         print(f"→ folder {shorten_path(target.cwd)}  {info}")
         return 0
@@ -6281,12 +6291,20 @@ def _build_parser() -> argparse.ArgumentParser:
     p_resume.add_argument("--print-only", action="store_true")
     p_resume.add_argument("--spawn", action="store_true",
                           help="actually open/attach the session in a new terminal (used by cst.app)")
+    p_resume.add_argument("--terminal", metavar="NAME",
+                          help="with --spawn: force the terminal app "
+                               "(wezterm|iterm|ghostty|kitty|alacritty|terminal); "
+                               "default: $TERM_PROGRAM, else Terminal.app")
     p_resume.set_defaults(func=cmd_resume)
 
     p_open = sub.add_parser("open",
                             help="open the session's folder in a new terminal "
                                  "(the TUI `o` key; plain shell, no claude)")
     p_open.add_argument("session_id")
+    p_open.add_argument("--terminal", metavar="NAME",
+                        help="force the terminal app "
+                             "(wezterm|iterm|ghostty|kitty|alacritty|terminal); "
+                             "default: $TERM_PROGRAM, else Terminal.app")
     p_open.set_defaults(func=cmd_open)
 
     p_backup = sub.add_parser("backup", help="archive old sessions into tar.gz")

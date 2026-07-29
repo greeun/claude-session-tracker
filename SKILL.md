@@ -67,6 +67,9 @@ cst resume <id> --print-only | bash
 cst resume <id> --spawn   # actually open/attach in a new terminal (TUI Enter logic; cst.app)
 cst open <id>             # open the session's FOLDER in a new terminal (TUI `o`;
                           #   plain shell at the recorded cwd, no claude; cst.app)
+# --spawn / open pick the terminal from $TERM_PROGRAM; override with
+#   --terminal wezterm|iterm|ghostty|kitty|alacritty|terminal
+#   (GUI callers like cst.app have no $TERM_PROGRAM → Terminal.app without it)
 cst done <id> [<id> ...] / cst undone <id>
 cst done --filter TEXT [-y] [--force] [--cwd PFX] [--days N] [--status S]
                           # bulk done: case-insensitive substring over
