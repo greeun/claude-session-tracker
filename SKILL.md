@@ -76,12 +76,20 @@ cst restore <archive.tar.gz> [--cwd PFX]
             [--on-conflict skip|overwrite|rename] [--dry-run] [-y]
 cst relocate <id> <new-cwd> [--keep-original] [--force] [--dry-run] [-y]
 cst rm <id> [<id> ...] [--dry-run] [-y] [--force]   # unlink session transcript(s)
-                          #   (only removes the transcript; a live bg process keeps running)
-cst rm --filter TEXT [--cwd PFX] [--status S]
+                          #   (only removes the transcript; a live bg process keeps
+                          #   running; --force implies -y here, single-id only)
+cst rm [--filter TEXT] [--cwd PFX] [--status S]
        [--days N|--older-than N|--before D] [--dry-run] [-y] [--force]
-                          # bulk rm: same id+cwd+first-msg substring match as
-                          #   done --filter; skips ● working / ! waiting unless
-                          #   --force; non-tty callers MUST pass -y
+                          # bulk rm: needs at least one selector (--filter is
+                          #   NOT required — e.g. `cst rm --status ended` alone
+                          #   works); same id+cwd+first-msg substring match as
+                          #   done --filter; skips ● working / ! waiting incl. a
+                          #   ✓ done session whose process is still live; --force
+                          #   only widens the target set — confirmation still
+                          #   needs -y (unlike the single-id form above); --days N
+                          #   = last N days, opposite of `cst backup --days`
+                          #   (use --older-than for "older than N days");
+                          #   non-tty callers MUST pass -y
 
 # Background (agent-view) sessions — claude --bg / `claude agents`:
 cst jobs                  # ALL agent-view jobs incl exec/transcript-less ones,

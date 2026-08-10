@@ -175,9 +175,19 @@ parser level.
 `rm_guard_blocks(status, force)` sits beside `done_guard_blocks` and is
 stricter: it blocks ● working **and** ! waiting. A live process holds the
 `.jsonl` open and keeps appending to the unlinked inode, so deleting it drops
-everything said afterwards. `--force` overrides the guard and (as before)
-implies `-y`. Deletion itself goes through `_delete_sessions`, shared with the
-TUI `Del` key.
+everything said afterwards. The status the guard judges comes from
+`_rm_guard_status(sid, ctx)`, not the plain `ctx.resolve()` glyph:
+`resolve_status`/`classify_status` let ✓ done short-circuit before liveness is
+even checked, so a session that's ✓ done AND still alive-and-working (e.g.
+mid self `done!`) would otherwise resolve to ✓ and slip straight past the
+guard. `_rm_guard_status` re-classifies past the done flag only when
+`session_id in ctx.live` (skipping that check would wrongly block dead
+background jobs whose last persisted state happens to be "working"); the
+printed candidate row still shows ✓ via `ctx.resolve()`. `--force` widens the
+target set to include live sessions, but — unlike the single-id `_rm_one`
+path, where `--force` still implies `-y` — it does **not** also skip bulk
+mode's confirmation prompt (mirrors `_bulk_done`). Deletion itself goes
+through `_delete_sessions`, shared with the TUI `Del` key.
 
 ## Development Notes
 

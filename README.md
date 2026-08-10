@@ -263,18 +263,20 @@ Rewrites `cwd` on every event in the JSONL and moves the file into the new proje
 | `--dry-run` | Show the rewrite plan; no changes |
 | `-y` / `--yes` | Skip confirmation |
 
-### `cst rm <id>` — unlink one session transcript
+### `cst rm <id> [<id> ...]` — unlink session transcript(s)
 
 ```bash
-cst rm 960faaa8 --dry-run    # show what would be removed
-cst rm 960faaa8 -y           # remove without prompting
+cst rm 960faaa8 --dry-run       # show what would be removed
+cst rm 960faaa8 -y              # remove without prompting
+cst rm 960faaa8 3a7f21bc -y     # remove multiple ids in one call
 ```
 
 Unlinks the transcript `.jsonl` and purges its cache/done-flag traces — the
 same operation as the TUI `Del` key, scriptable. **Only the transcript is
 removed: a live background process keeps running** (stop it with `cst stop
 <id>` first). Non-interactive callers must pass `-y` (it refuses rather than
-hang waiting for a tty); `--force` also skips confirmation.
+hang waiting for a tty); `--force` also skips confirmation (single-id form
+only — bulk mode below handles `--force` differently).
 
 ### Bulk delete
 
@@ -290,9 +292,16 @@ cst rm --filter test --days 7 --dry-run  # last 7 days, preview only
 
 Live sessions (● working / ! waiting) are skipped — a running Claude process
 keeps appending to the transcript it holds open, so unlinking it loses whatever
-comes next. Pass `--force` to include them. `--days` / `--older-than` /
-`--before` are mutually exclusive, and `--days N` means *the last N days*
-(same as `cst list`), not "older than N days".
+comes next. This also catches a **✓ done session whose process is still alive
+and working/waiting** — done is a bookmark flag, not a stop signal, so it's
+skipped too (the row still displays ✓). Pass `--force` to include live
+sessions in the target set. Unlike the single-id form above, in bulk mode
+`--force` does **not** skip the confirmation prompt — pass `-y`/`--yes` for
+that, or combine both to include live sessions *and* skip confirmation.
+`--days` / `--older-than` / `--before` are mutually exclusive, and `--days N`
+means *the last N days* (same as `cst list`), **not** "older than N days" —
+that's the opposite of `cst backup --days N`; use `--older-than` here for
+"older than N days".
 
 Non-interactive callers must pass `-y`. Deleting only unlinks the transcript —
 a background session's process keeps running; stop it with `cst stop <id>`.
