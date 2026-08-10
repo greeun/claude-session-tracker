@@ -282,5 +282,46 @@ class TestBulkRm(_BulkBase):
         self.assertIn("… +5 more", out)
 
 
+class TestCmdRmDispatch(_BulkBase):
+    def test_id_plus_selector_is_an_error(self):
+        rc, out = _quiet(tk.cmd_rm, self.args(session_id=["aaaa1111"],
+                                              filter="prototype"))
+        self.assertEqual(rc, 1)
+        self.assertIn("not both", out)
+        self.assertTrue(self.exists("aaaa1111-0000-0000-0000-000000000001"))
+
+    def test_no_id_and_no_selector_is_an_error(self):
+        rc, out = _quiet(tk.cmd_rm, self.args())
+        self.assertEqual(rc, 1)
+        self.assertIn("required", out)
+        self.assertTrue(self.exists("aaaa1111-0000-0000-0000-000000000001"))
+
+    def test_selector_routes_to_bulk(self):
+        rc, out = _quiet(tk.cmd_rm, self.args(filter="prototype"))
+        self.assertEqual(rc, 0)
+        self.assertIn("removed 2 session(s)", out)
+
+    def _stub_require_session(self):
+        """id prefix -> setUp이 만든 SessionMeta. addCleanup으로 원복."""
+        orig = tk.require_session
+        self.addCleanup(lambda: setattr(tk, "require_session", orig))
+        tk.require_session = lambda p: next(
+            (m for m in self.metas.values() if m.session_id.startswith(p)), None)
+
+    def test_multiple_ids_remove_each(self):
+        self._stub_require_session()
+        rc, _ = _quiet(tk.cmd_rm, self.args(session_id=["aaaa1111", "cccc3333"]))
+        self.assertEqual(rc, 0)
+        self.assertFalse(self.exists("aaaa1111-0000-0000-0000-000000000001"))
+        self.assertFalse(self.exists("cccc3333-0000-0000-0000-000000000003"))
+
+    def test_string_session_id_still_works(self):
+        """메뉴바 앱과 tests/test_rm.py는 Namespace(session_id="<str>")를 넘긴다."""
+        self._stub_require_session()
+        rc, _ = _quiet(tk.cmd_rm, self.args(session_id="aaaa1111"))
+        self.assertEqual(rc, 0)
+        self.assertFalse(self.exists("aaaa1111-0000-0000-0000-000000000001"))
+
+
 if __name__ == "__main__":
     unittest.main()

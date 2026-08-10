@@ -2825,21 +2825,17 @@ def _bulk_rm(args: argparse.Namespace) -> int:
     return 1 if (errors or not deleted) else 0
 
 
-def cmd_rm(args: argparse.Namespace) -> int:
-    """Remove (unlink) a session's transcript and purge its cache/state/mark
-    traces, reusing the same `_delete_sessions` path as the TUI `Del` key.
+_RM_SELECTORS = ("filter", "cwd", "status", "days", "older_than", "before")
 
-    Only unlinks the transcript — a live background process keeps running
-    (see `bg_delete_warning`). The menu-bar app calls this as `cst rm <id> -y`;
-    non-interactive callers MUST pass -y/--yes, otherwise we refuse rather than
-    hang on `input()` waiting for a tty that isn't there.
-    """
-    target = require_session(args.session_id)
+
+def _rm_one(prefix: str, args: argparse.Namespace, ctx) -> int:
+    """Remove one session addressed by id prefix. Extracted from cmd_rm so the
+    id mode and the bulk mode share nothing but `_delete_sessions`."""
+    target = require_session(prefix)
     if target is None:
         return 1
     id8 = target.session_id[:8]
     label = f"{id8}  {shorten_path(target.cwd)}"
-    ctx = StatusContext.capture()
 
     warn = bg_delete_warning([target.session_id], ctx.jobs)
     if warn:
@@ -2868,6 +2864,40 @@ def cmd_rm(args: argparse.Namespace) -> int:
         return 1
     print(f"✓ removed {id8}  {shorten_path(target.cwd)}")
     return 0
+
+
+def cmd_rm(args: argparse.Namespace) -> int:
+    """Remove (unlink) session transcripts and purge their cache/state/mark
+    traces, reusing the same `_delete_sessions` path as the TUI `Del` key.
+
+    Two modes, mirroring `cst done`: explicit id prefix(es), or bulk selection
+    via --filter/--cwd/--status/--days/--older-than/--before (`_bulk_rm`).
+    Only unlinks the transcript — a live background process keeps running
+    (see `bg_delete_warning`). The menu-bar app calls this as `cst rm <id> -y`;
+    non-interactive callers MUST pass -y/--yes, otherwise we refuse rather than
+    hang on `input()` waiting for a tty that isn't there.
+    """
+    ids = args.session_id
+    if isinstance(ids, str):  # pre-1.13 callers pass a plain string
+        ids = [ids] if ids else []
+    selectors = [n for n in _RM_SELECTORS if getattr(args, n, None)]
+    if ids and selectors:
+        flag = "--" + selectors[0].replace("_", "-")
+        print(f"Pass session id(s) OR a selector ({flag}), not both.",
+              file=sys.stderr)
+        return 1
+    if selectors:
+        return _bulk_rm(args)
+    if not ids:
+        print("session_id (or a selector such as --filter TEXT) required.",
+              file=sys.stderr)
+        return 1
+    ctx = StatusContext.capture()
+    rc = 0
+    for prefix in ids:
+        if _rm_one(prefix, args, ctx):
+            rc = 1
+    return rc
 
 
 def cmd_live(args: argparse.Namespace) -> int:
@@ -6174,14 +6204,37 @@ def _build_parser() -> argparse.ArgumentParser:
     p_undone.add_argument("session_id")
     p_undone.set_defaults(func=cmd_undone)
 
-    p_rm = sub.add_parser("rm", help="remove (unlink) a session transcript")
-    p_rm.add_argument("session_id")
+    p_rm = sub.add_parser("rm",
+                          help="remove (unlink) session transcript(s) "
+                               "(bulk via --filter/--status/--older-than)")
+    p_rm.add_argument("session_id", nargs="*",
+                      help="session id prefix(es); omit when using a selector")
+    p_rm.add_argument("--filter", metavar="TEXT",
+                      help="bulk mode: remove every session whose id+cwd+first "
+                           "user message contains TEXT — same matching as the "
+                           "TUI / filter (case-insensitive)")
+    p_rm.add_argument("--cwd", help="bulk mode: restrict to this cwd prefix")
+    p_rm.add_argument("--status",
+                      choices=["working", "waiting", "idle", "ended", "done",
+                               "active"],
+                      help="bulk mode: restrict to this status")
+    g_rm_time = p_rm.add_mutually_exclusive_group()
+    g_rm_time.add_argument("--days", type=int,
+                           help="bulk mode: only the last N days")
+    g_rm_time.add_argument("--older-than", dest="older_than", type=int,
+                           metavar="N",
+                           help="bulk mode: only sessions last active more "
+                                "than N days ago")
+    g_rm_time.add_argument("--before", metavar="YYYY-MM-DD",
+                           help="bulk mode: only sessions last active before "
+                                "this date")
     p_rm.add_argument("--dry-run", dest="dry_run", action="store_true",
                       help="show what would be removed without unlinking")
     p_rm.add_argument("-y", "--yes", action="store_true",
                       help="skip confirmation (required when non-interactive)")
     p_rm.add_argument("--force", action="store_true",
-                      help="remove without confirmation (implies -y)")
+                      help="remove without confirmation (implies -y) and "
+                           "include live ● / ! sessions in bulk mode")
     p_rm.set_defaults(func=cmd_rm)
 
     p_live = sub.add_parser("live",

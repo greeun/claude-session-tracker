@@ -84,5 +84,30 @@ class TestParserCompleteness(unittest.TestCase):
             tk._build_parser().parse_args(["--version"])
 
 
+class TestRmBulkFlags(unittest.TestCase):
+    def test_rm_parses_without_positional(self):
+        ns = tk._build_parser().parse_args(["rm", "--filter", "test"])
+        self.assertEqual(ns.session_id, [])
+        self.assertEqual(ns.filter, "test")
+        self.assertIs(ns.func, tk.cmd_rm)
+
+    def test_rm_bulk_flags_land_on_namespace(self):
+        ns = tk._build_parser().parse_args(
+            ["rm", "--status", "done", "--older-than", "90", "--cwd", "/repo"])
+        self.assertEqual(ns.status, "done")
+        self.assertEqual(ns.older_than, 90)
+        self.assertEqual(ns.cwd, "/repo")
+
+    def test_rm_time_flags_are_mutually_exclusive(self):
+        with self.assertRaises(SystemExit) as cm:
+            tk._build_parser().parse_args(["rm", "--days", "7", "--older-than", "90"])
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_rm_still_takes_ids(self):
+        ns = tk._build_parser().parse_args(["rm", "abc123", "def456", "-y"])
+        self.assertEqual(ns.session_id, ["abc123", "def456"])
+        self.assertTrue(ns.yes)
+
+
 if __name__ == "__main__":
     unittest.main()
