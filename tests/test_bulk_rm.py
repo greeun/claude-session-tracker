@@ -82,6 +82,10 @@ class TestRmCutoff(unittest.TestCase):
         expected = datetime.now(timezone.utc) - timedelta(days=30)
         self.assertLess(abs((got - expected).total_seconds()), 5)
 
+    def test_before_takes_precedence_over_older_than(self):
+        got = tk._rm_cutoff(NS(older_than=30, before="2026-01-01"))
+        self.assertEqual(got, datetime(2026, 1, 1, tzinfo=timezone.utc))
+
 
 class TestRmCandidates(unittest.TestCase):
     def setUp(self):
