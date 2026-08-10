@@ -276,6 +276,27 @@ removed: a live background process keeps running** (stop it with `cst stop
 <id>` first). Non-interactive callers must pass `-y` (it refuses rather than
 hang waiting for a tty); `--force` also skips confirmation.
 
+### Bulk delete
+
+Remove many sessions at once — the TUI's `/` filter → `Ctrl-A` → `Del` as one command:
+
+```bash
+cst rm --filter "prototype"              # id + cwd + first message substring
+cst rm --cwd ~/proj/scratch --status done
+cst rm --status ended --older-than 90    # untouched for 90+ days
+cst rm --status ended --before 2026-01-01
+cst rm --filter test --days 7 --dry-run  # last 7 days, preview only
+```
+
+Live sessions (● working / ! waiting) are skipped — a running Claude process
+keeps appending to the transcript it holds open, so unlinking it loses whatever
+comes next. Pass `--force` to include them. `--days` / `--older-than` /
+`--before` are mutually exclusive, and `--days N` means *the last N days*
+(same as `cst list`), not "older than N days".
+
+Non-interactive callers must pass `-y`. Deleting only unlinks the transcript —
+a background session's process keeps running; stop it with `cst stop <id>`.
+
 ### `cst stats [--top N]` — overview
 
 ```

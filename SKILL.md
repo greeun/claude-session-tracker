@@ -1,7 +1,7 @@
 ---
 name: claude-session-tracker
 description: Track live/waiting/ended/done status of Claude Code sessions. List, search, resume, export, backup, restore sessions via `cst` CLI or TUI. Use when user says "list sessions", "세션 상태", "cst", "session tracker", or wants to resume/search/export/backup sessions.
-version: 1.12.0
+version: 1.13.0
 ---
 
 # claude-session-tracker
@@ -75,8 +75,13 @@ cst backup [--days N|--before YYYY-MM-DD] [--cwd PFX] [--out PATH]
 cst restore <archive.tar.gz> [--cwd PFX]
             [--on-conflict skip|overwrite|rename] [--dry-run] [-y]
 cst relocate <id> <new-cwd> [--keep-original] [--force] [--dry-run] [-y]
-cst rm <id> [--dry-run] [-y] [--force]   # unlink one session transcript
+cst rm <id> [<id> ...] [--dry-run] [-y] [--force]   # unlink session transcript(s)
                           #   (only removes the transcript; a live bg process keeps running)
+cst rm --filter TEXT [--cwd PFX] [--status S]
+       [--days N|--older-than N|--before D] [--dry-run] [-y] [--force]
+                          # bulk rm: same id+cwd+first-msg substring match as
+                          #   done --filter; skips ● working / ! waiting unless
+                          #   --force; non-tty callers MUST pass -y
 
 # Background (agent-view) sessions — claude --bg / `claude agents`:
 cst jobs                  # ALL agent-view jobs incl exec/transcript-less ones,

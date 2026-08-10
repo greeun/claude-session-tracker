@@ -274,6 +274,28 @@ cst rm 960faaa8 -y           # 확인 없이 삭제
 비대화식 호출은 `-y` 필수(tty 없이 입력 대기하는 대신 거부); `--force`도
 확인을 건너뜀.
 
+### 일괄 삭제
+
+세션을 한 번에 여러 개 삭제 — TUI의 `/` 필터 → `Ctrl-A` → `Del` 흐름을
+명령 한 번으로:
+
+```bash
+cst rm --filter "prototype"              # id + cwd + 첫 메시지 부분 문자열
+cst rm --cwd ~/proj/scratch --status done
+cst rm --status ended --older-than 90    # 90일 이상 손대지 않은 세션
+cst rm --status ended --before 2026-01-01
+cst rm --filter test --days 7 --dry-run  # 최근 7일, 미리보기만
+```
+
+라이브 세션(● working / ! waiting)은 건너뜁니다 — 실행 중인 Claude
+프로세스가 열어 둔 트랜스크립트에 계속 이어 쓰기 때문에, unlink하면 그
+이후 내용이 사라집니다. 이들을 포함하려면 `--force`를 지정. `--days` /
+`--older-than` / `--before`는 서로 배타적이며, `--days N`은 (`cst list`와
+동일하게) "최근 N일"을 뜻합니다 — "N일 이상 지난"이 아닙니다.
+
+비대화형 호출은 `-y`를 명시해야 합니다. 삭제는 트랜스크립트만 unlink —
+백그라운드 세션의 프로세스는 계속 실행되므로 `cst stop <id>`로 중지하세요.
+
 ### `cst stats [--top N]` — 전체 요약
 
 ```
