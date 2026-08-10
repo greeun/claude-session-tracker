@@ -1467,6 +1467,19 @@ def done_guard_blocks(status: str, force: bool = False) -> bool:
     return (not force) and status == STATUS_WORKING
 
 
+def rm_guard_blocks(status: str, force: bool = False) -> bool:
+    """True when a delete request must be refused: the session's process is
+    live and still owns the transcript (● working / ! waiting), not forced.
+
+    A live Claude process keeps the `.jsonl` open and appends to it. Unlinking
+    doesn't stop the process — it keeps writing to the now-unlinked inode, so
+    everything said after the delete vanishes silently. ◦ idle is allowed: no
+    turn is in flight, so nothing is lost unless the user resumes that session.
+    Deliberately stricter than `done_guard_blocks` (which only blocks ●).
+    """
+    return (not force) and status in (STATUS_WORKING, STATUS_WAITING)
+
+
 def status_overlay() -> dict:
     """state.json hook-driven status overlay: sid -> {state,event,ts}."""
     val = load_state().get("status")
