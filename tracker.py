@@ -2691,6 +2691,53 @@ def cmd_undone(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------- CLI: bulk rm ----------
+
+_RM_LIST_CAP = 20   # candidate rows printed before "… +N more" (mirrors backup)
+
+
+def _rm_cutoff(args: argparse.Namespace) -> datetime | None:
+    """`--older-than N` / `--before YYYY-MM-DD` → the timestamp a session's
+    last activity must precede, or None when neither flag is given. Raises
+    ValueError carrying the user-facing message when --before isn't a date
+    (same format and wording as `cmd_backup`)."""
+    before = getattr(args, "before", None)
+    if before:
+        try:
+            return datetime.strptime(before, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise ValueError(f"--before must be YYYY-MM-DD (got {before!r})")
+    older = getattr(args, "older_than", None)
+    if older is not None:
+        return datetime.now(timezone.utc) - timedelta(days=older)
+    return None
+
+
+def _rm_candidates(sessions: list, ctx, needle: str | None,
+                   status_arg: str | None,
+                   cutoff: "datetime | None") -> list:
+    """Bulk-rm selection pool, before the live guard is applied.
+
+    `needle` matches like the TUI `/` filter and `_bulk_done`: case-insensitive
+    substring over "sessionId cwd first_user_msg". `cutoff` keeps sessions whose
+    last activity precedes it. `status_arg` is a --status name resolved through
+    `_STATUS_ARG`. Unlike `_bulk_done`, ✓ done sessions are NOT excluded —
+    they're the prime delete candidates.
+    """
+    pool = list(sessions)
+    if needle:
+        q = needle.lower()
+        pool = [s for s in pool
+                if q in f"{s.session_id} {s.cwd} {s.first_user_msg}".lower()]
+    if cutoff is not None:
+        pool = [s for s in pool if s.last_ts and s.last_ts < cutoff]
+    if status_arg:
+        wanted = _STATUS_ARG.get(status_arg.lower())
+        if wanted:
+            pool = [s for s in pool if ctx.resolve(s.session_id) == wanted]
+    return pool
+
+
 def cmd_rm(args: argparse.Namespace) -> int:
     """Remove (unlink) a session's transcript and purge its cache/state/mark
     traces, reusing the same `_delete_sessions` path as the TUI `Del` key.
