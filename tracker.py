@@ -2694,6 +2694,8 @@ def cmd_undone(args: argparse.Namespace) -> int:
 # ---------- CLI: bulk rm ----------
 
 _RM_LIST_CAP = 20   # candidate rows printed before "… +N more" (mirrors backup)
+_RM_SELECTORS = ("filter", "cwd", "status", "days", "older_than", "before")
+_RM_INT_SELECTORS = ("days", "older_than")  # 0 is a valid value -> `is not None`
 
 
 def _rm_cutoff(args: argparse.Namespace) -> datetime | None:
@@ -2738,13 +2740,41 @@ def _rm_candidates(sessions: list, ctx, needle: str | None,
     return pool
 
 
+def _rm_guard_status(session_id: str, ctx) -> str:
+    """The status the delete guard must judge — NOT necessarily the glyph the
+    row displays. `resolve_status`/`classify_status` let ✓ done short-circuit
+    before liveness is even considered, so a session that's ✓ done AND still
+    alive-and-working would resolve to ✓, and `rm_guard_blocks("✓")` is always
+    False — the live guard silently doesn't apply. Re-classify past the done
+    flag when the process is actually in the live registry; callers should
+    still use `ctx.resolve()` for what gets *printed* (stays ✓).
+
+    The `session_id in ctx.live` guard is load-bearing: without it, a DEAD
+    background job whose last persisted job-state happens to be "working"
+    would re-classify to ● via `_JOB_STATE_GLYPH` and wrongly become
+    unskippable (a false positive block, not a false negative).
+    """
+    st = ctx.resolve(session_id)
+    if st == STATUS_DONE and session_id in ctx.live:
+        st = classify_status(done=False, alive=True,
+                             overlay=ctx.overlay.get(session_id),
+                             reg=ctx.registry.get(session_id),
+                             job=ctx.jobs.get(session_id))
+    return st
+
+
 def _bulk_rm(args: argparse.Namespace) -> int:
     """`cst rm --filter/--status/--older-than/…` — the TUI "`/` filter →
     Ctrl-A → Del" flow as one CLI call.
 
     Live (● working / ! waiting) sessions are skipped unless --force
-    (`rm_guard_blocks`), the candidate list is printed and confirmed before
+    (`rm_guard_blocks`, judged via `_rm_guard_status` so a ✓ done session
+    whose process is still alive and working/waiting is skipped too — the
+    row still displays ✓), the candidate list is printed and confirmed before
     unlinking, and non-tty callers must pass -y/--yes (mirrors single-id rm).
+    --force only widens the target set to include live sessions — unlike the
+    single-id path, it does NOT skip the confirmation prompt (mirrors
+    `_bulk_done`); pass -y/--yes for that.
     Deletion goes through `_delete_sessions`, the same path as the TUI Del key,
     so cache entries and done flags are purged too. Only unlinks transcripts —
     a live background process keeps running (see `bg_delete_warning`).
@@ -2768,7 +2798,7 @@ def _bulk_rm(args: argparse.Namespace) -> int:
     force = getattr(args, "force", False)
     targets, skipped = [], []
     for s in pool:
-        (skipped if rm_guard_blocks(ctx.resolve(s.session_id), force)
+        (skipped if rm_guard_blocks(_rm_guard_status(s.session_id, ctx), force)
          else targets).append(s)
 
     total_bytes = 0
@@ -2802,7 +2832,7 @@ def _bulk_rm(args: argparse.Namespace) -> int:
               f"{_human(total_bytes)}, nothing removed)")
         return 0
 
-    if not (getattr(args, "yes", False) or force):
+    if not getattr(args, "yes", False):
         if not sys.stdin.isatty():
             print(f"Refusing to remove {len(targets)} session(s) without "
                   f"confirmation — pass -y/--yes (non-interactive).",
@@ -2818,14 +2848,12 @@ def _bulk_rm(args: argparse.Namespace) -> int:
             return 1
 
     deleted, errors = _delete_sessions(targets, list(targets), set(), ctx)
-    msg = f"✓ removed {deleted} session(s)"
+    failed = bool(errors or not deleted)
+    msg = f"{'✗' if failed else '✓'} removed {deleted} session(s)"
     if errors:
         msg += f", {errors} failed"
     print(msg)
-    return 1 if (errors or not deleted) else 0
-
-
-_RM_SELECTORS = ("filter", "cwd", "status", "days", "older_than", "before")
+    return 1 if failed else 0
 
 
 def _rm_one(prefix: str, args: argparse.Namespace, ctx) -> int:
@@ -2880,7 +2908,9 @@ def cmd_rm(args: argparse.Namespace) -> int:
     ids = args.session_id
     if isinstance(ids, str):  # pre-1.13 callers pass a plain string
         ids = [ids] if ids else []
-    selectors = [n for n in _RM_SELECTORS if getattr(args, n, None)]
+    selectors = [n for n in _RM_SELECTORS if
+                (getattr(args, n, None) is not None if n in _RM_INT_SELECTORS
+                 else getattr(args, n, None))]
     if ids and selectors:
         flag = "--" + selectors[0].replace("_", "-")
         print(f"Pass session id(s) OR a selector ({flag}), not both.",
@@ -6220,7 +6250,10 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="bulk mode: restrict to this status")
     g_rm_time = p_rm.add_mutually_exclusive_group()
     g_rm_time.add_argument("--days", type=int,
-                           help="bulk mode: only the last N days")
+                           help="bulk mode: only the last N days (recent) — "
+                                "NOT 'older than N days'; use --older-than for "
+                                "that (note: cst backup --days means the "
+                                "opposite)")
     g_rm_time.add_argument("--older-than", dest="older_than", type=int,
                            metavar="N",
                            help="bulk mode: only sessions last active more "
@@ -6233,8 +6266,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_rm.add_argument("-y", "--yes", action="store_true",
                       help="skip confirmation (required when non-interactive)")
     p_rm.add_argument("--force", action="store_true",
-                      help="remove without confirmation (implies -y) and "
-                           "include live ● / ! sessions in bulk mode")
+                      help="single id: remove without confirmation (implies "
+                           "-y); bulk mode: include live ● / ! sessions too — "
+                           "the confirmation prompt still applies, pass -y to "
+                           "skip it")
     p_rm.set_defaults(func=cmd_rm)
 
     p_live = sub.add_parser("live",

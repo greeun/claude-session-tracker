@@ -52,13 +52,23 @@ def _meta(sid, cwd="/repo/app", msg="", last_ts=None):
 
 
 class _FakeCtx:
-    """StatusContext stand-in: fixed sid -> glyph map, empty jobs/done."""
+    """StatusContext stand-in: fixed sid -> glyph map, empty jobs/done.
 
-    def __init__(self, status_map=None, jobs=None):
+    live/overlay/registry default empty so existing callers (which only care
+    about the resolved glyph) are unaffected; C1 tests pass them explicitly to
+    simulate a session that reads ✓ done via the glyph map while its process
+    is still in the live registry.
+    """
+
+    def __init__(self, status_map=None, jobs=None, live=None,
+                overlay=None, registry=None):
         self._m = status_map or {}
         self.done = set()
         self.jobs = jobs or {}
         self.pins = set()
+        self.live = live or set()
+        self.overlay = overlay or {}
+        self.registry = registry or {}
 
     def resolve(self, sid):
         return self._m.get(sid, tk.STATUS_ENDED)
@@ -168,7 +178,13 @@ class _BulkBase(unittest.TestCase):
                                              last_ts=now - timedelta(days=age))
         self.sessions = list(self.metas.values())
         self.status = {"bbbb2222-0000-0000-0000-000000000002": tk.STATUS_WORKING}
-        tk.load_all_sessions = lambda **kw: list(self.sessions)
+        self.load_kwargs = {}
+
+        def _stub_load(**kw):
+            self.load_kwargs = kw
+            return list(self.sessions)
+
+        tk.load_all_sessions = _stub_load
         tk.StatusContext.capture = classmethod(
             lambda cls: _FakeCtx(self.status))
         sys.stdin = _TtyStdin("y\n")
@@ -212,6 +228,66 @@ class TestBulkRm(_BulkBase):
         rc, _ = _quiet(tk._bulk_rm, self.args(force=True))
         self.assertEqual(rc, 0)
         self.assertFalse(self.exists("bbbb2222-0000-0000-0000-000000000002"))
+
+    def test_done_and_live_working_is_skipped_by_guard(self):
+        """C1: resolve_status lets ✓ done short-circuit liveness, so a session
+        that's ✓ AND alive-and-working must still be caught by the delete
+        guard — `--status done` is this feature's headline use case, and a
+        self `done!` session is ● working by design while it processes that
+        very prompt. The row must still *display* ✓ (ctx.resolve), only the
+        guard's internal judgement should see past the done flag."""
+        live_sid = "bbbb2222-0000-0000-0000-000000000002"
+        dead_sid = "aaaa1111-0000-0000-0000-000000000001"
+        self.status = {live_sid: tk.STATUS_DONE, dead_sid: tk.STATUS_DONE}
+        tk.StatusContext.capture = classmethod(
+            lambda cls: _FakeCtx(self.status, live={live_sid},
+                                 registry={live_sid: {"status": "busy"}}))
+        rc, out = _quiet(tk._bulk_rm, self.args())
+        self.assertEqual(rc, 0)
+        # done + live + working (registry busy) -> guard still blocks it
+        self.assertTrue(self.exists(live_sid))
+        self.assertIn("skipped", out)
+        self.assertIn(live_sid[:8], out)
+        # done + NOT live -> deleted normally (the feature's main use case)
+        self.assertFalse(self.exists(dead_sid))
+        # the target row still shows the ✓ done glyph, not a live one
+        self.assertIn(f"  {tk.STATUS_DONE} {dead_sid[:8]}", out)
+
+    def test_force_includes_done_and_live_sessions(self):
+        live_sid = "bbbb2222-0000-0000-0000-000000000002"
+        self.status = {live_sid: tk.STATUS_DONE}
+        tk.StatusContext.capture = classmethod(
+            lambda cls: _FakeCtx(self.status, live={live_sid},
+                                 registry={live_sid: {"status": "busy"}}))
+        rc, _ = _quiet(tk._bulk_rm, self.args(force=True, yes=True))
+        self.assertEqual(rc, 0)
+        self.assertFalse(self.exists(live_sid))
+
+    def test_force_without_yes_still_confirms_non_tty(self):
+        """I1/I3: in bulk mode --force only widens the target set (live
+        inclusion) — it must NOT also skip the confirmation gate the way the
+        single-id `_rm_one` --force does. Matches `_bulk_done`."""
+        sys.stdin = _NoTtyStdin("")
+        rc, out = _quiet(tk._bulk_rm,
+                         self.args(filter="prototype", yes=False, force=True))
+        self.assertEqual(rc, 1)
+        self.assertTrue(self.exists("aaaa1111-0000-0000-0000-000000000001"))
+        self.assertTrue(self.exists("cccc3333-0000-0000-0000-000000000003"))
+        self.assertIn("Refusing to remove", out)
+
+    def test_force_without_yes_prompts_on_tty(self):
+        sys.stdin = _TtyStdin("n\n")
+        rc, out = _quiet(tk._bulk_rm,
+                         self.args(filter="prototype", yes=False, force=True))
+        self.assertEqual(rc, 1)
+        self.assertTrue(self.exists("aaaa1111-0000-0000-0000-000000000001"))
+        self.assertIn("Aborted", out)
+
+    def test_cwd_and_days_pass_through_to_load_all_sessions(self):
+        rc, _ = _quiet(tk._bulk_rm, self.args(cwd="/repo/app", days=7))
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.load_kwargs.get("cwd_filter"), "/repo/app")
+        self.assertEqual(self.load_kwargs.get("days"), 7)
 
     def test_all_matches_live_returns_1_and_deletes_nothing(self):
         self.sessions = [self.metas["bbbb2222-0000-0000-0000-000000000002"]]
