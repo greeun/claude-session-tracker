@@ -2738,6 +2738,93 @@ def _rm_candidates(sessions: list, ctx, needle: str | None,
     return pool
 
 
+def _bulk_rm(args: argparse.Namespace) -> int:
+    """`cst rm --filter/--status/--older-than/…` — the TUI "`/` filter →
+    Ctrl-A → Del" flow as one CLI call.
+
+    Live (● working / ! waiting) sessions are skipped unless --force
+    (`rm_guard_blocks`), the candidate list is printed and confirmed before
+    unlinking, and non-tty callers must pass -y/--yes (mirrors single-id rm).
+    Deletion goes through `_delete_sessions`, the same path as the TUI Del key,
+    so cache entries and done flags are purged too. Only unlinks transcripts —
+    a live background process keeps running (see `bg_delete_warning`).
+    """
+    try:
+        cutoff = _rm_cutoff(args)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    sessions = load_all_sessions(cwd_filter=getattr(args, "cwd", None),
+                                 days=getattr(args, "days", None),
+                                 progress=True)
+    ctx = StatusContext.capture()
+    pool = _rm_candidates(sessions, ctx, getattr(args, "filter", None),
+                          getattr(args, "status", None), cutoff)
+    if not pool:
+        print("(no sessions matching the given filters)")
+        return 1
+
+    force = getattr(args, "force", False)
+    targets, skipped = [], []
+    for s in pool:
+        (skipped if rm_guard_blocks(ctx.resolve(s.session_id), force)
+         else targets).append(s)
+
+    total_bytes = 0
+    for s in targets:
+        try:
+            total_bytes += s.path.stat().st_size
+        except OSError:
+            pass
+
+    for s in targets[:_RM_LIST_CAP]:
+        print(f"  {ctx.resolve(s.session_id)} {s.session_id[:8]}  "
+              f"{shorten_path(s.cwd)}  "
+              f"{truncate_display(s.first_user_msg or '', 40)}")
+    if len(targets) > _RM_LIST_CAP:
+        print(f"  … +{len(targets) - _RM_LIST_CAP} more")
+
+    if skipped:
+        ids8 = ", ".join(s.session_id[:8] for s in skipped)
+        print(f"({len(skipped)} skipped — live: {ids8}; "
+              f"pass --force to include)", file=sys.stderr)
+    if not targets:
+        print("Nothing to remove — every match is live.", file=sys.stderr)
+        return 1
+
+    warn = bg_delete_warning([s.session_id for s in targets], ctx.jobs)
+    if warn:
+        print(warn, file=sys.stderr)
+
+    if getattr(args, "dry_run", False):
+        print(f"(dry run — {len(targets)} session(s), "
+              f"{_human(total_bytes)}, nothing removed)")
+        return 0
+
+    if not (getattr(args, "yes", False) or force):
+        if not sys.stdin.isatty():
+            print(f"Refusing to remove {len(targets)} session(s) without "
+                  f"confirmation — pass -y/--yes (non-interactive).",
+                  file=sys.stderr)
+            return 1
+        try:
+            reply = input(f"Remove {len(targets)} session(s), "
+                          f"{_human(total_bytes)}? [y/N] ").strip().lower()
+        except EOFError:
+            reply = ""
+        if reply not in ("y", "yes"):
+            print("Aborted.")
+            return 1
+
+    deleted, errors = _delete_sessions(targets, list(targets), set(), ctx)
+    msg = f"✓ removed {deleted} session(s)"
+    if errors:
+        msg += f", {errors} failed"
+    print(msg)
+    return 1 if (errors or not deleted) else 0
+
+
 def cmd_rm(args: argparse.Namespace) -> int:
     """Remove (unlink) a session's transcript and purge its cache/state/mark
     traces, reusing the same `_delete_sessions` path as the TUI `Del` key.

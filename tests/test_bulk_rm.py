@@ -132,5 +132,155 @@ class TestRmCandidates(unittest.TestCase):
         self.assertEqual([s.session_id for s in got], [self.old.session_id])
 
 
+class _TtyStdin(io.StringIO):
+    def isatty(self):
+        return True
+
+
+class _NoTtyStdin(io.StringIO):
+    def isatty(self):
+        return False
+
+
+class _BulkBase(unittest.TestCase):
+    """실제 .jsonl 파일 + 스텁된 load_all_sessions/StatusContext.capture."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self._tmp.name)
+        self._orig = (tk.CACHE_DIR, tk.CACHE_PATH, tk.STATE_PATH,
+                      tk.load_all_sessions, tk.StatusContext.capture, sys.stdin)
+        tk.CACHE_DIR = self.root
+        tk.CACHE_PATH = self.root / "index.json"
+        tk.STATE_PATH = self.root / "state.json"
+
+        now = datetime.now(timezone.utc)
+        self.metas = {}
+        for sid, cwd, msg, age in (
+            ("aaaa1111-0000-0000-0000-000000000001", "/repo/app", "old prototype", 100),
+            ("bbbb2222-0000-0000-0000-000000000002", "/repo/app", "live work", 0),
+            ("cccc3333-0000-0000-0000-000000000003", "/repo/other", "prototype rerun", 5),
+        ):
+            p = self.root / f"{sid[:8]}.jsonl"
+            p.write_text('{"type":"user"}\n', encoding="utf-8")
+            self.metas[sid] = tk.SessionMeta(session_id=sid, path=p, cwd=cwd,
+                                             first_user_msg=msg,
+                                             last_ts=now - timedelta(days=age))
+        self.sessions = list(self.metas.values())
+        self.status = {"bbbb2222-0000-0000-0000-000000000002": tk.STATUS_WORKING}
+        tk.load_all_sessions = lambda **kw: list(self.sessions)
+        tk.StatusContext.capture = classmethod(
+            lambda cls: _FakeCtx(self.status))
+        sys.stdin = _TtyStdin("y\n")
+
+    def tearDown(self):
+        (tk.CACHE_DIR, tk.CACHE_PATH, tk.STATE_PATH,
+         tk.load_all_sessions, tk.StatusContext.capture, sys.stdin) = self._orig
+        self._tmp.cleanup()
+
+    def args(self, **kw):
+        base = dict(session_id=[], filter=None, cwd=None, status=None,
+                    days=None, older_than=None, before=None,
+                    dry_run=False, yes=True, force=False)
+        base.update(kw)
+        return NS(**base)
+
+    def exists(self, sid):
+        return self.metas[sid].path.exists()
+
+
+class TestBulkRm(_BulkBase):
+    def test_filter_removes_matching_files_only(self):
+        rc, out = _quiet(tk._bulk_rm, self.args(filter="prototype"))
+        self.assertEqual(rc, 0)
+        self.assertFalse(self.exists("aaaa1111-0000-0000-0000-000000000001"))
+        self.assertFalse(self.exists("cccc3333-0000-0000-0000-000000000003"))
+        self.assertTrue(self.exists("bbbb2222-0000-0000-0000-000000000002"))
+        self.assertIn("removed 2 session(s)", out)
+
+    def test_live_sessions_skipped_and_reported(self):
+        # --cwd는 load_all_sessions(cwd_filter=...)가 처리하고 여기선 스텁이라
+        # 필터 없이 전체 풀로 가드 동작만 본다.
+        rc, out = _quiet(tk._bulk_rm, self.args(status=None, filter=None))
+        self.assertEqual(rc, 0)
+        self.assertTrue(self.exists("bbbb2222-0000-0000-0000-000000000002"))
+        self.assertIn("skipped", out)
+        self.assertIn("bbbb2222", out)
+        self.assertIn("--force", out)
+
+    def test_force_includes_live_sessions(self):
+        rc, _ = _quiet(tk._bulk_rm, self.args(force=True))
+        self.assertEqual(rc, 0)
+        self.assertFalse(self.exists("bbbb2222-0000-0000-0000-000000000002"))
+
+    def test_all_matches_live_returns_1_and_deletes_nothing(self):
+        self.sessions = [self.metas["bbbb2222-0000-0000-0000-000000000002"]]
+        rc, out = _quiet(tk._bulk_rm, self.args())
+        self.assertEqual(rc, 1)
+        self.assertTrue(self.exists("bbbb2222-0000-0000-0000-000000000002"))
+        self.assertIn("Nothing to remove", out)
+
+    def test_no_match_returns_1(self):
+        rc, out = _quiet(tk._bulk_rm, self.args(filter="zzz-nothing"))
+        self.assertEqual(rc, 1)
+        self.assertIn("no sessions matching", out)
+
+    def test_dry_run_deletes_nothing(self):
+        rc, out = _quiet(tk._bulk_rm, self.args(filter="prototype", dry_run=True))
+        self.assertEqual(rc, 0)
+        self.assertTrue(self.exists("aaaa1111-0000-0000-0000-000000000001"))
+        self.assertIn("dry run", out)
+
+    def test_non_tty_without_yes_refuses(self):
+        sys.stdin = _NoTtyStdin("")
+        rc, out = _quiet(tk._bulk_rm, self.args(filter="prototype", yes=False))
+        self.assertEqual(rc, 1)
+        self.assertTrue(self.exists("aaaa1111-0000-0000-0000-000000000001"))
+        self.assertIn("Refusing to remove", out)
+
+    def test_tty_prompt_abort_keeps_files(self):
+        sys.stdin = _TtyStdin("n\n")
+        rc, out = _quiet(tk._bulk_rm, self.args(filter="prototype", yes=False))
+        self.assertEqual(rc, 1)
+        self.assertTrue(self.exists("aaaa1111-0000-0000-0000-000000000001"))
+        self.assertIn("Aborted", out)
+
+    def test_bad_before_returns_2(self):
+        rc, out = _quiet(tk._bulk_rm, self.args(before="01/01/2026"))
+        self.assertEqual(rc, 2)
+        self.assertIn("--before must be YYYY-MM-DD", out)
+
+    def test_older_than_selects_only_old(self):
+        rc, _ = _quiet(tk._bulk_rm, self.args(older_than=30))
+        self.assertEqual(rc, 0)
+        self.assertFalse(self.exists("aaaa1111-0000-0000-0000-000000000001"))
+        self.assertTrue(self.exists("cccc3333-0000-0000-0000-000000000003"))
+
+    def test_delete_purges_done_flag_and_cache_entry(self):
+        sid = "aaaa1111-0000-0000-0000-000000000001"
+        path = self.metas[sid].path
+        tk.set_done(sid, True)
+        tk._save_cache({"schema": tk._CACHE_SCHEMA,
+                        "entries": {str(path): {"session_id": sid}}})
+        rc, _ = _quiet(tk._bulk_rm, self.args(filter="old prototype"))
+        self.assertEqual(rc, 0)
+        self.assertNotIn(sid, tk.load_state().get("done", {}))
+        self.assertNotIn(str(path), tk._load_cache().get("entries", {}))
+
+    def test_long_list_is_capped(self):
+        now = datetime.now(timezone.utc)
+        extra = []
+        for i in range(25):
+            sid = f"dddd{i:04d}-0000-0000-0000-00000000{i:04d}"
+            p = self.root / f"bulk{i}.jsonl"
+            p.write_text("{}\n", encoding="utf-8")
+            extra.append(tk.SessionMeta(session_id=sid, path=p, cwd="/repo/bulk",
+                                        first_user_msg="capped", last_ts=now))
+        self.sessions = extra
+        rc, out = _quiet(tk._bulk_rm, self.args(filter="capped", dry_run=True))
+        self.assertEqual(rc, 0)
+        self.assertIn("… +5 more", out)
+
+
 if __name__ == "__main__":
     unittest.main()
