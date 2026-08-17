@@ -101,7 +101,37 @@ by `_status_sort_rank()` (working→waiting→idle→ended→done, needs the
 column (resetting to its natural direction) and `S` toggles reverse — both save
 immediately, reset the cursor, and the header shows `sort:<col>▼/▲` with the
 active column's header label highlighted.
-8. **TUI** (`_pick_ui`, ~line 4179) — curses-based picker with two modes (normal + search), rendering loop, modal dialogs (help, preview, delete confirm, cmux chooser). Normal-mode action keys include `s`/`S` (sort), `t`/`T` (theme), and `o`/`O` (open the focused session's folder in a new terminal — plain shell via `open_folder_in_new_terminal()`, no claude command) alongside `D`/`H`/`C`/`a`/`R`/`e`/`v`. **Color theme**: dark/light palettes via `tui_init_colors()` — pair NUMBERS carry fixed meaning (1–9), only (fg,bg) swap per theme, so the whole UI re-themes without touching call sites; pair 7 doubles as the full-screen `bkgd` fill so each theme renders identically across terminals. `resolve_theme()` picks the effective theme (CLI `--theme` → saved pref → `COLORFGBG` auto-detect → dark); `t`/`T` toggles live and persists via `save_theme()` into `state.json`.
+
+### Origin filter (`cst list --origin` / TUI `f`,`F`)
+
+Claude Code stamps every user/assistant event with an `entrypoint`: `cli` when a
+human typed the session into a terminal, `sdk-py`/`sdk-cli`/`sdk-ts` when an SDK
+spawned it (security-review hooks, `claude -p` scripts, tooling). Agent-view
+`--bg` jobs are `cli` — a human dispatched them — so they count as user
+sessions. `load_session_meta` picks the first non-empty value in the same event
+loop that fills `git_branch` (no extra file read); `SessionMeta.entrypoint`
+carries it and `_CACHE_SCHEMA` was bumped 4→5 to invalidate pre-entrypoint
+cache entries. `cmd_search`, which builds its own `SessionMeta` without the
+cache, captures it in its own loop.
+
+`session_origin(meta)` maps that to `"agent"` (entrypoint starts with `sdk`) or
+`"user"` (everything else). **Unknown or absent entrypoints deliberately read as
+`user`** — some transcript-less bg jobs carry none, and a filter must not
+silently swallow a session whose origin cst cannot prove. `filter_origin(rows,
+origin)` returns a new list; `"all"` and any unrecognised value keep everything.
+`cycle_origin(origin, step)` walks `ORIGIN_CHOICES = ("all","user","agent")` in
+either direction. The pref persists as `{"origin": "..."}` via
+`load_origin`/`save_origin` (mirrors `save_theme`/`save_sort`).
+
+Both `cmd_list` and `cmd_search` honour an explicit `--origin` as a one-off,
+else fall back to the saved TUI pref, and append `origin_note(origin)` —
+`  [origin:user]` — to their summary line so a saved filter never shrinks a
+listing invisibly. `session_to_dict` exposes `entrypoint` + `origin` for
+`--json` (cst.app). In the TUI, `f` cycles forward and `F` backwards; both save
+immediately and reset the cursor. The header hint (`👤user` / `🤖agent`) sits
+right after `sort:<col>` — anything longer, or placed after the transient
+mark/search/hide/cwd hints, truncates at 80 columns.
+8. **TUI** (`_pick_ui`, ~line 4179) — curses-based picker with two modes (normal + search), rendering loop, modal dialogs (help, preview, delete confirm, cmux chooser). Normal-mode action keys include `s`/`S` (sort), `f`/`F` (origin filter), `t`/`T` (theme), and `o`/`O` (open the focused session's folder in a new terminal — plain shell via `open_folder_in_new_terminal()`, no claude command) alongside `D`/`H`/`C`/`a`/`R`/`e`/`v`. **Color theme**: dark/light palettes via `tui_init_colors()` — pair NUMBERS carry fixed meaning (1–9), only (fg,bg) swap per theme, so the whole UI re-themes without touching call sites; pair 7 doubles as the full-screen `bkgd` fill so each theme renders identically across terminals. `resolve_theme()` picks the effective theme (CLI `--theme` → saved pref → `COLORFGBG` auto-detect → dark); `t`/`T` toggles live and persists via `save_theme()` into `state.json`.
 9. **Argument parser** (`_build_parser`, ~line 5689) and `main` (~line 5890)
 
 ### Key data flow
@@ -116,7 +146,7 @@ active column's header label highlighted.
 | `~/.claude/sessions/<pid>.json` | Read | Live-process registry (interactive sessions) |
 | `~/.claude/jobs/<short>/state.json` | Read | Agent-view background-session state (`scan_jobs()`) |
 | `~/.cst/index.json` | R/W | Session metadata cache (safe to delete) |
-| `~/.cst/state.json` | R/W | Done-flag overlay + status overlay + user prefs: auto-rescan, TUI theme, column sort (safe to delete) |
+| `~/.cst/state.json` | R/W | Done-flag overlay + status overlay + user prefs: auto-rescan, TUI theme, column sort, origin filter (safe to delete) |
 | `~/.claude/jobs/pins.json` | Read | Agent-view pin set (`read_pins()`) — never written |
 
 cst's own dir is `_cst_home()` — `$CST_HOME` if set, else `~/.cst`. `main()`
@@ -195,6 +225,6 @@ through `_delete_sessions`, shared with the TUI `Del` key.
 - The TUI itself requires a real TTY — `_pick_ui` can't run from non-interactive Bash calls or agent tool calls (verify its curses layout headlessly via `pty.fork` + `getyx`)
 - CJK/Unicode display width is handled manually via `east_asian_width`; search mode assembles UTF-8 byte-by-byte to work around Python curses bugs on some terminals
 - `ESCDELAY` is set to 25ms for responsive Esc handling
-- `_CACHE_SCHEMA` version (currently 4) must be bumped when `SessionMeta` fields or extraction logic change, to invalidate stale cache entries
+- `_CACHE_SCHEMA` version (currently 5) must be bumped when `SessionMeta` fields or extraction logic change, to invalidate stale cache entries
 - `encode_cwd()` NFC-normalizes paths before encoding — important for Korean filesystem paths on macOS
 - Version string is in `__version__` at the top of `tracker.py`
