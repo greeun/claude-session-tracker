@@ -72,6 +72,7 @@ cst done --filter "문자열" -y  # 매칭 세션 일괄 done (TUI Ctrl-A+d와 �
 cst export <id>               # 트랜스크립트를 ./<id>.md로 출력
 cst stats                     # 요약 (프로젝트·상태 분포)
 cst list --sort msgs          # 컬럼 정렬 (time|status|msgs|project; --reverse로 방향 반전)
+cst list --origin user        # 사용자가 시작한 세션만 (--origin agent는 SDK가 생성한 것만)
 cst jobs                      # agent-view 백그라운드 세션 (claude --bg)
 cst --skip-perm --tui         # 재개 시 --dangerously-skip-permissions 자동 적용
 cst --theme light --tui       # TUI 색 테마 지정(auto|dark|light; `t`/`T`로 실시간 토글)
@@ -114,7 +115,8 @@ cst --theme light --tui       # TUI 색 테마 지정(auto|dark|light; `t`/`T`�
 ```bash
 cst list [--limit 30] [--cwd PREFIX] [--days N]
          [--status working|waiting|idle|ended|done|active]
-         [--sort time|status|msgs|project] [--reverse] [--json]
+         [--sort time|status|msgs|project] [--reverse]
+         [--origin all|user|agent] [--json]
 ```
 
 ```
@@ -133,8 +135,18 @@ claude-session-tracker v1.10.0
   방향 반전. `status`는 working→waiting→idle→ended→done 순; 동점은 항상 최신순으로
   깨짐. 명시적 `--sort`는 일회성이고, `--sort` 없으면 저장된 TUI 정렬 설정을 사용.
   정렬은 `--limit` **이전**에 적용되어 선택된 순서의 상위 N개를 자름.
+- **생성 주체:** `--origin all|user|agent` (기본 `all`). 트랜스크립트의
+  `entrypoint` 필드로 누가 세션을 시작했는지 구분한다. `user`는 터미널에서
+  직접 시작한 세션(`cli` — agent-view `bg` 잡도 사람이 발행했으므로 포함),
+  `agent`는 SDK가 생성한 세션(`sdk-py`/`sdk-cli`/`sdk-ts`: 보안 리뷰 훅,
+  `claude -p` 스크립트, 각종 도구)으로, 목록을 뒤덮기 쉬운 쪽이다.
+  `entrypoint`가 없거나 알 수 없는 값이면 `user`로 취급해, 근거 없이 세션을
+  감추지 않는다. 명시적 `--origin`은 일회성이고, 플래그가 없으면 저장된 TUI
+  설정(`f`/`F`)을 사용하며, 필터가 걸린 상태는 요약 줄에 `[origin:user]`로
+  표시된다. `cst search`도 같은 플래그를 지원.
 - **`--json`** — 테이블 대신 기계가 읽는 JSON으로 출력
-  (cst.app macOS 컴패니언이 소비하는 계약).
+  (cst.app macOS 컴패니언이 소비하는 계약). 각 세션에 `entrypoint`와 `origin`
+  필드가 포함된다.
 
 ### `cst pick` / `--tui` — 인터랙티브 TUI
 
@@ -384,6 +396,8 @@ fzf 스타일 필터, 상태 글리프, 모달, 액션 키를 갖춘 curses 선�
 | **`a`** / **`A`** | 자동 재스캔 간격 팝업 (Off / 5 / 10 / 30 / 60 / 120초; 기본 ON 10초, `state.json`에 저장; 세션이 **새로** `!` 대기로 전이 시 `curses.beep()` + 고정 TUI 토스트 — macOS 데스크톱 알림 없음) |
 | **`s`** | 정렬 컬럼 순환 (화면 컬럼 순서대로): `status → time → msgs → project` (해당 컬럼의 자연 방향으로 리셋). 헤더에 `sort:<col>▼/▲` 표시 + 활성 컬럼 하이라이트. 저장됨. |
 | **`S`** | 현재 정렬 방향 반전. 저장됨. |
+| **`f`** | 생성 주체 필터 순환: `all → user → agent`. `user`는 터미널에서 시작한 세션(agent-view `bg` 잡 포함), `agent`는 SDK가 생성한 세션(보안 리뷰 훅, `claude -p`, 각종 도구). 헤더에 `👤user` / `🤖agent` 표시. 저장되며 `cst list --origin`과 공유. |
+| **`F`** | 생성 주체 필터를 역방향으로 순환 (`all → agent → user`). 저장됨. |
 | **`t`** / **`T`** | 색 테마 토글 (dark ↔ light). `state.json`에 저장. |
 | `Del` / `Fn+Delete` | 마크된/현재 세션 삭제 (확인 모달) |
 | `?` | 도움말 모달 |
@@ -411,13 +425,14 @@ fzf 스타일 필터, 상태 글리프, 모달, 액션 키를 갖춘 curses 선�
 ### 헤더
 
 ```
- claude-session-tracker v1.10.0  12/563  ●3 !1 ◦0 ○558 ✓1  ⟳10s  sort:time▼  [✓ hidden]  [📂 ~/project]   ? help  Enter open  o folder  / filter  s sort  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit
+ claude-session-tracker v1.10.0  12/563  ●3 !1 ◦0 ○558 ✓1  ⟳10s  sort:time▼  👤user  [✓ hidden]  [📂 ~/project]   ? help  Enter open  o folder  / filter  s sort  f origin  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit
 ```
 
 - `12/563` — 보이는 행 / 전체 세션 수
 - `●3 !1 ◦0 ○558 ✓1` — 현재 뷰의 상태별 카운트
 - `⟳10s` — 자동 재스캔 간격 (또는 `⟳off`)
 - `sort:time▼` — 활성 정렬 컬럼 + 방향 (`▼` 내림 / `▲` 오름); 해당 컬럼 헤더가 하이라이트됨
+- `👤user` / `🤖agent` — 생성 주체 필터가 `all`이 아닐 때만 표시
 - `[✓ hidden]` — hide-done이 켜졌을 때만 표시
 - `[📂 ~/project]` — cwd-only가 켜졌을 때만 표시
 
@@ -533,7 +548,7 @@ TUI에서 `Enter`를 누르면 **현재 쓰는 터미널 앱과 동일한 앱의
 | `~/.claude/jobs/<short>/state.json` | agent-view 백그라운드 잡 상태 (읽기 전용) | 건드리지 말 것 |
 | `~/.claude/jobs/pins.json` | agent-view 핀 집합 (읽기 전용; cst는 쓰지 않음) | 건드리지 말 것 |
 | `~/.cst/index.json` | mtime/size 무효화 세션 메타 캐시 | 예 (다음 실행 시 재생성) |
-| `~/.cst/state.json` | done 플래그 + 훅 상태 오버레이 + 사용자 설정(자동 재스캔·테마·정렬) | 예 (모든 `✓` 마크·오버레이·설정 초기화) |
+| `~/.cst/state.json` | done 플래그 + 훅 상태 오버레이 + 사용자 설정(자동 재스캔·테마·정렬·생성 주체) | 예 (모든 `✓` 마크·오버레이·설정 초기화) |
 
 위 표의 `~/.claude/...` 경로는 모두 **`$CLAUDE_CONFIG_DIR`**를 따릅니다
 (Claude Code 자체와 같은 규약): 설정돼 있으면 `projects/`, `sessions/`,
@@ -567,13 +582,14 @@ cst 자체 파일(`index.json`, `state.json`)은 **`~/.cst`** 아래에 저장�
   "sort": {
     "key": "time" | "status" | "msgs" | "project",
     "reverse": true
-  }
+  },
+  "origin": "all" | "user" | "agent"
 }
 ```
 
 `status`는 `cst status-hook`이 채움 (훅이 설치돼 있을 때만). `auto_rescan`은 TUI `a`
-팝업, `theme`은 `t`/`T`(또는 `--theme`), `sort`는 TUI `s`/`S` 키에서 설정. `state.json`을
-지우면 전부 초기화.
+팝업, `theme`은 `t`/`T`(또는 `--theme`), `sort`는 TUI `s`/`S` 키, `origin`은 `f`/`F`
+키에서 설정. `state.json`을 지우면 전부 초기화.
 
 ---
 
@@ -642,7 +658,8 @@ cst relocate <id> ~/project/actual-folder -y
 - **#** 번호 컬럼 + **ST** 글리프 컬럼 + **PROJECT** 컬럼을 매 행에 표시
 - **`done`**, **`undone`**, **`live`**, **`export`**, **`bg`** / **`jobs`** / **`stop`** / **`logs`** (agent-view 백그라운드 세션), **`install-hook`** / **`uninstall-hook`** / **`prompt-hook`** / **`status-hook`** 서브커맨드
 - `cst list --sort time|status|msgs|project [--reverse]` 컬럼 정렬
-- TUI 키: `D/d/Ctrl-D` (done 토글) · `H/h` (숨김 토글) · `C/c` (cwd-only) · `R/r/Ctrl-R` (rescan) · `e/E` (내보내기) · `o/O` (폴더 열기) · `a/A` (자동 재스캔) · `s`/`S` (컬럼 정렬) · `t/T` (테마) · `Ctrl-A` (전체 마크) · `?` (도움말) · `v/V` (미리보기)
+- `cst list --origin all|user|agent` (및 `cst search --origin`) — SDK가 생성한 세션을 숨기거나, 그것만 보기
+- TUI 키: `D/d/Ctrl-D` (done 토글) · `H/h` (숨김 토글) · `C/c` (cwd-only) · `R/r/Ctrl-R` (rescan) · `e/E` (내보내기) · `o/O` (폴더 열기) · `a/A` (자동 재스캔) · `s`/`S` (컬럼 정렬) · `f`/`F` (생성 주체 필터) · `t/T` (테마) · `Ctrl-A` (전체 마크) · `?` (도움말) · `v/V` (미리보기)
 - 백그라운드/agent-view 행: `[bg]`/`[exec]`/`[bg ⎇branch]`/`[bg ∙]`/`[PR #N]` 배지, `*` 핀 마커, `Enter`는 attach(포크 아님)
 - 색 테마 (dark/light, `--theme` / `t`)
 - fzf 스타일 `/` — 타이핑하며 동시에 이동, 필터 확정 후 다양한 액션
@@ -658,7 +675,7 @@ cst relocate <id> ~/project/actual-folder -y
 |---|---|---|
 | 역할 | **동시 실행 중**인 세션의 작업 매니저 | **모든** 세션(라이브+과거) 브라우저 |
 | 플랫폼 | macOS 전용 | 크로스 플랫폼 (stdlib만) |
-| 데이터 | 별도 레지스트리 (제목/우선순위/태그/노트) | 원본 jsonl + 최소 overlay (done 플래그 + 훅 상태 + 자동 재스캔·테마·정렬 설정) |
+| 데이터 | 별도 레지스트리 (제목/우선순위/태그/노트) | 원본 jsonl + 최소 overlay (done 플래그 + 훅 상태 + 자동 재스캔·테마·정렬·생성 주체 설정) |
 | 주요 기능 | 윈도우 포커스 · 우선순위 · stale 리뷰 · watch TUI · 훅 · statusline | list / search / resume / export / backup / restore / relocate / 상태 글리프 / orphan-relocate |
 | 범위 | 지금 동시에 처리 중인 세션 | 이력 전체 수백 개 |
 

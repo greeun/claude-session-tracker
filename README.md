@@ -72,6 +72,7 @@ cst done --filter "text" -y   # bulk done every session matching text (TUI Ctrl-
 cst export <id>               # write transcript to ./<id>.md
 cst stats                     # counts, top projects, status breakdown
 cst list --sort msgs          # sort by a column (time|status|msgs|project; --reverse flips)
+cst list --origin user        # only sessions you started (--origin agent = SDK-spawned)
 cst jobs                      # agent-view background sessions (claude --bg)
 cst --skip-perm --tui         # auto-apply --dangerously-skip-permissions on resume
 cst --theme light --tui       # force a TUI color theme (auto|dark|light; `t`/`T` toggles live)
@@ -114,7 +115,8 @@ Status is **computed fresh on every command invocation** — there is no backgro
 ```bash
 cst list [--limit 30] [--cwd PREFIX] [--days N]
          [--status working|waiting|idle|ended|done|active]
-         [--sort time|status|msgs|project] [--reverse] [--json]
+         [--sort time|status|msgs|project] [--reverse]
+         [--origin all|user|agent] [--json]
 ```
 
 ```
@@ -134,8 +136,19 @@ claude-session-tracker v1.10.0
   ties always break by recency. An explicit `--sort` is a one-off; with no
   `--sort` the saved TUI sort preference is used. Sort runs **before** `--limit`,
   so the slice is the top-N of the chosen order.
+- **Origin:** `--origin all|user|agent` (default `all`) splits sessions by who
+  started them, read from the transcript's `entrypoint` field. `user` = typed
+  into a terminal (`cli` — agent-view `bg` jobs count, a human dispatched
+  them); `agent` = SDK-spawned (`sdk-py`/`sdk-cli`/`sdk-ts`: security-review
+  hooks, `claude -p` scripts, tooling), which can otherwise flood the list.
+  A session whose entrypoint is missing or unrecognised reads as `user`, so an
+  unprovable origin is never silently hidden. An explicit `--origin` is a
+  one-off; with no flag the saved TUI preference (`f`/`F`) is used, and an
+  active filter is announced as `[origin:user]` in the summary line. The same
+  flag works on `cst search`.
 - **`--json`** emits the list as machine-readable JSON instead of the table
-  (the contract consumed by the cst.app macOS companion).
+  (the contract consumed by the cst.app macOS companion). Each session carries
+  `entrypoint` and `origin`.
 
 ### `cst pick` / `--tui` — interactive TUI
 
@@ -389,6 +402,8 @@ A curses picker with fzf-style filter, status glyphs, modals, and action keys. *
 | **`a`** / **`A`** | Auto-rescan interval popup (Off / 5 / 10 / 30 / 60 / 120s; default ON 10s, persisted in `state.json`; `curses.beep()` + a sticky TUI toast when a session newly enters `!` waiting — no macOS desktop notification) |
 | **`s`** | Cycle sort column in on-screen column order: `status → time → msgs → project` (resets to the column's natural direction). Header shows `sort:<col>▼/▲` and highlights the active column. Persisted. |
 | **`S`** | Reverse the current sort direction. Persisted. |
+| **`f`** | Cycle origin filter: `all → user → agent`. `user` = started from a terminal (agent-view `bg` jobs included); `agent` = SDK-spawned (security-review hooks, `claude -p`, tooling). Header shows `👤user` / `🤖agent`. Persisted, shared with `cst list --origin`. |
+| **`F`** | Cycle the origin filter backwards (`all → agent → user`). Persisted. |
 | **`t`** / **`T`** | Toggle color theme (dark ↔ light). Persisted in `state.json`. |
 | `Del` / `Fn+Delete` | Delete marked/current session(s) (confirmation modal) |
 | `?` | Help modal |
@@ -416,13 +431,14 @@ A cursor appears on the prompt line. Live filtering happens as you type.
 ### Header bar
 
 ```
- claude-session-tracker v1.10.0  12/563  ●3 !1 ◦0 ○558 ✓1  ⟳10s  sort:time▼  [✓ hidden]  [📂 ~/project]   ? help  Enter open  o folder  / filter  s sort  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit
+ claude-session-tracker v1.10.0  12/563  ●3 !1 ◦0 ○558 ✓1  ⟳10s  sort:time▼  👤user  [✓ hidden]  [📂 ~/project]   ? help  Enter open  o folder  / filter  s sort  f origin  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit
 ```
 
 - `12/563` — visible rows / total sessions
 - `●3 !1 ◦0 ○558 ✓1` — per-status counts in the current view
 - `⟳10s` — auto-rescan interval (or `⟳off`)
 - `sort:time▼` — active sort column + direction (`▼` desc / `▲` asc); the matching column header is highlighted
+- `👤user` / `🤖agent` — shown only when the origin filter is not `all`
 - `[✓ hidden]` — shown only when hide-done is on
 - `[📂 ~/project]` — shown only when cwd-only is on
 
@@ -538,7 +554,7 @@ Equivalent manual entry (one event shown):
 | `~/.claude/jobs/<short>/state.json` | Agent-view background-job state (read-only) | Leave alone |
 | `~/.claude/jobs/pins.json` | Agent-view pin set (read-only; cst never writes) | Leave alone |
 | `~/.cst/index.json` | mtime/size-invalidated session-metadata cache | Yes — regenerates on next run |
-| `~/.cst/state.json` | done flags + hook status overlay + user prefs (auto-rescan, theme, sort) | Yes — clears all `✓` marks, overlay, and prefs |
+| `~/.cst/state.json` | done flags + hook status overlay + user prefs (auto-rescan, theme, sort, origin) | Yes — clears all `✓` marks, overlay, and prefs |
 
 All `~/.claude/...` paths above honor **`$CLAUDE_CONFIG_DIR`** (same convention
 as Claude Code itself): when set, cst reads `projects/`, `sessions/`, `jobs/`,
@@ -572,13 +588,15 @@ prefs survive the upgrade).
   "sort": {
     "key": "time" | "status" | "msgs" | "project",
     "reverse": true
-  }
+  },
+  "origin": "all" | "user" | "agent"
 }
 ```
 
 `status` is populated by `cst status-hook` (only when hooks are installed).
 `auto_rescan` is set from the TUI `a` popup, `theme` from `t`/`T` (or `--theme`),
-`sort` from the TUI `s`/`S` keys. Deleting `state.json` clears all of them.
+`sort` from the TUI `s`/`S` keys, `origin` from `f`/`F`. Deleting `state.json`
+clears all of them.
 
 ---
 
@@ -647,7 +665,8 @@ cst relocate <id> ~/project/actual-folder -y
 - **#** row-number column + **ST** glyph column + **PROJECT** column on every row
 - **`done`**, **`undone`**, **`live`**, **`export`**, **`bg`** / **`jobs`** / **`stop`** / **`logs`** (agent-view background sessions), **`install-hook`** / **`uninstall-hook`** / **`prompt-hook`** / **`status-hook`** subcommands
 - `cst list --sort time|status|msgs|project [--reverse]` column sort
-- TUI keys: `D/d/Ctrl-D` (toggle done) · `H/h` (hide done) · `C/c` (cwd-only) · `R/r/Ctrl-R` (rescan) · `e/E` (export) · `o/O` (open folder) · `a/A` (auto-rescan) · `s`/`S` (column sort) · `t/T` (theme) · `Ctrl-A` (mark all) · `?` (help) · `v/V` (preview; `←/→` prev/next session inside it)
+- `cst list --origin all|user|agent` (and `cst search --origin`) — hide SDK-spawned sessions, or show only those
+- TUI keys: `D/d/Ctrl-D` (toggle done) · `H/h` (hide done) · `C/c` (cwd-only) · `R/r/Ctrl-R` (rescan) · `e/E` (export) · `o/O` (open folder) · `a/A` (auto-rescan) · `s`/`S` (column sort) · `f`/`F` (origin filter) · `t/T` (theme) · `Ctrl-A` (mark all) · `?` (help) · `v/V` (preview; `←/→` prev/next session inside it)
 - Background/agent-view rows: `[bg]`/`[exec]`/`[bg ⎇branch]`/`[bg ∙]`/`[PR #N]` badges, `*` pin marker, `Enter` attaches (not forks)
 - Color themes (dark/light, `--theme` / `t`)
 - fzf-style `/` with live filter and typing-while-navigating
@@ -663,7 +682,7 @@ Different goals, complementary tools.
 |---|---|---|
 | Role | Task manager for **concurrent running** sessions | Browser for **all** sessions (live + archived) |
 | Platform | macOS-only (osascript window focus) | Cross-platform (stdlib only) |
-| Data | Separate registry (title / priority / tags / note) | Original jsonl + minimal overlay (done flag + hook status + auto-rescan / theme / sort prefs) |
+| Data | Separate registry (title / priority / tags / note) | Original jsonl + minimal overlay (done flag + hook status + auto-rescan / theme / sort / origin prefs) |
 | Headline features | Window focus · priority ranking · stale review · watch TUI · hooks · statusline | List / search / resume / export / backup / restore / relocate / status glyphs / orphan-relocate |
 | Scope | Sessions you actively juggle | 500+ sessions in history |
 

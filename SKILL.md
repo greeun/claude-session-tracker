@@ -1,7 +1,7 @@
 ---
 name: claude-session-tracker
 description: Track live/waiting/ended/done status of Claude Code sessions. List, search, resume, export, backup, restore sessions via `cst` CLI or TUI. Use when user says "list sessions", "세션 상태", "cst", "session tracker", or wants to resume/search/export/backup sessions.
-version: 1.13.0
+version: 1.14.0
 ---
 
 # claude-session-tracker
@@ -21,7 +21,7 @@ process is ended/job-state; a live one resolves overlay → registry → `●`):
   in TUI, `cst done <id>`, or the `done!` prompt hook). Persists in
   `~/.cst/state.json`.
 
-Main script: `tracker.py` (stdlib only, Python 3.10+, v1.11.0). Installed as
+Main script: `tracker.py` (stdlib only, Python 3.10+, v1.14.0). Installed as
 `~/.local/bin/cst`. All `~/.claude/...` data paths honor `$CLAUDE_CONFIG_DIR`
 (same convention as Claude Code itself); cst's own files live under `~/.cst`
 (override with `$CST_HOME`), auto-migrated once from the pre-1.11 location
@@ -54,6 +54,10 @@ cst list --status working # working|waiting|idle|ended|done (active = alias for 
 cst list --cwd ~/p --days 7 --limit 50
 cst list --sort msgs      # sort column: time(default)|status|msgs|project; --reverse flips
                           #   no --sort uses the saved TUI sort pref
+cst list --origin user    # who started it: all(default)|user|agent
+                          #   user  = typed in a terminal (agent-view bg jobs included)
+                          #   agent = SDK-spawned (security-review hooks, claude -p, tooling)
+                          #   no --origin uses the saved TUI origin pref; same flag on `search`
 cst list --json           # machine-readable JSON instead of the table (cst.app contract)
 cst search "<query>"      # full-text transcript search (OR via `|`, -i = ignore case)
 cst show <id>             # transcript with Status header (--max-chars, --with-subagents;
@@ -179,6 +183,12 @@ stale `!` self-heals to `◦` to avoid a stuck state.
   order; resets to the column's natural direction) · **`S`** — reverse sort
   direction. Header shows `sort:<col>▼/▲` + highlights the active column;
   persisted in `state.json`.
+- **`f`** — cycle origin filter (all→user→agent) · **`F`** — cycle backwards.
+  `user` = started from a terminal (agent-view `bg` jobs included, since a
+  human dispatched them); `agent` = SDK-spawned (`sdk-py`/`sdk-cli`/`sdk-ts`:
+  security-review hooks, `claude -p` scripts, tooling). Header shows
+  `👤user` / `🤖agent`; persisted in `state.json`, shared with `cst list
+  --origin` / `cst search --origin`.
 - **`t` / `T`** — toggle color theme (dark ↔ light), persisted in `state.json`
 - `?` — help modal · `/` — enter search mode · `Esc` — clear/quit
 

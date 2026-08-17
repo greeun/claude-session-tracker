@@ -12,7 +12,7 @@ Data sources:
 """
 from __future__ import annotations
 
-__version__ = "1.13.0"
+__version__ = "1.14.0"
 
 import argparse
 import json
@@ -66,7 +66,7 @@ CACHE_DIR = _cst_home()
 CACHE_PATH = CACHE_DIR / "index.json"
 # Bumped whenever the cached SessionMeta shape or extraction logic changes,
 # so stale entries are re-indexed instead of serving wrong snippets.
-_CACHE_SCHEMA = 4
+_CACHE_SCHEMA = 5
 STATE_PATH = CACHE_DIR / "state.json"
 
 # Pre-1.11 location; migrate_legacy_dir() moves its files into CACHE_DIR once.
@@ -1731,6 +1731,68 @@ def save_sort(sort_key: str, reverse: bool) -> None:
     save_state(st)
 
 
+# ---- origin filter (CLI `--origin` / TUI `f`,`F`) --------------------------
+# Who started the session. Claude Code stamps every user/assistant event with
+# an `entrypoint`: "cli" for a session a human typed into a terminal (agent-view
+# `--bg` jobs included — the user dispatched them), and "sdk-py"/"sdk-cli"/
+# "sdk-ts" for one an SDK/agent spawned programmatically (security-review hooks,
+# `claude -p` scripts, cst.app-style tooling). Those SDK sessions can flood the
+# list, hence a filter for either direction.
+#
+# Unknown / absent entrypoints read as "user": some transcript-less or
+# message-poor bg jobs carry none, and the user-only view must not silently
+# swallow a session whose origin cst cannot prove.
+
+ORIGIN_CHOICES = ("all", "user", "agent")
+ORIGIN_LABELS = {"all": "all", "user": "user", "agent": "agent"}
+_AGENT_ENTRYPOINT_PREFIX = "sdk"
+
+
+def session_origin(meta) -> str:
+    """"user" or "agent" for a SessionMeta (or a bare entrypoint string)."""
+    ep = meta if isinstance(meta, str) else getattr(meta, "entrypoint", "")
+    return "agent" if (ep or "").startswith(_AGENT_ENTRYPOINT_PREFIX) else "user"
+
+
+def filter_origin(sessions, origin: str) -> list:
+    """Return a NEW list keeping only sessions of `origin`; "all"/unknown keeps
+    everything (an unrecognised value must never silently empty the view)."""
+    if origin not in ("user", "agent"):
+        return list(sessions)
+    return [s for s in sessions if session_origin(s) == origin]
+
+
+def cycle_origin(origin: str, step: int = 1) -> str:
+    """Next origin in the all→user→agent cycle (`step=-1` walks backwards)."""
+    try:
+        i = ORIGIN_CHOICES.index(origin)
+    except ValueError:
+        i = 0
+    return ORIGIN_CHOICES[(i + step) % len(ORIGIN_CHOICES)]
+
+
+def origin_note(origin: str) -> str:
+    """Trailing `  [origin:user]` tag for CLI summaries; empty when unfiltered.
+    A saved preference must never silently shrink a listing without saying so."""
+    if origin not in ("user", "agent"):
+        return ""
+    return f"  [origin:{ORIGIN_LABELS[origin]}]"
+
+
+def load_origin() -> str:
+    """Stored origin filter from state.json; "all" by default."""
+    val = load_state().get("origin")
+    return val if val in ORIGIN_CHOICES else "all"
+
+
+def save_origin(origin: str) -> None:
+    if origin not in ORIGIN_CHOICES:
+        origin = "all"
+    st = load_state()
+    st["origin"] = origin
+    save_state(st)
+
+
 def _detect_terminal_is_light(env: dict | None = None) -> bool | None:
     """Best-effort terminal-background detection via ``COLORFGBG``.
 
@@ -1794,6 +1856,7 @@ class SessionMeta:
     first_user_msg: str = ""
     git_branch: str = ""
     prs: list = field(default_factory=list)  # [{host,repo,number,url}] from transcript
+    entrypoint: str = ""  # transcript `entrypoint`: cli | sdk-py | sdk-cli | sdk-ts
 
 
 @dataclass
@@ -1933,6 +1996,8 @@ def load_session_meta(path: Path, fast: bool = False) -> SessionMeta | None:
             meta.cwd = evt["cwd"]
         if not meta.git_branch and evt.get("gitBranch"):
             meta.git_branch = evt["gitBranch"]
+        if not meta.entrypoint and evt.get("entrypoint"):
+            meta.entrypoint = evt["entrypoint"]
         if etype == "user" and not meta.first_user_msg:
             msg = evt.get("message") or {}
             text = extract_text(msg.get("content")).strip()
@@ -2042,6 +2107,7 @@ def _meta_to_cache(m: SessionMeta) -> dict:
         "first_user_msg": m.first_user_msg,
         "git_branch": m.git_branch,
         "prs": m.prs,
+        "entrypoint": m.entrypoint,
     }
 
 
@@ -2056,6 +2122,7 @@ def _meta_from_cache(d: dict, path: Path) -> SessionMeta:
         first_user_msg=d.get("first_user_msg", ""),
         git_branch=d.get("git_branch", ""),
         prs=d.get("prs") or [],
+        entrypoint=d.get("entrypoint", ""),
     )
 
 
@@ -2175,6 +2242,8 @@ def session_to_dict(s: "SessionMeta", ctx: "StatusContext") -> dict:
         "lastActivity": last.astimezone().isoformat() if last else None,
         "lastTs": int(last.timestamp()) if last else 0,
         "gitBranch": s.git_branch or "",
+        "entrypoint": s.entrypoint or "",
+        "origin": session_origin(s),
         "job": _job_json(job),
         "prs": list(s.prs or []),
         "pinned": bool(short and short in ctx.pins),
@@ -2201,6 +2270,10 @@ def cmd_list(args: argparse.Namespace) -> int:
         if wanted:
             sessions = [s for s in sessions
                         if ctx.resolve(s.session_id) == wanted]
+    # Origin filter: an explicit --origin is a one-off override; no flag uses
+    # the saved TUI preference (same contract as --sort below).
+    origin = getattr(args, "origin", None) or load_origin()
+    sessions = filter_origin(sessions, origin)
     # Column sort: an explicit --sort is a one-off override (natural direction,
     # flipped by --reverse); no flag uses the saved TUI preference. Sort runs
     # BEFORE --limit so the slice keeps the top-N of the chosen order. getattr
@@ -2261,7 +2334,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     counts = ctx.counts(sessions)
     summary = "  ".join(f"{status_label(g)}:{counts[g]}"
                         for g in STATUS_ALL if counts[g])
-    print(f"\n{len(sessions)} session(s)  [{summary}]")
+    print(f"\n{len(sessions)} session(s)  [{summary}]{origin_note(origin)}")
     return 0
 
 
@@ -2290,6 +2363,8 @@ def cmd_search(args: argparse.Namespace) -> int:
                 meta.last_ts = ts
             if not meta.cwd and evt.get("cwd"):
                 meta.cwd = evt["cwd"]
+            if not meta.entrypoint and evt.get("entrypoint"):
+                meta.entrypoint = evt["entrypoint"]
             text = extract_text((evt.get("message") or {}).get("content"))
             if not text:
                 continue
@@ -2301,11 +2376,14 @@ def cmd_search(args: argparse.Namespace) -> int:
                 matches.append((ts, etype, snippet))
         if matches and (not args.cwd or meta.cwd.startswith(args.cwd)):
             hits.append((meta, matches))
+    origin = getattr(args, "origin", None) or load_origin()
+    if origin in ("user", "agent"):
+        hits = [h for h in hits if session_origin(h[0]) == origin]
     hits.sort(key=lambda h: h[0].last_ts or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
     if args.limit:
         hits = hits[: args.limit]
     if not hits:
-        print(f"(no matches for {args.query!r})")
+        print(f"(no matches for {args.query!r}{origin_note(origin)})")
         return 0
     ctx = StatusContext.capture()
     for meta, matches in hits:
@@ -2316,7 +2394,7 @@ def cmd_search(args: argparse.Namespace) -> int:
             print(f"    [{role}] {truncate(snippet, 140)}")
         if len(matches) > 3:
             print(f"    … +{len(matches) - 3} more")
-    print(f"\n{len(hits)} session(s) matched.")
+    print(f"\n{len(hits)} session(s) matched.{origin_note(origin)}")
     return 0
 
 
@@ -3422,6 +3500,9 @@ HELP_LINES = [
     "                         (prefix match on the recorded session cwd)",
     "  s                      cycle sort column (status→time→msgs→project) — saved",
     "  S                      reverse the sort direction — saved",
+    "  f / F                  cycle origin filter (all→user→agent; F backwards) — saved",
+    "                         user = started from a terminal (bg jobs included);",
+    "                         agent = SDK-spawned (hooks, claude -p, tooling)",
     "  t / T                  toggle color theme (dark ↔ light) — saved",
     "  R / r / Ctrl-R         rescan sessions + live-process registry",
     "  Del / Fn+Delete        delete marked/current session(s)",
@@ -4592,6 +4673,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
     search_hits: dict[str, str] | None = None
     search_mode: bool = False  # True while typing inside the `/` prompt
     sort_key, sort_reverse = load_sort()  # column sort (s cycles, S reverses)
+    origin: str = load_origin()  # f cycles all→user→agent, F walks backwards
     hide_done: bool = hide_done_default  # H toggle: hide 작업종료 from the view
     cwd_only: bool = False     # C toggle: only sessions under the TUI launch cwd
     try:
@@ -4606,6 +4688,8 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             pool = sessions
         if hide_done:
             pool = [s for s in pool if s.session_id not in ctx.done]
+        if origin != "all":
+            pool = filter_origin(pool, origin)
         if cwd_only and launch_cwd:
             pool = [s for s in pool
                     if unicodedata.normalize("NFC", s.cwd or "").startswith(launch_cwd)]
@@ -4660,6 +4744,10 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                      if (auto_enabled and auto_interval > 0) else "  ⟳off")
         sort_hint = (f"  sort:{SORT_LABELS[sort_key]}"
                      f"{'▼' if sort_reverse else '▲'}")
+        # Kept short and placed next to sort_hint (the other saved pref): an
+        # 80-column terminal truncates anything longer once the transient
+        # mark/search/hide/cwd hints are also on screen.
+        origin_hint = {"user": "  👤user", "agent": "  🤖agent"}.get(origin, "")
         header = (
             f" claude-session-tracker v{__version__}  "
             f"{len(items)}/{len(sessions)}  "
@@ -4668,9 +4756,9 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             f"{STATUS_IDLE}{scounts[STATUS_IDLE]} "
             f"{STATUS_ENDED}{scounts[STATUS_ENDED]} "
             f"{STATUS_DONE}{scounts[STATUS_DONE]}"
-            f"{auto_hint}{sort_hint}"
+            f"{auto_hint}{sort_hint}{origin_hint}"
             f"{mark_hint}{search_hint}{hide_hint}{cwd_hint}"
-            "   ? help  Enter open  o folder  / filter  s sort  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit "
+            "   ? help  Enter open  o folder  / filter  s sort  f origin  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit "
         )
         if search_mode:
             prompt = f"/ {query}"
@@ -5104,6 +5192,13 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             top = 0
             toast = (f"Sort: {SORT_LABELS[sort_key]} "
                      f"{'▼ desc' if sort_reverse else '▲ asc'}")
+        elif ch in (ord('f'), ord('F')):  # cycle origin filter (F = backwards)
+            origin = cycle_origin(origin, -1 if ch == ord('F') else 1)
+            save_origin(origin)
+            sel = 0
+            top = 0
+            toast = ("Origin: all (user + agent)" if origin == "all"
+                     else f"Origin: {ORIGIN_LABELS[origin]} only")
         elif ch in (ord('t'), ord('T')):
             # Live theme toggle (dark ↔ light): re-init the palette in place and
             # persist the concrete choice. The next render redraws the frame on
@@ -6118,6 +6213,9 @@ def _build_parser() -> argparse.ArgumentParser:
                         choices=("working", "waiting", "idle", "ended",
                                  "done", "active"),
                         help="filter by status")
+    p_list.add_argument("--origin", choices=ORIGIN_CHOICES, default=None,
+                        help="who started the session: all|user|agent "
+                             "(agent = SDK-spawned; default: saved TUI preference)")
     p_list.add_argument("--json", action="store_true",
                         help="emit machine-readable JSON (for cst.app) instead of the table")
     p_list.set_defaults(func=cmd_list)
@@ -6126,6 +6224,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("query")
     p_search.add_argument("--limit", type=int, default=20)
     p_search.add_argument("--cwd", type=str, default=None)
+    p_search.add_argument("--origin", choices=ORIGIN_CHOICES, default=None,
+                          help="who started the session: all|user|agent "
+                               "(default: saved TUI preference)")
     p_search.add_argument("-i", "--ignore-case", action="store_true")
     p_search.set_defaults(func=cmd_search)
 
