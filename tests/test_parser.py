@@ -35,6 +35,7 @@ EXPECTED = {
     "relocate": (["sid", "/tmp"], "cmd_relocate"),
     "export": (["sid"], "cmd_export"),
     "resume": (["sid"], "cmd_resume"),
+    "open": (["sid"], "cmd_open"),
     "backup": ([], "cmd_backup"),
     "restore": (["arch.tgz"], "cmd_restore"),
     "stats": ([], "cmd_stats"),

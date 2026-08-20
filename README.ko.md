@@ -202,6 +202,28 @@ cst resume 960faaa8 --spawn                # 실제로 새 터미널에서 열�
 (라이브 세션은 기존 창 포커스, 백그라운드 잡은 `claude attach`, 그 외에는
 새 터미널 창에서 `claude --resume`). cst.app이 사용.
 
+`--spawn`과 `cst open`은 터미널 앱을 `$TERM_PROGRAM`에서 고릅니다.
+`--terminal NAME`으로 이를 덮어쓸 수 있습니다 (`wezterm` · `iterm` ·
+`ghostty` · `kitty` · `alacritty` · `terminal`) — cst.app 같은 GUI 호출자는
+`$TERM_PROGRAM`이 없어 지정하지 않으면 항상 Terminal.app으로 폴백합니다.
+알 수 없는 이름이거나 해당 CLI가 설치돼 있지 않으면 역시 Terminal.app으로
+폴백합니다.
+
+```bash
+cst resume 960faaa8 --spawn --terminal wezterm
+```
+
+### `cst open <id>` — 세션 폴더를 새 터미널에서 열기
+
+```bash
+cst open 960faaa8                      # 세션의 cwd에서 일반 셸 실행
+cst open 960faaa8 --terminal wezterm   # 터미널 앱 지정
+```
+
+TUI `o` 키의 CLI 버전. 세션에 기록된 작업 디렉터리에서 새 터미널 창을 일반
+셸로 엽니다 — `claude` 명령은 실행하지 않으므로 재개(resume)나 attach는
+일어나지 않습니다. cst.app이 사용.
+
 ### `cst done <id>` / `cst undone <id>` — done 플래그
 
 ```bash
