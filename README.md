@@ -205,6 +205,28 @@ as the TUI `Enter` key (focus a live session's window, `claude attach` for a
 background job, else spawn `claude --resume` in a new terminal window). Used by
 cst.app.
 
+Both `--spawn` and `cst open` pick the terminal app from `$TERM_PROGRAM`.
+`--terminal NAME` overrides that choice (`wezterm` · `iterm` · `ghostty` ·
+`kitty` · `alacritty` · `terminal`) — GUI callers such as cst.app have no
+`$TERM_PROGRAM` and would otherwise always fall back to Terminal.app. An
+unknown name, or one whose CLI is not installed, also falls through to
+Terminal.app.
+
+```bash
+cst resume 960faaa8 --spawn --terminal wezterm
+```
+
+### `cst open <id>` — open the session's folder in a new terminal
+
+```bash
+cst open 960faaa8                      # plain shell at the session's cwd
+cst open 960faaa8 --terminal wezterm   # force the terminal app
+```
+
+The CLI form of the TUI `o` key. Opens a new terminal window at the session's
+recorded working directory as a plain shell — no `claude` command is run, so
+nothing is resumed or attached. Used by cst.app.
+
 ### `cst done <id>` / `cst undone <id>` — done flag
 
 ```bash
