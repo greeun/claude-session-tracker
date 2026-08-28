@@ -100,8 +100,19 @@ class TestRenderSmoke(_Base):
         self.assertIn("search target", out)
 
     def test_subagents_none(self):
+        # Fixed (FP-001): 이전 단언은 `assertIn(rc, (0, 1))` 이라 성공과 실패를 모두
+        # 통과시켰다 — 서브에이전트가 없을 때의 계약이 무엇인지 고정하지 못하고,
+        # 구현이 어느 쪽으로 바뀌어도 회귀를 감지하지 못한다.
+        # 사양(cmd_subagents): 대상 세션은 찾았고 서브에이전트만 없으므로 정상 종료(0)
+        # 이며 안내 문구를 낸다. 세션 자체를 못 찾은 경우에만 1이다.
         rc, out = _quiet(tk.cmd_subagents, NS(session_id=self.SID[:8]))
-        self.assertIn(rc, (0, 1))          # graceful when none
+        self.assertEqual(rc, 0)
+        self.assertIn("has no subagents", out)
+
+    def test_subagents_unknown_session(self):
+        # TC-API-102 — 위 계약의 반대편: 세션을 못 찾으면 1
+        rc, _ = _quiet(tk.cmd_subagents, NS(session_id="zzzzzzzz"))
+        self.assertEqual(rc, 1)
 
     def test_export(self):
         outp = self.root / "exp.md"

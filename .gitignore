@@ -42,3 +42,8 @@ __pycache__/
 .env*
 !.env*.example
 !.env*.template
+
+# Coverage (dev-only; the tool itself stays stdlib-only)
+.coverage
+coverage.json
+htmlcov/

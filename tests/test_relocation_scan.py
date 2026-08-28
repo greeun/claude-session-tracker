@@ -58,5 +58,69 @@ class TestScanPresent(unittest.TestCase):
             self.assertEqual(tk._scan_present(d, set()), set())
 
 
+class TestFilterBasenameDirs(unittest.TestCase):
+    """_filter_basename_dirs — _mdfind_dirs / _fd_dirs 가 공유하는 파인더 출력 후처리.
+
+    파인더는 basename 부분일치나 동명 *파일*까지 뱉을 수 있다. 이 필터가 새면
+    relocate 가 엉뚱한 디렉터리를 목적지로 제시하고, 사용자가 수락하면 transcript
+    의 cwd 가 그리로 재작성된다 (되돌리기 어려운 변경).
+
+    이 클래스는 test_orphan_relocate.py::test_mdfind_dirs_empty_off_darwin 이
+    darwin 에서 skip 되며 남긴 로직 공백을 플랫폼 무관하게 메운다 — 실제 Spotlight
+    를 때리지 않고 후처리 계약만 검증한다.
+    """
+
+    def test_exact_basename_dir_passes(self):
+        # TC-UNIT-141
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "proj").mkdir()
+            (root / "project").mkdir()          # 부분일치 — 탈락
+            (root / "myproj").mkdir()           # 접미 일치 — 탈락
+            out = "\n".join([str(root / "proj"),
+                             str(root / "project"),
+                             str(root / "myproj")])
+            self.assertEqual(tk._filter_basename_dirs(out, "proj"),
+                             [str(root / "proj")])
+
+    def test_file_with_matching_name_is_rejected(self):
+        # TC-UNIT-142 — 이름은 맞지만 디렉터리가 아니다
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "proj"
+            f.write_text("not a dir")
+            self.assertEqual(tk._filter_basename_dirs(str(f), "proj"), [])
+
+    def test_trailing_slash_still_matches(self):
+        # TC-UNIT-143
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "proj").mkdir()
+            line = str(Path(d) / "proj") + "/"
+            self.assertEqual(tk._filter_basename_dirs(line, "proj"), [line])
+
+    def test_blank_and_missing_lines_are_dropped(self):
+        # TC-UNIT-144
+        out = "\n".join(["", "   ", "/no/such/place/proj"])
+        self.assertEqual(tk._filter_basename_dirs(out, "proj"), [])
+
+    def test_surrounding_whitespace_is_stripped(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "proj").mkdir()
+            out = "  " + str(Path(d) / "proj") + "  "
+            self.assertEqual(tk._filter_basename_dirs(out, "proj"),
+                             [str(Path(d) / "proj")])
+
+    def test_order_is_preserved(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            for sub in ("a", "b"):
+                (root / sub / "proj").mkdir(parents=True)
+            out = "\n".join([str(root / "b" / "proj"), str(root / "a" / "proj")])
+            self.assertEqual(tk._filter_basename_dirs(out, "proj"),
+                             [str(root / "b" / "proj"), str(root / "a" / "proj")])
+
+    def test_empty_stdout(self):
+        self.assertEqual(tk._filter_basename_dirs("", "proj"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

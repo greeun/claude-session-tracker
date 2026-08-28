@@ -399,5 +399,70 @@ class TestCmdRmDispatch(_BulkBase):
         self.assertFalse(self.exists("aaaa1111-0000-0000-0000-000000000001"))
 
 
+class TestRmGuardStatus(unittest.TestCase):
+    """_rm_guard_status — 가드가 *판정할* 상태 (행에 *표시될* 글리프와 다르다).
+
+    resolve_status 는 ✓ done 을 만나면 생존 여부를 보기도 전에 단락한다. 그래서
+    "✓ done 인데 아직 살아서 working" 인 세션은 ✓ 로 해석되고 rm_guard_blocks("✓")
+    는 언제나 False — 라이브 가드가 조용히 무력화된다. _rm_guard_status 는 그
+    경우에만 done 플래그를 지나쳐 재분류한다.
+
+    재분류 조건에 `session_id in ctx.live` 가 붙어 있는 이유가 두 번째 불변식이다:
+    죽은 백그라운드 job 의 마지막 저장 상태가 우연히 "working" 이면, 그 조건이
+    없을 때 _JOB_STATE_GLYPH 를 타고 ● 로 재분류되어 **이미 죽은 세션을 삭제할 수
+    없게** 만든다 (거짓 음성이 아니라 거짓 차단).
+
+    기존 test_done_and_live_working_is_skipped_by_guard 는 첫 번째 불변식만
+    _bulk_rm 경유로 확인한다. 여기서는 두 번째 불변식을 직접 고정한다.
+    """
+
+    SID = "cccc3333-0000-0000-0000-000000000003"
+
+    def test_done_and_dead_bg_job_working_is_not_reclassified(self):
+        # TC-UNIT-121 — 죽었지만 job 의 마지막 상태가 working 인 ✓ 세션
+        ctx = _FakeCtx({self.SID: tk.STATUS_DONE},
+                       jobs={self.SID: {"state": "working"}},
+                       live=set())
+        st = tk._rm_guard_status(self.SID, ctx)
+        self.assertEqual(st, tk.STATUS_DONE)
+        self.assertFalse(tk.rm_guard_blocks(st),
+                         "죽은 bg 세션이 거짓 차단됐다")
+
+    def test_done_and_live_working_is_reclassified_and_blocks(self):
+        # TC-UNIT-122
+        ctx = _FakeCtx({self.SID: tk.STATUS_DONE},
+                       live={self.SID},
+                       registry={self.SID: {"status": "busy"}})
+        st = tk._rm_guard_status(self.SID, ctx)
+        self.assertEqual(st, tk.STATUS_WORKING)
+        self.assertTrue(tk.rm_guard_blocks(st))
+
+    def test_done_and_dead_without_job_stays_done(self):
+        # TC-UNIT-123
+        ctx = _FakeCtx({self.SID: tk.STATUS_DONE})
+        st = tk._rm_guard_status(self.SID, ctx)
+        self.assertEqual(st, tk.STATUS_DONE)
+        self.assertFalse(tk.rm_guard_blocks(st))
+
+    def test_non_done_status_is_passed_through_untouched(self):
+        """done 이 아니면 재분류 경로 자체가 열리지 않는다 — ctx.resolve 값 그대로."""
+        for st_in in (tk.STATUS_WORKING, tk.STATUS_WAITING,
+                      tk.STATUS_IDLE, tk.STATUS_ENDED):
+            with self.subTest(status=st_in):
+                ctx = _FakeCtx({self.SID: st_in},
+                               live={self.SID},
+                               registry={self.SID: {"status": "idle"}})
+                self.assertEqual(tk._rm_guard_status(self.SID, ctx), st_in)
+
+    def test_done_and_live_idle_reclassifies_to_idle_and_does_not_block(self):
+        """살아 있어도 idle 이면 차단하지 않는다 — 가드는 ●/! 만 막는다."""
+        ctx = _FakeCtx({self.SID: tk.STATUS_DONE},
+                       live={self.SID},
+                       registry={self.SID: {"status": "idle"}})
+        st = tk._rm_guard_status(self.SID, ctx)
+        self.assertEqual(st, tk.STATUS_IDLE)
+        self.assertFalse(tk.rm_guard_blocks(st))
+
+
 if __name__ == "__main__":
     unittest.main()

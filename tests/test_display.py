@@ -95,5 +95,31 @@ class TestShortenPath(unittest.TestCase):
         self.assertEqual(tk.shorten_path(""), "?")
 
 
+class TestHumanSize(unittest.TestCase):
+    """_human — cst backup / restore 요약에 찍히는 바이트 크기 표기.
+
+    단위 승격 경계(1024)와 B 단위만 소수점을 쓰지 않는 특례가 검증 대상이다.
+    """
+
+    def test_unit_boundaries(self):
+        # TC-UNIT-151
+        cases = [(0, "0B"), (1, "1B"), (1023, "1023B"),
+                 (1024, "1.0KB"), (1536, "1.5KB"),
+                 (1024 ** 2, "1.0MB"), (1024 ** 3, "1.0GB")]
+        for n, want in cases:
+            with self.subTest(n=n):
+                self.assertEqual(tk._human(n), want)
+
+    def test_bytes_have_no_decimal_point(self):
+        """B 단위만 int 로 찍는다 — 나머지는 소수 첫째 자리."""
+        self.assertNotIn(".", tk._human(999))
+        self.assertIn(".", tk._human(1024))
+
+    def test_terabytes_fall_through(self):
+        """GB 를 넘으면 루프를 빠져나와 TB 로 표기된다."""
+        self.assertEqual(tk._human(1024 ** 4), "1.0TB")
+        self.assertTrue(tk._human(1024 ** 5).endswith("TB"))
+
+
 if __name__ == "__main__":
     unittest.main()
