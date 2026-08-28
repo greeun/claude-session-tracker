@@ -12,7 +12,7 @@ Data sources:
 """
 from __future__ import annotations
 
-__version__ = "1.15.0"
+__version__ = "1.15.1"
 
 import argparse
 import json
@@ -2164,6 +2164,36 @@ def _meta_for_path(
     return meta, True
 
 
+_EPOCH = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _dup_rank(m: SessionMeta) -> tuple:
+    """Ranking for two files that claim the same sessionId — bigger wins.
+
+    The canonical copy is the one sitting in the project dir that encodes its
+    own transcript `cwd`; a leftover copy in a renamed project's old dir loses
+    even if it looks fatter. Then richer transcript, then fresher activity."""
+    canonical = bool(m.cwd) and m.path.parent.name == encode_cwd(m.cwd)
+    return (canonical, m.msg_count, m.last_ts or _EPOCH)
+
+
+def dedupe_sessions(metas: list[SessionMeta]) -> list[SessionMeta]:
+    """One row per sessionId, preserving input order.
+
+    Renaming or copying a project leaves Claude Code's old
+    `~/.claude/projects/<encoded-cwd>/<sid>.jsonl` behind, so the same session
+    exists as two (usually byte-identical) files. One SessionMeta per *file*
+    would render the session twice in `cst list`, `--json` and the TUI. Ties
+    keep the first copy — callers feed the path-sorted `all_session_files()`,
+    so the pick is deterministic."""
+    best: dict[str, SessionMeta] = {}
+    for m in metas:
+        cur = best.get(m.session_id)
+        if cur is None or _dup_rank(m) > _dup_rank(cur):
+            best[m.session_id] = m
+    return [m for m in metas if best[m.session_id] is m]
+
+
 def load_all_sessions(
     cwd_filter: str | None = None,
     days: int | None = None,
@@ -2204,7 +2234,8 @@ def load_all_sessions(
     if show:
         sys.stderr.write("\r" + " " * 50 + "\r")
         sys.stderr.flush()
-    out.sort(key=lambda m: m.last_ts or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    out = dedupe_sessions(out)
+    out.sort(key=lambda m: m.last_ts or _EPOCH, reverse=True)
     return out
 
 
@@ -2384,10 +2415,14 @@ def cmd_search(args: argparse.Namespace) -> int:
                 matches.append((ts, etype, snippet))
         if matches and (not args.cwd or meta.cwd.startswith(args.cwd)):
             hits.append((meta, matches))
+    # A session copied into two project dirs would otherwise report its hits
+    # twice; dedupe_sessions hands back the very objects it kept.
+    kept = {id(m) for m in dedupe_sessions([h[0] for h in hits])}
+    hits = [h for h in hits if id(h[0]) in kept]
     origin = getattr(args, "origin", None) or load_origin()
     if origin in ("user", "agent"):
         hits = [h for h in hits if session_origin(h[0]) == origin]
-    hits.sort(key=lambda h: h[0].last_ts or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    hits.sort(key=lambda h: h[0].last_ts or _EPOCH, reverse=True)
     if args.limit:
         hits = hits[: args.limit]
     if not hits:
