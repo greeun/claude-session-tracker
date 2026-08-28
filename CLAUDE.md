@@ -138,6 +138,18 @@ mark/search/hide/cwd hints, truncates at 80 columns.
 
 `load_all_sessions()` is the central data loader — it reads all `.jsonl` files under `~/.claude/projects/`, applies the mtime-based index cache, resolves live/done status, filters by `--cwd`/`--days`/`--status`, and returns `SessionMeta` objects sorted by `last_ts` descending (the default order). Both CLI commands and the TUI consume this, then re-order via `sort_sessions()` when a non-default column sort is active.
 
+**One row per sessionId** — `dedupe_sessions()` (~line 2167) runs just before
+that sort, and `cmd_search` applies it to its own hits. `session_id` is
+`path.stem`, so the *same* session existing as a `.jsonl` in two project dirs
+renders twice. That is not hypothetical: renaming a project (or copying
+`~/.claude/projects` around, e.g. through a synced folder) leaves the old
+`<encoded-cwd>/<sid>.jsonl` behind, byte-identical, and both copies report the
+same transcript `cwd` — so the two rows are indistinguishable on screen.
+`_dup_rank()` keeps the canonical copy (parent dir == `encode_cwd(meta.cwd)`),
+then the richer transcript (`msg_count`), then the fresher `last_ts`; ties keep
+the first, which is deterministic because `all_session_files()` is path-sorted.
+Dedup is display-only — cst never deletes the redundant file.
+
 ### Data files read/written
 
 | Path | Read/Write | Purpose |
