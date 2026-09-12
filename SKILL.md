@@ -1,7 +1,7 @@
 ---
 name: claude-session-tracker
 description: Track live/waiting/ended/done status of Claude Code sessions. List, search, resume, export, backup, restore sessions via `cst` CLI or TUI. Use when user says "list sessions", "세션 상태", "cst", "session tracker", or wants to resume/search/export/backup sessions.
-version: 1.15.1
+version: 1.16.0
 ---
 
 # claude-session-tracker
@@ -164,11 +164,14 @@ stale `!` self-heals to `◦` to avoid a stuck state.
   orphan-relocate flow helps you find/pick the new home.
 - `Space` toggle mark · `Ctrl-A` mark all visible · `Ctrl-X` clear marks
   · `Del` delete marked/current (with confirmation)
-- **`v` / `V`** — preview modal (scrollable transcript); inside it `←`/`→`
-  (or `‹`/`›`, `[`/`]`) step to the prev/next session in the list without
-  closing, `d`/`Ctrl-D` toggles done on the previewed session (same ● working
-  guard as the list), and `Del` deletes the previewed session (confirm in
-  place — cancel returns to the preview)
+- **`v` / `V`** — preview modal (scrollable transcript). The metadata header
+  (Session / Status / Cwd / Branch / Started) is **pinned** at the top of the
+  modal, so only the transcript below the rule scrolls and the session stays
+  identified at any scroll offset. Inside it `←`/`→` (or `‹`/`›`, `[`/`]`)
+  step to the prev/next session in the list without closing, `d`/`Ctrl-D`
+  toggles done on the previewed session (same ● working guard as the list;
+  the scroll position and any active search are kept), and `Del` deletes the
+  previewed session (confirm in place — cancel returns to the preview)
 - **`e` / `E`** — export focused session to `./<id>.md`
 - **`o` / `O`** — open the focused session's **folder** in a new terminal
   window: a plain interactive shell at the recorded cwd, no `claude` command

@@ -414,7 +414,7 @@ A curses picker with fzf-style filter, status glyphs, modals, and action keys. *
 | `Space` | Toggle mark on current row |
 | `Ctrl-A` | Toggle marks on **all** visible rows |
 | `Ctrl-X` | Clear all marks |
-| **`v`** / **`V`** | Preview the focused session (scrollable modal). Inside: `↑↓/j/k` scroll · `PgUp/PgDn/Space` page · `g/G` top/bottom · `←/→` prev/next session · `d/Ctrl-D` toggle done on previewed session · `Del` delete previewed session (confirm in place; cancel returns to preview) · `q/Esc/v` close |
+| **`v`** / **`V`** | Preview the focused session (scrollable modal; the metadata header stays pinned at the top). Inside: `↑↓/j/k` scroll · `PgUp/PgDn/Space` page · `g/G` top/bottom · `←/→` prev/next session · `d/Ctrl-D` toggle done on previewed session (scroll position kept) · `Del` delete previewed session (confirm in place; cancel returns to preview) · `q/Esc/v` close |
 | **`e`** / **`E`** | Export focused session to `./<id>.md` (toast shows the path) |
 | **`o`** / **`O`** | Open the focused session's **folder** in a new terminal window — a plain interactive shell at the recorded cwd, no `claude` command (same terminal-app detection as `Enter`; cmux tab/window chooser inside cmux; a missing cwd fails with a `cst relocate` hint) |
 | **`D`** / **`d`** / **`Ctrl-D`** | Toggle **done** on current row (or all marked rows). Persists. |
@@ -475,7 +475,7 @@ Reflects the current state:
 ### Modal dialogs
 
 - **Help (`?`)** — scrollable cheat-sheet.
-- **Preview (`v`)** — transcript with role colors, full message text (wrapped); `d`/`Ctrl-D` toggles done in place; `Del` deletes in place (with confirmation).
+- **Preview (`v`)** — transcript with role colors, full message text (wrapped). The metadata header (Session / Status / Cwd / Branch / Started) is pinned above the rule and never scrolls away; `d`/`Ctrl-D` toggles done in place, keeping the scroll position and any active search; `Del` deletes in place (with confirmation).
 - **Auto-rescan interval (`a`)** — Off / 5 / 10 / 30 / 60 / 120s. `1`–`6` jumps directly to an option; Enter applies; saved to `state.json`.
 - **Delete confirmation (`Del`)** — `y` confirm · `n/Esc/Enter` cancel · shows up to 5 victims.
 - **Skip-permissions confirmation** — appears on `Enter` resume when you didn't pass `--skip-perm`. `y/Y/Enter` resumes with the flag · `n/N` without · `Esc` cancels.

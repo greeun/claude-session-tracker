@@ -12,7 +12,7 @@ Data sources:
 """
 from __future__ import annotations
 
-__version__ = "1.15.1"
+__version__ = "1.16.0"
 
 import argparse
 import json
@@ -3674,6 +3674,26 @@ def _preview_step(sel: int, total: int, forward: bool) -> int:
     return (sel + 1) % total if forward else (sel - 1) % total
 
 
+_PREVIEW_STATUS_ROW = 1      # index of the Status line inside the header block
+_PREVIEW_MIN_BODY_ROWS = 3   # transcript rows the pinned header must leave free
+
+
+def _preview_sticky_head(head_n: int, view_h: int) -> int:
+    """Rows of the preview's metadata header to pin above the scrolling body.
+
+    The Session/Status/Cwd/Branch/Started block should stay readable while the
+    transcript scrolls, so the renderer paints it separately from the scrolled
+    lines. On a short window pinning all of it would leave no room for the
+    transcript, so the pin is capped at ``view_h - _PREVIEW_MIN_BODY_ROWS``
+    (0 when even that does not fit). Rows dropped by the cap are not lost to
+    the reader: the scrolling body starts at the pinned count, so they show up
+    at the top of the scroll area instead.
+    """
+    if head_n <= 0 or view_h <= 0:
+        return 0
+    return max(0, min(head_n, view_h - _PREVIEW_MIN_BODY_ROWS))
+
+
 def _scroll_match_into_view(line_idx: int, top: int, view_h: int,
                             max_top: int) -> int:
     """Return a new `top` so `line_idx` is visible within [top, top+view_h-1],
@@ -3742,15 +3762,20 @@ def _centered_win(stdscr, box_h, box_w):
 def _preview_modal(stdscr, items, sel: int, ctx):
     """Scrollable preview of the focused session's transcript.
 
+    The leading metadata block (Session/Status/Cwd/Branch/Started + a rule) is
+    pinned at the top by `_preview_sticky_head`: only the transcript below it
+    scrolls, so the session being read stays identified at every scroll offset.
+
     `‹`/`›` (or ←/→) switch to the previous/next session in `items` without
     leaving the modal; the view, scroll and in-modal search reset per session.
     Closed by q/Q/Esc/v/V. `d`/`Ctrl-D` toggles the viewed session's 작업종료
     (done) flag in place (refused on a ● working session, mirroring the list's
-    done guard); the Status line and a footer notice reflect the change without
-    leaving the modal. Read-only otherwise except for `Del`, which shows the
-    delete confirmation in place: cancel returns to the preview, confirm closes
-    the modal and returns the (already-confirmed) `SessionMeta` for the caller
-    to delete. Every other path returns None.
+    done guard); only the pinned Status row is repainted, so the scroll
+    position and any active search survive the toggle. Read-only otherwise
+    except for `Del`, which shows the delete confirmation in place: cancel
+    returns to the preview, confirm closes the modal and returns the
+    (already-confirmed) `SessionMeta` for the caller to delete. Every other
+    path returns None.
     """
     import curses
     if not items:
@@ -3775,25 +3800,33 @@ def _preview_modal(stdscr, items, sel: int, ctx):
     hl_attr = curses.color_pair(2) | curses.A_REVERSE              # all matches — yellow block
     cur_attr = curses.color_pair(9) | curses.A_REVERSE | curses.A_BOLD  # current — cyan block
 
+    def _status_row(status):
+        """The Status line, rebuilt in place when `d` toggles the done flag.
+        Its index inside `lines` is `_PREVIEW_STATUS_ROW`."""
+        return (truncate_display(f"Status   {status_label(status)}", inner_w), 0)
+
     def _build_lines(target, status):
-        """Flat list of (text, attr) display lines for one session."""
+        """Display lines for one session, plus the length of the leading
+        metadata block the renderer pins above the scrolling body."""
         lines: list[tuple[str, int]] = []
         lines.append((truncate_display(f"Session  {target.session_id}", inner_w), header_attr))
-        lines.append((truncate_display(f"Status   {status_label(status)}", inner_w), 0))
+        lines.append(_status_row(status))
         lines.append((truncate_display(f"Cwd      {shorten_path(target.cwd)}", inner_w), cwd_attr))
         if target.git_branch:
             lines.append((truncate_display(f"Branch   {target.git_branch}", inner_w), cwd_attr))
         lines.append((truncate_display(
             f"Started  {fmt_ts(target.first_ts)}    Last  {fmt_ts(target.last_ts)}    Msgs  {target.msg_count}",
             inner_w), dim_attr))
+        lines.append(("─" * inner_w, dim_attr))
+        head_n = len(lines)   # everything above this stays pinned on screen
         if target.first_user_msg:
             lines.append(("", 0))
             lines.append(("First user message:", curses.A_BOLD))
             for raw_ln in target.first_user_msg.splitlines() or [""]:
                 for ln in _wrap_display(raw_ln, inner_w):
                     lines.append((ln, 0))
-        lines.append(("", 0))
-        lines.append(("─" * inner_w, dim_attr))
+            lines.append(("", 0))
+            lines.append(("─" * inner_w, dim_attr))
 
         rendered = 0
         try:
@@ -3818,7 +3851,7 @@ def _preview_modal(stdscr, items, sel: int, ctx):
 
         if rendered == 0:
             lines.append(("(no user/assistant messages)", dim_attr))
-        return lines
+        return lines, head_n
 
     delete_target = None  # set when the user presses Del; returned to the caller
     notice = ""           # transient footer message (done toggle / guard); one keypress
@@ -3827,7 +3860,7 @@ def _preview_modal(stdscr, items, sel: int, ctx):
     while True:
         target = items[sel]
         status = ctx.resolve(target.session_id)
-        lines = _build_lines(target, status)
+        lines, head_n = _build_lines(target, status)
 
         # Force a full repaint of the box on every session entry/switch. erase()
         # keeps the window's logical buffer clean, but terminal multiplexers that
@@ -3840,8 +3873,12 @@ def _preview_modal(stdscr, items, sel: int, ctx):
 
         list_h = box_h - 3  # 1 top border + 1 bottom border + 1 footer line
         view_h = max(1, list_h - 1)  # visible content rows (last inner row = footer)
-        max_top = max(0, len(lines) - list_h)
-        top = 0
+        head_h = _preview_sticky_head(head_n, view_h)  # pinned metadata rows
+        body_h = max(1, view_h - head_h)               # scrolling transcript rows
+        # `top` indexes `lines` absolutely. The pinned rows never scroll, so it
+        # stays within [head_h, max_top].
+        max_top = max(head_h, len(lines) - body_h)
+        top = head_h
 
         # --- in-modal full-text search state (per session) ---
         query = ""
@@ -3849,15 +3886,34 @@ def _preview_modal(stdscr, items, sel: int, ctx):
         matches: list[tuple[int, int, int]] = []   # (line_idx, col_start, col_end)
         cur_match = -1
 
+        def _visible_rows(cur_top: int):
+            """(screen_row, line_index) pairs to paint: the pinned header rows
+            first, then the scrolling body starting at `cur_top`."""
+            for i in range(head_h):
+                yield 1 + i, i
+            for i in range(body_h):
+                idx = cur_top + i
+                if idx >= len(lines):
+                    return
+                yield 1 + head_h + i, idx
+
+        def _scroll_to(line_idx: int, cur_top: int) -> int:
+            """Scroll so `line_idx` is visible. A match inside the pinned header
+            is on screen already, so it must never drag `top` into the header."""
+            if line_idx < head_h:
+                return max(head_h, min(cur_top, max_top))
+            return max(head_h,
+                       _scroll_match_into_view(line_idx, cur_top, body_h, max_top))
+
         def _recompute(new_top: int) -> tuple[int, int]:
             """Recompute matches for the current `query`, then pick and scroll to a
             match. Returns (cur_match, top)."""
             nonlocal matches
             matches = _preview_find_matches(lines, query)
             if not matches:
-                return -1, max(0, min(new_top, max_top))
+                return -1, max(head_h, min(new_top, max_top))
             nxt = next((i for i, (ml, _, _) in enumerate(matches) if ml >= new_top), 0)
-            return nxt, _scroll_match_into_view(matches[nxt][0], new_top, view_h, max_top)
+            return nxt, _scroll_to(matches[nxt][0], new_top)
 
         switch = None  # 'prev' | 'next' set when the user jumps sessions, else close
 
@@ -3873,13 +3929,10 @@ def _preview_modal(stdscr, items, sel: int, ctx):
                                 box_w - 4, header_attr)
                 except curses.error:
                     pass
-                for i in range(list_h - 1):  # leave last inner row for footer
-                    idx = top + i
-                    if idx >= len(lines):
-                        break
+                for row, idx in _visible_rows(top):
                     text, attr = lines[idx]
                     try:
-                        win.addnstr(1 + i, 2, text, box_w - 4, attr)
+                        win.addnstr(row, 2, text, box_w - 4, attr)
                     except curses.error:
                         pass
                     # overlay search highlights for any matches on this line
@@ -3891,10 +3944,10 @@ def _preview_modal(stdscr, items, sel: int, ctx):
                             continue
                         seg_attr = cur_attr if mi == cur_match else hl_attr
                         try:
-                            win.addnstr(1 + i, col, text[cs:ce], box_w - 2 - col, seg_attr)
+                            win.addnstr(row, col, text[cs:ce], box_w - 2 - col, seg_attr)
                         except curses.error:
                             pass
-                pos = f" {min(top + list_h - 1, len(lines))}/{len(lines)} "
+                pos = f" {min(top + body_h, len(lines))}/{len(lines)} "
                 prompt_attr = dim_attr
                 if notice:
                     prompt = notice
@@ -3964,21 +4017,21 @@ def _preview_modal(stdscr, items, sel: int, ctx):
             elif ch == ord('n'):                         # next match
                 if matches:
                     cur_match = _match_step(cur_match, len(matches), True)
-                    top = _scroll_match_into_view(matches[cur_match][0], top, view_h, max_top)
+                    top = _scroll_to(matches[cur_match][0], top)
             elif ch == ord('N'):                         # previous match
                 if matches:
                     cur_match = _match_step(cur_match, len(matches), False)
-                    top = _scroll_match_into_view(matches[cur_match][0], top, view_h, max_top)
+                    top = _scroll_to(matches[cur_match][0], top)
             elif ch in (curses.KEY_UP, 16):
-                top = max(0, top - 1)
+                top = max(head_h, top - 1)
             elif ch in (curses.KEY_DOWN, 14):
                 top = min(max_top, top + 1)
             elif ch == curses.KEY_PPAGE:
-                top = max(0, top - (list_h - 1))
+                top = max(head_h, top - body_h)
             elif ch == curses.KEY_NPAGE:
-                top = min(max_top, top + (list_h - 1))
+                top = min(max_top, top + body_h)
             elif ch in (curses.KEY_HOME, ord('g')):
-                top = 0
+                top = head_h
             elif ch in (curses.KEY_END, ord('G')):
                 top = max_top
             elif ch in (ord('d'), ord('D'), 4):  # d / D / Ctrl-D — toggle done on viewed session
@@ -3989,8 +4042,14 @@ def _preview_modal(stdscr, items, sel: int, ctx):
                     now_done = mark_done(target.session_id)
                     ctx.done = done_ids()
                     notice = " ✓ Marked done " if now_done else " Cleared done "
-                    switch = 'reload'  # rebuild lines so the Status row reflects the toggle
-                    break
+                    # Repaint the pinned Status row in place. Rebuilding every
+                    # line (the old `reload` round-trip) also threw away the
+                    # scroll position and the active search.
+                    lines[_PREVIEW_STATUS_ROW] = _status_row(ctx.resolve(target.session_id))
+                    if query:
+                        matches = _preview_find_matches(lines, query)
+                        if cur_match >= len(matches):
+                            cur_match = len(matches) - 1
             elif ch in (curses.KEY_DC, 330):     # Del — confirm, then delete viewed session
                 if _confirm_delete_modal(stdscr, [target], ctx):
                     delete_target = target
@@ -4006,8 +4065,6 @@ def _preview_modal(stdscr, items, sel: int, ctx):
             sel = _preview_step(sel, total, False)
         elif switch == 'next':
             sel = _preview_step(sel, total, True)
-        elif switch == 'reload':
-            pass  # same session — re-enter to rebuild lines after a done toggle
         else:
             break
 
