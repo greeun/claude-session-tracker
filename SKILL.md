@@ -6,6 +6,11 @@ version: 1.18.0
 
 # claude-session-tracker
 
+> **Moved to [`agent-session-tracker`](https://github.com/greeun/agent-session-tracker)**
+> (CLI: `ast`) — a multi-agent successor tracking Codex CLI sessions
+> alongside Claude Code. Install that skill instead; this one is kept for
+> history only.
+
 Fork of `claude-sessions` that adds **live status tracking** plus a precision
 hook overlay, fzf-style filter UX, transcript export, and new-window session
 opening. Since 1.18 it is **multi-agent**: an `AgentSpec` adapter per CLI

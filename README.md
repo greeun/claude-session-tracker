@@ -1,5 +1,11 @@
 # claude-session-tracker
 
+> **This project has moved.** Development continues at
+> [`agent-session-tracker`](https://github.com/greeun/agent-session-tracker)
+> (CLI: `ast`), a multi-agent successor that tracks Codex CLI sessions
+> alongside Claude Code on top of everything here. Install that one instead —
+> this repo is kept for history only.
+
 Browse, search, resume, export, back up, and **track the live/waiting/ended/done status** of every local Claude Code session — from the shell (`cst`) or a curses TUI (`cst --tui`).
 
 A fork of [`claude-sessions`](https://github.com/) that adds a STATUS column driven by the `~/.claude/sessions/<pid>.json` live-process registry, a precision overlay from Claude Code lifecycle hooks, a user-driven "task done" flag, and an fzf-style filter experience. **Stdlib-only, zero dependencies, Python 3.10+.**

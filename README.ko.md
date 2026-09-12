@@ -1,5 +1,11 @@
 # claude-session-tracker
 
+> **이 프로젝트는 이전되었습니다.** 이후 개발은
+> [`agent-session-tracker`](https://github.com/greeun/agent-session-tracker)
+> (CLI: `ast`)에서 계속됩니다. 여기 있는 기능을 모두 포함하면서 Codex CLI
+> 세션까지 함께 추적하는 다중 에이전트 후속 버전이니, 새로 설치한다면 그쪽을
+> 사용하세요. 이 저장소는 기록 보존용으로만 유지됩니다.
+
 로컬 Claude Code 세션을 **상태(작업중/대기/유휴/종료/완료) 추적과 함께** 브라우징·검색·재개·내보내기·백업하는 도구. 셸에서 `cst`, curses TUI는 `cst --tui`.
 
 [`claude-sessions`](https://github.com/)의 포크로, `~/.claude/sessions/<pid>.json` 라이브 프로세스 레지스트리를 이용한 STATUS 컬럼, Claude Code 라이프사이클 훅을 이용한 정밀 오버레이, 사용자 주도 "done(완료)" 플래그, fzf 스타일 필터링을 추가했습니다. **Python stdlib만 사용 — 외부 의존성 없음, Python 3.10+.**
