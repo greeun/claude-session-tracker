@@ -1,14 +1,18 @@
 ---
 name: claude-session-tracker
-description: Track live/waiting/ended/done status of Claude Code sessions. List, search, resume, export, backup, restore sessions via `cst` CLI or TUI. Use when user says "list sessions", "세션 상태", "cst", "session tracker", or wants to resume/search/export/backup sessions.
-version: 1.17.0
+description: Track live/waiting/ended/done status of Claude Code sessions — and Codex CLI sessions alongside them. List, search, resume, export, backup, restore sessions via `cst` CLI or TUI. Use when user says "list sessions", "세션 상태", "cst", "session tracker", "codex 세션", or wants to resume/search/export/backup sessions.
+version: 1.18.0
 ---
 
 # claude-session-tracker
 
 Fork of `claude-sessions` that adds **live status tracking** plus a precision
 hook overlay, fzf-style filter UX, transcript export, and new-window session
-opening. Every session resolves to one of five states (done always wins; a dead
+opening. Since 1.18 it is **multi-agent**: an `AgentSpec` adapter per CLI
+(`claude`, `codex`; gemini planned) feeds one shared session model, so
+`list` / `search` / `show` / `export` / `resume` / `done` / TUI work the same
+for every agent and an **AGENT** column says which one wrote each session.
+Every session resolves to one of five states (done always wins; a dead
 process is ended/job-state; a live one resolves overlay → registry → `●`):
 
 - **●** working — Claude is actively producing output.
@@ -21,9 +25,10 @@ process is ended/job-state; a live one resolves overlay → registry → `●`):
   in TUI, `cst done <id>`, or the `done!` prompt hook). Persists in
   `~/.cst/state.json`.
 
-Main script: `tracker.py` (stdlib only, Python 3.10+, v1.14.0). Installed as
+Main script: `tracker.py` (stdlib only, Python 3.10+, v1.18.0). Installed as
 `~/.local/bin/cst`. All `~/.claude/...` data paths honor `$CLAUDE_CONFIG_DIR`
-(same convention as Claude Code itself); cst's own files live under `~/.cst`
+(same convention as Claude Code itself) and `~/.codex/...` honors
+`$CODEX_HOME` (Codex's own convention); cst's own files live under `~/.cst`
 (override with `$CST_HOME`), auto-migrated once from the pre-1.11 location
 `~/.cache/claude-session-tracker`.
 
@@ -58,7 +63,11 @@ cst list --origin user    # who started it: all(default)|user|agent
                           #   user  = typed in a terminal (agent-view bg jobs included)
                           #   agent = SDK-spawned (security-review hooks, claude -p, tooling)
                           #   no --origin uses the saved TUI origin pref; same flag on `search`
-cst list --json           # machine-readable JSON instead of the table (cst.app contract)
+cst list --agent codex    # one agent CLI's sessions: all(default)|claude|codex
+                          #   no --agent uses the view the TUI `a` key last saved;
+                          #   same flag on `search` and `pick`; summary shows [agent:codex]
+cst list --json           # machine-readable JSON instead of the table (cst.app contract;
+                          #   each session carries "agent": "claude"|"codex")
 cst search "<query>"      # full-text transcript search (OR via `|`, -i = ignore case)
 cst show <id>             # transcript with Status header (--max-chars, --with-subagents;
                           #   --head-chars N caps TOTAL output & stops reading early — fast preview)
@@ -187,10 +196,13 @@ stale `!` self-heals to `◦` to avoid a stuck state.
 - **`C` / `c`** — toggle: only sessions under the TUI launch cwd
   (NFC-normalized prefix match, Korean paths OK)
 - **`R` / `r` / `Ctrl-R`** — rescan
-- **`a` / `A`** — auto-rescan interval popup (Off / 5 / 10 / 30 / 60 / 120s;
+- **`a`** — cycle the agent view (all→claude→codex) · **`A`** — cycle
+  backwards. Header shows `⚙codex` when not `all`; the last view is saved in
+  `state.json` and reused by `cst list` / `cst search` without `--agent`.
+- **`i` / `I`** — auto-rescan interval popup (Off / 5 / 10 / 30 / 60 / 120s;
   default ON 10s; persisted in `state.json`; `curses.beep()` + a sticky TUI
   toast when a session **newly** enters `!` waiting — no macOS desktop
-  notification)
+  notification). Was `a` before 1.18.
 - **`s`** — cycle sort column (status→time→msgs→project, in on-screen column
   order; resets to the column's natural direction) · **`S`** — reverse sort
   direction. Header shows `sort:<col>▼/▲` + highlights the active column;
@@ -218,21 +230,46 @@ stale `!` self-heals to `◦` to avoid a stuck state.
 - `Tab` — escalate to full-text transcript search
 - `Esc` — clear query and exit mode
 
-**Modals** — `?` help · `v` preview · `a` auto-rescan · `Del` delete-confirm
+**Modals** — `?` help · `v` preview · `i` auto-rescan · `Del` delete-confirm
 · skip-permissions confirm (on resume without `--skip-perm`) · cmux chooser
 (workspace tab vs new window) · orphan-relocate (confirm/pick/none stages
 with manual-entry and placeholder escape hatches).
 
+## Multi-agent (codex)
+
+`tracker.py` keeps one `AgentSpec` per CLI in `AGENTS` (data root, transcript
+discovery + parsing into `Turn`s, resume argv, live probe, capability set).
+Everything else is agent-agnostic. What each agent gets:
+
+| | claude | codex |
+|---|---|---|
+| transcripts | `~/.claude/projects/**/*.jsonl` | `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` (subagent rollouts hidden, like `subagents/`) |
+| list / search / show / export / TUI / done / rm | ✓ | ✓ |
+| resume (`Enter`, `cst resume`) | `claude --resume <id>` | `codex resume <uuid>` (skip-perm → `--dangerously-bypass-approvals-and-sandbox`) |
+| live status | pid registry + hooks | `thread-writer-locks/<uuid>.lock` flock probe: held → alive; rollout written < 90 s ago → `●`, else `◦`; `!` waiting is not detectable |
+| origin (`--origin`) | `entrypoint` cli vs sdk-* | `source` cli/vscode = user; exec / mcp / subagent = agent |
+| attach / jobs / bg / hooks / subagents / relocate / backup / restore | ✓ | ✗ — refused with `not supported for codex sessions` |
+
+Codex messages are the rollout's `response_item`/`message` records with role
+`user` or `assistant`; `developer` records and codex's own user-role wrappers
+(`<environment_context>`, `# AGENTS.md instructions`, …) are dropped, so the
+first user message and the transcript views show what the human typed.
+Deleting a codex session (`rm` / `Del`) only unlinks the rollout; codex's own
+sqlite index tolerates a missing file, but `codex delete <id>` is the
+first-party way. Gemini CLI is the next adapter (its `~/.gemini/tmp/<project>/chats`
+JSONL format is already researched, not yet wired in).
+
 ## Differences from claude-sessions
 
-- **#** row-number column + **ST** glyph column + **PROJECT** column on every row
+- **#** row-number column + **ST** glyph column + **AGENT** column +
+  **PROJECT** column on every row
 - **`done` / `undone` / `live` / `export` / `install-hook` / `uninstall-hook` /
   `prompt-hook` / `status-hook`** subcommands
 - Top-level `--skip-perm` flag for resume; `--hide-done` to start the TUI with
   ✓ done sessions hidden
 - TUI: `D`/`d`/`Ctrl-D` toggle-done, `H`/`h` hide-done, `C`/`c` cwd-only,
   `R`/`r`/`Ctrl-R` rescan, `e`/`E` export, `o`/`O` open-folder,
-  `a`/`A` auto-rescan, `s`/`S` column sort, `t`/`T` theme,
+  `a`/`A` agent view, `i`/`I` auto-rescan, `s`/`S` column sort, `t`/`T` theme,
   `Ctrl-A` mark-all, `?` help, `v`/`V` preview
 - fzf-style `/` — type + ↑↓ at once, Enter commits (doesn't auto-open),
   Ctrl-D marks while filtering, Tab escalates to full-text
@@ -276,12 +313,15 @@ relocate with cwd rewrite, interactive delete, multi-select marks.
   `alive` boolean: not-alive → `○` ended; alive feeds the 5-state classifier
   (working/waiting/idle resolved from the hook overlay, else the registry).
 - `~/.claude/settings.json` — cst's hook entries live here under `hooks`.
+- `$CODEX_HOME/sessions/**/rollout-*.jsonl` (default `~/.codex`) — Codex CLI
+  transcripts; `$CODEX_HOME/thread-writer-locks/<uuid>.lock` — flock held by a
+  live codex thread (cst probes it, never writes it).
 - `~/.cst/index.json` — mtime/size-invalidated
-  indexing cache. Safe to delete.
+  indexing cache (schema 6; entries carry `agent`). Safe to delete.
 - `~/.cst/state.json` — overlay storing
-  `{done: {sid: ts}, status: {sid: {state, event, ts}}, auto_rescan: {enabled, interval}, theme: "auto"|"dark"|"light", sort: {key, reverse}}`.
+  `{done: {sid: ts}, status: {sid: {state, event, ts}}, auto_rescan: {enabled, interval}, theme: "auto"|"dark"|"light", sort: {key, reverse}, origin: "all"|"user"|"agent", agent: "all"|"claude"|"codex"}`.
   Safe to delete (clears all ✓ marks, status overlay, auto-rescan / theme /
-  sort prefs).
+  sort / origin / agent-view prefs).
 - `~/.claude/jobs/pins.json` — agent-view pin set (read-only; cst never writes).
 
 ## Do not

@@ -350,7 +350,7 @@ class TestVersionString(unittest.TestCase):
     """Lock the version so accidental bumps require an explicit test edit."""
 
     def test_version_is_locked(self):
-        self.assertEqual(tracker.__version__, "1.17.0")
+        self.assertEqual(tracker.__version__, "1.18.0")
 
 
 class TestTopLevelFlags(unittest.TestCase):

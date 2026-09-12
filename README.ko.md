@@ -73,6 +73,7 @@ cst export <id>               # 트랜스크립트를 ./<id>.md로 출력
 cst stats                     # 요약 (프로젝트·상태 분포)
 cst list --sort msgs          # 컬럼 정렬 (time|status|msgs|project; --reverse로 방향 반전)
 cst list --origin user        # 사용자가 시작한 세션만 (--origin agent는 SDK가 생성한 것만)
+cst list --agent codex        # 특정 에이전트 CLI의 세션만 (all|claude|codex; TUI `a` 키로 순환)
 cst jobs                      # agent-view 백그라운드 세션 (claude --bg)
 cst --skip-perm --tui         # 재개 시 --dangerously-skip-permissions 자동 적용
 cst --theme light --tui       # TUI 색 테마 지정(auto|dark|light; `t`/`T`로 실시간 토글)
@@ -92,9 +93,36 @@ cst --theme light --tui       # TUI 색 테마 지정(auto|dark|light; `t`/`T`�
 | **○** | ended (종료됨) | 프로세스가 없음 (정상 종료 또는 등록된 적 없음). 트랜스크립트는 그대로 읽을 수 있음. |
 | **✓** | done (완료) | 사용자가 명시적으로 끝났다고 표시. TUI의 `D`/`d`/`Ctrl-D`, `cst done <id>`, 또는 `done!` 프롬프트 훅. `~/.cst/state.json`에 영구 저장. |
 
-상태는 **매 명령 실행마다 새로 계산**됩니다 — 백그라운드 데몬 없음. TUI는 기본 10초 간격으로 자동 재스캔합니다 (`a` 키로 변경/끔).
+상태는 **매 명령 실행마다 새로 계산**됩니다 — 백그라운드 데몬 없음. TUI는 기본 10초 간격으로 자동 재스캔합니다 (`i` 키로 변경/끔).
 
 **자기 치유:** 훅 오버레이가 설치된 상태에서 `waiting`/`working`을 기록했는데 레지스트리가 더 최신 `idle` 이벤트를 보고하면, 오래된 오버레이는 덮어쓰여지고 글리프가 `◦`로 정정됩니다 — 고착된 `!`가 남지 않도록.
+
+---
+
+## 멀티 에이전트: Codex CLI 세션
+
+1.18부터 `cst`는 Claude 전용이 아닙니다. `tracker.py`는 에이전트 CLI마다
+`AgentSpec` 하나를 `AGENTS`에 등록하고(데이터 루트, 트랜스크립트 탐색, 공통
+`Turn` 스트림으로의 파싱, 재개 명령, 실행 감지, 지원 기능 집합), 그 위의
+로더·캐시·상태 판정·CLI·TUI는 에이전트를 구분하지 않습니다. 모든 행의
+**AGENT** 열이 어느 CLI가 만든 세션인지 보여 주고, `--agent`와 TUI `a` 키로
+뷰를 좁힙니다.
+
+| | claude | codex |
+|:--|:--|:--|
+| 트랜스크립트 | `~/.claude/projects/**/*.jsonl` | `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<시각>-<uuid>.jsonl` (기본 `~/.codex`; 서브에이전트 rollout은 `subagents/`처럼 숨김) |
+| list / search / show / export / TUI / done / rm | ✓ | ✓ |
+| 재개 (`Enter`, `cst resume`) | `claude --resume <id>` | `codex resume <uuid>` (권한 생략 → `--dangerously-bypass-approvals-and-sandbox`) |
+| 실행 상태 | pid 레지스트리 + 훅 오버레이 | `thread-writer-locks/<uuid>.lock`의 flock 탐지: 잠겨 있으면 실행 중; rollout이 90초 이내에 갱신되었으면 `●`, 아니면 `◦`. codex는 `!` 대기를 감지할 수 없음 |
+| 생성 주체 (`--origin`) | `entrypoint` cli 대 `sdk-*` | `source` cli / vscode → user; exec / mcp / subagent → agent |
+| attach / jobs / bg / hooks / subagents / relocate / backup / restore | ✓ | ✗ (`not supported for codex sessions`) |
+
+codex의 대화는 rollout의 `response_item`/`message` 레코드 중 role이 `user`
+또는 `assistant`인 것이며, `developer` 레코드와 codex가 user 역할로 주입하는
+래퍼(`<environment_context>`, `# AGENTS.md instructions` 등)는 제외하므로
+MESSAGE 열과 트랜스크립트에는 사람이 입력한 내용만 보입니다. codex 세션
+삭제는 rollout 파일만 지웁니다(codex의 sqlite 색인은 누락 파일을 허용하며,
+정식 경로는 `codex delete <id>`). 다음 어댑터는 Gemini CLI입니다.
 
 ---
 
@@ -116,16 +144,17 @@ cst --theme light --tui       # TUI 색 테마 지정(auto|dark|light; `t`/`T`�
 cst list [--limit 30] [--cwd PREFIX] [--days N]
          [--status working|waiting|idle|ended|done|active]
          [--sort time|status|msgs|project] [--reverse]
-         [--origin all|user|agent] [--json]
+         [--origin all|user|agent] [--agent all|claude|codex] [--json]
 ```
 
 ```
-claude-session-tracker v1.10.0
-  #  ST  LAST ACTIVITY     SESSION   MSGS  MESSAGE                   PROJECT
-  1  ●   2026-05-24 01:17  960faaa8   261  claude-sessions 는…       ~/.claude/skills
-  2  !   2026-05-24 01:16  06d116f7    34  proceed? (y/N)            ~/project/url-shortener
-  3  ✓   2026-05-24 01:15  6a33a615    25  잔여 작업 내역을 커밋…    ~/project/csm
-  4  ○   2026-05-23 21:24  afbd9e28   241  pnpm 적용 되어 있는가?    ~/project/url-shortener
+claude-session-tracker v1.18.0
+  #  ST  AGENT   LAST ACTIVITY     SESSION   MSGS  MESSAGE                   PROJECT
+  1  ●   claude  2026-05-24 01:17  960faaa8   261  claude-sessions 는…       ~/.claude/skills
+  2  !   claude  2026-05-24 01:16  06d116f7    34  proceed? (y/N)            ~/project/url-shortener
+  3  ◦   codex   2026-05-24 01:15  019cb053    12  실패건을 해결하라.        ~/project/url-shortener
+  4  ✓   claude  2026-05-24 01:15  6a33a615    25  잔여 작업 내역을 커밋…    ~/project/csm
+  5  ○   claude  2026-05-23 21:24  afbd9e28   241  pnpm 적용 되어 있는가?    ~/project/url-shortener
 ```
 
 - 번호는 1부터, 1000개 이상 세션은 자동으로 컬럼 폭 확장
@@ -144,14 +173,18 @@ claude-session-tracker v1.10.0
   감추지 않는다. 명시적 `--origin`은 일회성이고, 플래그가 없으면 저장된 TUI
   설정(`f`/`F`)을 사용하며, 필터가 걸린 상태는 요약 줄에 `[origin:user]`로
   표시된다. `cst search`도 같은 플래그를 지원.
+- **에이전트:** `--agent all|claude|codex` (기본 `all`). 특정 에이전트 CLI의
+  세션만 보여 준다. 명시적 `--agent`는 일회성이고, 플래그가 없으면 TUI `a` 키가
+  마지막으로 저장한 뷰를 사용하며, 요약 줄에 `[agent:codex]`로 표시된다.
+  `cst search`와 `cst pick`도 같은 플래그를 지원.
 - **`--json`** — 테이블 대신 기계가 읽는 JSON으로 출력
-  (cst.app macOS 컴패니언이 소비하는 계약). 각 세션에 `entrypoint`와 `origin`
-  필드가 포함된다.
+  (cst.app macOS 컴패니언이 소비하는 계약). 각 세션에 `entrypoint`, `origin`,
+  `agent` 필드가 포함된다.
 
 ### `cst pick` / `--tui` — 인터랙티브 TUI
 
 ```bash
-cst pick [--cwd PREFIX] [--days N]
+cst pick [--cwd PREFIX] [--days N] [--agent all|claude|codex]
 cst --tui            # 동일
 ```
 
@@ -415,7 +448,8 @@ fzf 스타일 필터, 상태 글리프, 모달, 액션 키를 갖춘 curses 선�
 | **`H`** / **`h`** | hide-done 토글 — ✓ 행 숨김/표시 (`Ctrl-H`는 Backspace라 별칭 없음) |
 | **`C`** / **`c`** | cwd-only 토글 — TUI 실행 cwd 아래의 세션만 표시 (NFC-정규화 prefix 매치) |
 | **`R`** / **`r`** / **`Ctrl-R`** | 세션 목록 + 라이브 프로세스 레지스트리 재스캔 |
-| **`a`** / **`A`** | 자동 재스캔 간격 팝업 (Off / 5 / 10 / 30 / 60 / 120초; 기본 ON 10초, `state.json`에 저장; 세션이 **새로** `!` 대기로 전이 시 `curses.beep()` + 고정 TUI 토스트 — macOS 데스크톱 알림 없음) |
+| **`a`** / **`A`** | 에이전트 뷰 순환: `all → claude → codex` (`A`는 역방향). `all`이 아닐 때 헤더에 `⚙codex` 표시. 저장되며 `cst list --agent`와 공유. |
+| **`i`** / **`I`** | 자동 재스캔 간격 팝업 (Off / 5 / 10 / 30 / 60 / 120초; 기본 ON 10초, `state.json`에 저장; 세션이 **새로** `!` 대기로 전이 시 `curses.beep()` + 고정 TUI 토스트 — macOS 데스크톱 알림 없음). 1.18 이전에는 `a` 키였음. |
 | **`s`** | 정렬 컬럼 순환 (화면 컬럼 순서대로): `status → time → msgs → project` (해당 컬럼의 자연 방향으로 리셋). 헤더에 `sort:<col>▼/▲` 표시 + 활성 컬럼 하이라이트. 저장됨. |
 | **`S`** | 현재 정렬 방향 반전. 저장됨. |
 | **`f`** | 생성 주체 필터 순환: `all → user → agent`. `user`는 터미널에서 시작한 세션(agent-view `bg` 잡 포함), `agent`는 SDK가 생성한 세션(보안 리뷰 훅, `claude -p`, 각종 도구). 헤더에 `👤user` / `🤖agent` 표시. 저장되며 `cst list --origin`과 공유. |
@@ -447,7 +481,7 @@ fzf 스타일 필터, 상태 글리프, 모달, 액션 키를 갖춘 curses 선�
 ### 헤더
 
 ```
- claude-session-tracker v1.10.0  12/563  ●3 !1 ◦0 ○558 ✓1  ⟳10s  sort:time▼  👤user  [✓ hidden]  [📂 ~/project]   ? help  Enter open  o folder  / filter  s sort  f origin  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit
+ claude-session-tracker v1.18.0  12/563  ●3 !1 ◦0 ○558 ✓1  ⟳10s  sort:time▼  👤user  ⚙codex  [✓ hidden]  [📂 ~/project]   ? help  Enter open  o folder  / filter  s sort  f origin  a agent  i auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit
 ```
 
 - `12/563` — 보이는 행 / 전체 세션 수
@@ -455,6 +489,7 @@ fzf 스타일 필터, 상태 글리프, 모달, 액션 키를 갖춘 curses 선�
 - `⟳10s` — 자동 재스캔 간격 (또는 `⟳off`)
 - `sort:time▼` — 활성 정렬 컬럼 + 방향 (`▼` 내림 / `▲` 오름); 해당 컬럼 헤더가 하이라이트됨
 - `👤user` / `🤖agent` — 생성 주체 필터가 `all`이 아닐 때만 표시
+- `⚙codex` — 에이전트 뷰가 `all`이 아닐 때만 표시
 - `[✓ hidden]` — hide-done이 켜졌을 때만 표시
 - `[📂 ~/project]` — cwd-only가 켜졌을 때만 표시
 
@@ -470,7 +505,7 @@ fzf 스타일 필터, 상태 글리프, 모달, 액션 키를 갖춘 curses 선�
 
 - **도움말 (`?`)** — 스크롤 가능한 치트시트
 - **미리보기 (`v`)** — 역할별 색상의 트랜스크립트, 메시지 전문 표시(줄바꿈 처리). 상단 메타 정보(Session / Status / Cwd / Branch / Started)는 구분선 위에 고정되어 스크롤해도 사라지지 않으며, Status 행은 목록의 ST 컬럼과 같은 팔레트로 상태별 색상이 적용된다(● 초록 · ! 빨강 · ◦ 시안 · ○ 흐림 · ✓ 마젠타); `d`/`Ctrl-D`로 done 토글(스크롤 위치와 검색 상태 유지, 변경 직후 Status 행이 한 번의 키 입력 동안 반전되어 변화를 알림), `Del`로 그 자리에서 삭제(확인)
-- **자동 재스캔 간격 (`a`)** — Off / 5 / 10 / 30 / 60 / 120초. `1`–`6`로 직접 점프, Enter 적용; `state.json`에 저장
+- **자동 재스캔 간격 (`i`)** — Off / 5 / 10 / 30 / 60 / 120초. `1`–`6`로 직접 점프, Enter 적용; `state.json`에 저장
 - **삭제 확인 (`Del`)** — `y` 확정 · `n/Esc/Enter` 취소 · 최대 5개 미리 표시
 - **권한 건너뛰기 확인** — `--skip-perm` 없이 재개할 때 Enter에서 표시. `y/Y/Enter` 플래그 적용 · `n/N` 미적용 · `Esc` 취소
 - **cmux 선택기** — cst가 cmux 안에서 실행될 때만 표시. `t/T/Enter` cmux 워크스페이스 탭 · `w/W` cmux 새 창 · `Esc` 취소
@@ -569,8 +604,10 @@ TUI에서 `Enter`를 누르면 **현재 쓰는 터미널 앱과 동일한 앱의
 | `~/.claude/settings.json` | Claude Code 설정 (cst가 훅 항목을 기록) | 아니오 — `cst uninstall-hook`로 cst 항목만 제거 |
 | `~/.claude/jobs/<short>/state.json` | agent-view 백그라운드 잡 상태 (읽기 전용) | 건드리지 말 것 |
 | `~/.claude/jobs/pins.json` | agent-view 핀 집합 (읽기 전용; cst는 쓰지 않음) | 건드리지 말 것 |
-| `~/.cst/index.json` | mtime/size 무효화 세션 메타 캐시 | 예 (다음 실행 시 재생성) |
-| `~/.cst/state.json` | done 플래그 + 훅 상태 오버레이 + 사용자 설정(자동 재스캔·테마·정렬·생성 주체) | 예 (모든 `✓` 마크·오버레이·설정 초기화) |
+| `$CODEX_HOME/sessions/**/rollout-*.jsonl` | Codex CLI 트랜스크립트 (기본 `~/.codex`; 읽기 전용) | 건드리지 말 것 |
+| `$CODEX_HOME/thread-writer-locks/<uuid>.lock` | codex의 스레드별 writer 잠금 — cst는 flock 탐지로 실행 여부만 확인 (읽기 전용) | 건드리지 말 것 |
+| `~/.cst/index.json` | mtime/size 무효화 세션 메타 캐시 (스키마 6, 항목마다 `agent` 보유) | 예 (다음 실행 시 재생성) |
+| `~/.cst/state.json` | done 플래그 + 훅 상태 오버레이 + 사용자 설정(자동 재스캔·테마·정렬·생성 주체·에이전트 뷰) | 예 (모든 `✓` 마크·오버레이·설정 초기화) |
 
 위 표의 `~/.claude/...` 경로는 모두 **`$CLAUDE_CONFIG_DIR`**를 따릅니다
 (Claude Code 자체와 같은 규약): 설정돼 있으면 `projects/`, `sessions/`,
@@ -605,13 +642,14 @@ cst 자체 파일(`index.json`, `state.json`)은 **`~/.cst`** 아래에 저장�
     "key": "time" | "status" | "msgs" | "project",
     "reverse": true
   },
-  "origin": "all" | "user" | "agent"
+  "origin": "all" | "user" | "agent",
+  "agent": "all" | "claude" | "codex"
 }
 ```
 
-`status`는 `cst status-hook`이 채움 (훅이 설치돼 있을 때만). `auto_rescan`은 TUI `a`
+`status`는 `cst status-hook`이 채움 (훅이 설치돼 있을 때만). `auto_rescan`은 TUI `i`
 팝업, `theme`은 `t`/`T`(또는 `--theme`), `sort`는 TUI `s`/`S` 키, `origin`은 `f`/`F`
-키에서 설정. `state.json`을 지우면 전부 초기화.
+키, `agent`는 `a`/`A` 키에서 설정. `state.json`을 지우면 전부 초기화.
 
 ---
 
@@ -677,11 +715,12 @@ cst relocate <id> ~/project/actual-folder -y
 
 `cst`는 상위 집합. 모든 `claude-sessions` 서브커맨드 유지 + 추가:
 
-- **#** 번호 컬럼 + **ST** 글리프 컬럼 + **PROJECT** 컬럼을 매 행에 표시
+- **#** 번호 컬럼 + **ST** 글리프 컬럼 + **AGENT** 컬럼 + **PROJECT** 컬럼을 매 행에 표시
+- **멀티 에이전트:** Codex CLI 세션을 Claude 세션과 나란히 목록·검색·조회·내보내기·재개·상태 추적 (`--agent`, TUI `a`)
 - **`done`**, **`undone`**, **`live`**, **`export`**, **`bg`** / **`jobs`** / **`stop`** / **`logs`** (agent-view 백그라운드 세션), **`install-hook`** / **`uninstall-hook`** / **`prompt-hook`** / **`status-hook`** 서브커맨드
 - `cst list --sort time|status|msgs|project [--reverse]` 컬럼 정렬
 - `cst list --origin all|user|agent` (및 `cst search --origin`) — SDK가 생성한 세션을 숨기거나, 그것만 보기
-- TUI 키: `D/d/Ctrl-D` (done 토글) · `H/h` (숨김 토글) · `C/c` (cwd-only) · `R/r/Ctrl-R` (rescan) · `e/E` (내보내기) · `o/O` (폴더 열기) · `a/A` (자동 재스캔) · `s`/`S` (컬럼 정렬) · `f`/`F` (생성 주체 필터) · `t/T` (테마) · `Ctrl-A` (전체 마크) · `?` (도움말) · `v/V` (미리보기)
+- TUI 키: `D/d/Ctrl-D` (done 토글) · `H/h` (숨김 토글) · `C/c` (cwd-only) · `R/r/Ctrl-R` (rescan) · `e/E` (내보내기) · `o/O` (폴더 열기) · `a/A` (에이전트 뷰) · `i/I` (자동 재스캔) · `s`/`S` (컬럼 정렬) · `f`/`F` (생성 주체 필터) · `t/T` (테마) · `Ctrl-A` (전체 마크) · `?` (도움말) · `v/V` (미리보기)
 - 백그라운드/agent-view 행: `[bg]`/`[exec]`/`[bg ⎇branch]`/`[bg ∙]`/`[PR #N]` 배지, `*` 핀 마커, `Enter`는 attach(포크 아님)
 - 색 테마 (dark/light, `--theme` / `t`)
 - fzf 스타일 `/` — 타이핑하며 동시에 이동, 필터 확정 후 다양한 액션

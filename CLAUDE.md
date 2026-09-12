@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-`claude-session-tracker` (CLI: `cst`) is a single-file Python tool that browses, searches, resumes, and tracks the status of local Claude Code sessions. It's a superset of `claude-sessions` adding live-process status detection, a "task done" flag, and an fzf-style curses TUI. **Stdlib-only, zero dependencies**, Python 3.10+.
+`claude-session-tracker` (CLI: `cst`) is a single-file Python tool that browses, searches, resumes, and tracks the status of local Claude Code sessions — and, since 1.18, Codex CLI sessions through the same UI (an `AgentSpec` adapter per agent; gemini is the planned next one). It's a superset of `claude-sessions` adding live-process status detection, a "task done" flag, and an fzf-style curses TUI. **Stdlib-only, zero dependencies**, Python 3.10+.
 
-The entire implementation lives in `tracker.py` (~5,900 lines), with a stdlib `unittest` suite under `tests/`. There is no build system and no package manager. `SKILL.md` is the Claude Code skill definition; `README.md` / `README.ko.md` are the human-facing docs.
+The entire implementation lives in `tracker.py` (~7,000 lines), with a stdlib `unittest` suite under `tests/`. There is no build system and no package manager. `SKILL.md` is the Claude Code skill definition; `README.md` / `README.ko.md` are the human-facing docs.
 
 ## Running and Installing
 
@@ -25,11 +25,12 @@ cst --version
 `tracker.py` is a self-contained script with these logical sections (top to bottom):
 
 1. **Constants & helpers** (lines ~40–110) — paths, `_CACHE_SCHEMA`, status glyphs (`●`/`!`/`◦`/`○`/`✓`), labels, `_JOB_STATE_GLYPH`
+1b. **AGENT LAYER** (`Turn`, `AgentSpec`, `AGENTS`, ~line 190–520) — one frozen `AgentSpec` per agent CLI: `name`/`bin`/`resume_label`, `owns(path)`, `session_files(include_subagents)`, `session_id_of(path)`, `iter_turns(path)` (the transcript → `Turn(etype, ts, text, cwd, git_branch, entrypoint)` stream every consumer folds), `resume_argv(bin, sid, skip_perm)`, `caps` (`resume attach jobs hooks subagents relocate backup`), `skip_perm_flag`, and optional `live_probe()` / `live_info(sid)` for agents without a pid registry. `CLAUDE_AGENT` wraps the pre-1.18 code paths through late-bound lambdas (tests re-point `PROJECTS_DIR` after import, so specs must read module globals at call time). `CODEX_AGENT` reads `$CODEX_HOME/sessions/**/rollout-*.jsonl` (`session_meta` header → cwd/git.branch/source; `response_item`/`message` user+assistant turns; developer records and codex's user-role wrappers dropped via `_codex_is_wrapper`; subagent rollouts — dict `source`, `parent_thread_id`, or `thread_source` subagent/guardian_review — hidden by default), resumes with `codex resume <uuid>` (`--dangerously-bypass-approvals-and-sandbox` for skip-perm), and reports liveness by non-blocking-flock-probing `thread-writer-locks/<uuid>.lock` (`_flock_held`; codex holds that flock while a thread has an active writer — verified in codex's `writer_lock.rs`), busy vs idle by rollout mtime within `_CODEX_BUSY_WINDOW_S`. `agent_for_path(path)` picks the owning spec (claude for unowned/test paths), `agent_of(meta)` prefers `SessionMeta.agent`, `require_cap(meta, cap, verb)` gates the Claude-only commands (`subagents`, `relocate`; TUI Enter skips the orphan-relocate flow for agents without `relocate`). Adding an agent = one `AgentSpec` + an `AGENTS` entry; nothing above the table changes. Gemini CLI's format (`~/.gemini/tmp/<project>/chats/session-*.jsonl`, first line metadata, `$set`/`$rewindTo` records) is researched but not wired.
 2. **Terminal-window spawning & focus** (`open_in_new_terminal`, ~line 166; `focus_existing_window`, ~line 904) — `open_in_new_terminal` detects `$TERM_PROGRAM` and opens sessions in new windows for iTerm/Terminal.app/WezTerm/Ghostty/kitty/Alacritty (+`cmux`). A `terminal=` kwarg (CLI: `resume --spawn --terminal NAME` / `open --terminal NAME`, 1.14+) overrides the `$TERM_PROGRAM` pick — GUI callers like cst.app have no `$TERM_PROGRAM` and would otherwise always fall back to Terminal.app; unknown/missing CLIs still fall through to Terminal.app. `focus_existing_window` raises a *live* session's existing window by matching the claude PID's controlling tty (`ps -o tty=`): WezTerm via `wezterm cli list` → window title → macOS Accessibility `AXRaise` of the `wezterm-gui` window (WezTerm has no CLI window-raise); Terminal.app tabs / iTerm2 sessions via AppleScript `tty` match; cmux workspaces via `cmux --id-format both debug-terminals` (maps tty → surface → workspace/window UUIDs) then `select-workspace` + `focus-pane` + `focus-window` **+ `_activate_macos_app("cmux")`** — cmux's `focus-window` (and `set-app-focus`/`simulate-app-active`) only move cmux's *internal* current-window; none activate the app process, so when cmux isn't already frontmost (user in another app, or target in a different OS window) the window never visibly rises. Only an AppleScript `tell application "cmux" to activate` (NSApp activate) brings the now-current window forward. cmux runs Ghostty as `$TERM_PROGRAM`, so it's probed first whenever `$CMUX_WORKSPACE_ID` is set, else as a fallback. The cmux backend is gated by `_cmux_available()` (env var inside a workspace, else `cmux ping`) — **not** `pgrep -x cmux`, which is flaky: the GUI's process name is its full bundle path so the exact match only ever catches transient CLI invocations. TUI Enter tries focus first, then falls back to spawning.
 3. **Display utilities** (~line 960) — `display_width`, `pad_display`, `truncate_display`, `truncate_display_tail`, `shorten_path` — CJK-aware column formatting using `unicodedata.east_asian_width`
 4. **Live-process detection** (`scan_live_sessions`, ~line 1103) — scans `~/.claude/sessions/<pid>.json` + `kill -0` to determine active vs ended
 5. **State persistence & prefs** (`load_state`/`save_state`, ~line 1276) — `state.json` holds 작업종료 (done) flags + the status overlay + user prefs (auto-rescan ~line 1504, TUI theme ~line 1545, column sort ~line 1604); `index.json` is the mtime-invalidated session cache
-6. **Session loading** (`SessionMeta` dataclass, ~line 1675; `load_all_sessions`, ~line 1980) — parses `.jsonl` transcripts with caching; also `scan_pr_refs`/`pr_badge`
+6. **Session loading** (`SessionMeta` dataclass, ~line 2100; `load_all_sessions`, ~line 2400) — `load_session_meta`, `iter_messages`, `cmd_search`, the TUI full-text search and the preview modal all fold the owning spec's `iter_turns()` stream, so a transcript format lives in exactly one place; `SessionMeta.agent` names the spec and rides the index cache (`_CACHE_SCHEMA` 6); `all_session_files()` concatenates every spec's files in registry order; also `scan_pr_refs`/`pr_badge`
 7. **CLI subcommands** (~line 2082) — `cmd_list`, `cmd_search`, `cmd_show`, `cmd_export`, `cmd_resume`, `cmd_open` (TUI `o` as a subcommand — folder in a new terminal, for cst.app), `cmd_done`, `cmd_undone`, `cmd_live`, `cmd_stop`, `cmd_logs`, `cmd_bg`, `cmd_jobs`, `cmd_relocate`, `cmd_rm`, `cmd_backup`, `cmd_restore`, `cmd_stats`, `cmd_subagents`, plus the hook commands `cmd_prompt_hook`/`cmd_status_hook`/`cmd_install_hook`/`cmd_uninstall_hook`
 
 ### bg-aware actions (attach / stop / logs)
@@ -131,12 +132,30 @@ listing invisibly. `session_to_dict` exposes `entrypoint` + `origin` for
 immediately and reset the cursor. The header hint (`👤user` / `🤖agent`) sits
 right after `sort:<col>` — anything longer, or placed after the transient
 mark/search/hide/cwd hints, truncates at 80 columns.
-8. **TUI** (`_pick_ui`, ~line 4179) — curses-based picker with two modes (normal + search), rendering loop, modal dialogs (help, preview, delete confirm, cmux chooser). The preview modal (`_preview_modal`) pins its metadata header: `_build_lines()` returns `(lines, head_n)`, `_preview_sticky_head(head_n, view_h)` caps how many of those rows stay on screen (leaving `_PREVIEW_MIN_BODY_ROWS` for the transcript, and letting the overflow scroll normally since the body starts at the pinned count), and `top` is an absolute index into `lines` clamped to `[head_h, max_top]`. `d`/`Ctrl-D` therefore rewrites only `lines[_PREVIEW_STATUS_ROW]` in place instead of rebuilding every line, so the scroll offset and the active search survive a done toggle. That row is built by `_preview_status_row(status, inner_w, flash)`, which borrows `_status_attr()` — the list's ST palette — so the state reads by color, and ORs in `A_REVERSE|A_BOLD` when `flash` is set; a successful `d` sets `status_flash`, and the next keypress repaints the row unflashed alongside the `notice` reset. The modal never rescans, so a status change originating *outside* it (a process ending while the modal is open) shows up only on re-entry or a `‹`/`›` session switch. Normal-mode action keys include `s`/`S` (sort), `f`/`F` (origin filter), `t`/`T` (theme), and `o`/`O` (open the focused session's folder in a new terminal — plain shell via `open_folder_in_new_terminal()`, no claude command) alongside `D`/`H`/`C`/`a`/`R`/`e`/`v`. **Color theme**: dark/light palettes via `tui_init_colors()` — pair NUMBERS carry fixed meaning (1–9), only (fg,bg) swap per theme, so the whole UI re-themes without touching call sites; pair 7 doubles as the full-screen `bkgd` fill so each theme renders identically across terminals. `resolve_theme()` picks the effective theme (CLI `--theme` → saved pref → `COLORFGBG` auto-detect → dark); `t`/`T` toggles live and persists via `save_theme()` into `state.json`.
+
+### Agent view (`cst list --agent` / TUI `a`,`A`)
+
+Which agent CLI's sessions are shown: `"all"` or an `AGENTS` key
+(`agent_choices()` = `("all", *AGENTS)`). `filter_agent(rows, view)` returns a
+new list and keeps everything for `"all"`/unknown values (mirrors
+`filter_origin`); `cycle_agent(view, step)` walks the choices; `agent_note()`
+appends `  [agent:codex]` to CLI summaries. The pref persists as
+`{"agent": "..."}` via `load_agent_view`/`save_agent_view`. `cmd_list`,
+`cmd_search` and `cmd_pick` honour an explicit `--agent` as a one-off (pick
+via the `agent_view_override` kwarg of `_pick_ui`), else the saved view. In
+the TUI `a` cycles forward and `A` backwards, both save immediately and reset
+the cursor; the header hint is `⚙<agent>` right after the origin hint. The
+**AGENT** column (`AGENT_VIEW_WIDTH` = 6) sits between ST and LAST ACTIVITY in
+`cst list`, `cst search` rows and the TUI (`_tui_columns` returns an 8-tuple:
+`num, status, agent, ts, sid, msgs, msg, proj`); `session_to_dict` exposes
+`agent` for `--json`. Moving the auto-rescan popup off `a` to `i` made room
+for this key.
+8. **TUI** (`_pick_ui`, ~line 4179) — curses-based picker with two modes (normal + search), rendering loop, modal dialogs (help, preview, delete confirm, cmux chooser). The preview modal (`_preview_modal`) pins its metadata header: `_build_lines()` returns `(lines, head_n)`, `_preview_sticky_head(head_n, view_h)` caps how many of those rows stay on screen (leaving `_PREVIEW_MIN_BODY_ROWS` for the transcript, and letting the overflow scroll normally since the body starts at the pinned count), and `top` is an absolute index into `lines` clamped to `[head_h, max_top]`. `d`/`Ctrl-D` therefore rewrites only `lines[_PREVIEW_STATUS_ROW]` in place instead of rebuilding every line, so the scroll offset and the active search survive a done toggle. That row is built by `_preview_status_row(status, inner_w, flash)`, which borrows `_status_attr()` — the list's ST palette — so the state reads by color, and ORs in `A_REVERSE|A_BOLD` when `flash` is set; a successful `d` sets `status_flash`, and the next keypress repaints the row unflashed alongside the `notice` reset. The modal never rescans, so a status change originating *outside* it (a process ending while the modal is open) shows up only on re-entry or a `‹`/`›` session switch. Normal-mode action keys include `s`/`S` (sort), `f`/`F` (origin filter), `a`/`A` (agent view), `i`/`I` (auto-rescan popup — was `a` before 1.18), `t`/`T` (theme), and `o`/`O` (open the focused session's folder in a new terminal — plain shell via `open_folder_in_new_terminal()`, no claude command) alongside `D`/`H`/`C`/`R`/`e`/`v`. Enter resumes through `open_in_new_terminal(..., agent=spec.name)`, and the skip-permissions modal titles itself with the spec's `skip_perm_flag`. **Color theme**: dark/light palettes via `tui_init_colors()` — pair NUMBERS carry fixed meaning (1–9), only (fg,bg) swap per theme, so the whole UI re-themes without touching call sites; pair 7 doubles as the full-screen `bkgd` fill so each theme renders identically across terminals. `resolve_theme()` picks the effective theme (CLI `--theme` → saved pref → `COLORFGBG` auto-detect → dark); `t`/`T` toggles live and persists via `save_theme()` into `state.json`.
 9. **Argument parser** (`_build_parser`, ~line 5689) and `main` (~line 5890)
 
 ### Key data flow
 
-`load_all_sessions()` is the central data loader — it reads all `.jsonl` files under `~/.claude/projects/`, applies the mtime-based index cache, resolves live/done status, filters by `--cwd`/`--days`/`--status`, and returns `SessionMeta` objects sorted by `last_ts` descending (the default order). Both CLI commands and the TUI consume this, then re-order via `sort_sessions()` when a non-default column sort is active.
+`load_all_sessions()` is the central data loader — it reads every agent's transcripts (`all_session_files()`: `~/.claude/projects/**/*.jsonl` plus `$CODEX_HOME/sessions/**/rollout-*.jsonl`), applies the mtime-based index cache, resolves live/done status, filters by `--cwd`/`--days`/`--status`, and returns `SessionMeta` objects sorted by `last_ts` descending (the default order). Both CLI commands and the TUI consume this, then re-order via `sort_sessions()` when a non-default column sort is active.
 
 **One row per sessionId** — `dedupe_sessions()` (~line 2167) runs just before
 that sort, and `cmd_search` applies it to its own hits. `session_id` is
@@ -157,8 +176,10 @@ Dedup is display-only — cst never deletes the redundant file.
 | `~/.claude/projects/**/*.jsonl` | Read | Session transcripts (Claude Code's data) |
 | `~/.claude/sessions/<pid>.json` | Read | Live-process registry (interactive sessions) |
 | `~/.claude/jobs/<short>/state.json` | Read | Agent-view background-session state (`scan_jobs()`) |
+| `$CODEX_HOME/sessions/**/rollout-*.jsonl` | Read | Codex CLI transcripts (`CODEX_AGENT`; default `~/.codex`) |
+| `$CODEX_HOME/thread-writer-locks/<uuid>.lock` | Read (flock probe) | Codex's per-thread writer lock — held ⇒ live (`codex_live_probe`); never written |
 | `~/.cst/index.json` | R/W | Session metadata cache (safe to delete) |
-| `~/.cst/state.json` | R/W | Done-flag overlay + status overlay + user prefs: auto-rescan, TUI theme, column sort, origin filter (safe to delete) |
+| `~/.cst/state.json` | R/W | Done-flag overlay + status overlay + user prefs: auto-rescan, TUI theme, column sort, origin filter, agent view (safe to delete) |
 | `~/.claude/jobs/pins.json` | Read | Agent-view pin set (`read_pins()`) — never written |
 
 cst's own dir is `_cst_home()` — `$CST_HOME` if set, else `~/.cst`. `main()`
@@ -168,6 +189,8 @@ never overwrites existing targets; no-op when module paths are test-stubbed,
 i.e. `CACHE_DIR != _cst_home()`).
 
 ### Status resolution priority
+
+Agents without a pid registry plug into the same decision: `StatusContext.capture()` calls every spec's `live_probe()` and folds the result into `live` plus a synthetic registry record (`{"status": "busy"|"idle", "updatedAt": ms}`), so codex sessions reach `classify_status()` looking like registry-backed claude ones (`●` when the rollout was written within `_CODEX_BUSY_WINDOW_S`, else `◦`; `!` waiting is not detectable for codex). `get_live_session_info()` likewise falls back to `spec.live_info(sid)` (pid via `lsof -t` on the lock) so window focus and the TUI footer work for a live codex thread.
 
 `classify_status()` (via `resolve_status()` / `StatusContext.resolve`) decides
 in this order: **✓ done always wins**; otherwise a **dead** process is `○` ended
@@ -233,10 +256,11 @@ through `_delete_sessions`, shared with the TUI `Del` key.
 
 ## Development Notes
 
-- Tests live under `tests/` (stdlib `unittest`, run with `python3 -m pytest -q` or `python3 -m unittest discover -s tests`) — one `test_*.py` per feature; add one when you add a feature. They load `tracker.py` via `importlib` and stub `CACHE_DIR`/`STATE_PATH` into a tempdir for state tests
+- Tests live under `tests/` (stdlib `unittest`, run with `python3 -m pytest -q` or `python3 -m unittest discover -s tests`) — one `test_*.py` per feature; add one when you add a feature. They load `tracker.py` via `importlib` and stub `CACHE_DIR`/`STATE_PATH` into a tempdir for state tests. **Any test that stubs `PROJECTS_DIR` must also stub `CODEX_SESSIONS_DIR` / `CODEX_LOCKS_DIR`** (the session universe now spans every agent; an unstubbed codex root leaks the real `~/.codex` rollouts into the fixture and slows the run)
+- `tests/test_golden_cli.py` + `tests/golden/*.txt` are byte-for-byte characterisation snapshots of list/json/search/show/export/stats/resume over a fixed fixture set. A deliberate output change must regenerate them with `CST_GOLDEN_UPDATE=1 python3 -m unittest tests.test_golden_cli` and the golden diff is reviewed like code; any other change must leave them untouched
 - The TUI itself requires a real TTY — `_pick_ui` can't run from non-interactive Bash calls or agent tool calls (verify its curses layout headlessly via `pty.fork` + `getyx`)
 - CJK/Unicode display width is handled manually via `east_asian_width`; search mode assembles UTF-8 byte-by-byte to work around Python curses bugs on some terminals
 - `ESCDELAY` is set to 25ms for responsive Esc handling
-- `_CACHE_SCHEMA` version (currently 5) must be bumped when `SessionMeta` fields or extraction logic change, to invalidate stale cache entries
+- `_CACHE_SCHEMA` version (currently 6) must be bumped when `SessionMeta` fields or extraction logic change, to invalidate stale cache entries
 - `encode_cwd()` NFC-normalizes paths before encoding — important for Korean filesystem paths on macOS
 - Version string is in `__version__` at the top of `tracker.py`
