@@ -73,6 +73,7 @@ cst export <id>               # write transcript to ./<id>.md
 cst stats                     # counts, top projects, status breakdown
 cst list --sort msgs          # sort by a column (time|status|msgs|project; --reverse flips)
 cst list --origin user        # only sessions you started (--origin agent = SDK-spawned)
+cst list --agent codex        # one agent CLI's sessions (all|claude|codex; TUI `a` cycles)
 cst jobs                      # agent-view background sessions (claude --bg)
 cst --skip-perm --tui         # auto-apply --dangerously-skip-permissions on resume
 cst --theme light --tui       # force a TUI color theme (auto|dark|light; `t`/`T` toggles live)
@@ -92,9 +93,36 @@ Compact one-column glyphs in the `ST` column. Resolution order in `classify_stat
 | **○** | ended | Process is gone (clean exit) or was never registered. Transcript remains readable. |
 | **✓** | done | You explicitly marked it done (`D`/`d`/`Ctrl-D` in TUI, `cst done <id>`, or the `done!` prompt hook). Persists in `~/.cst/state.json`. |
 
-Status is **computed fresh on every command invocation** — there is no background daemon. The TUI auto-rescans every 10s by default (configurable / off via `a`).
+Status is **computed fresh on every command invocation** — there is no background daemon. The TUI auto-rescans every 10s by default (configurable / off via `i`).
 
 **Self-healing:** when the hook overlay is installed and reports `waiting`/`working` but the registry shows a newer `idle` event, the stale overlay is overridden and the glyph collapses to `◦` to avoid a stuck `!`.
+
+---
+
+## Multi-agent: Codex CLI sessions
+
+Since 1.18 `cst` is not Claude-only. `tracker.py` keeps one `AgentSpec` per
+agent CLI in `AGENTS` — data root, transcript discovery, parsing into a shared
+`Turn` stream, resume command, live probe, capability set — and everything
+above that table (loader, cache, status, CLI, TUI) is agent-agnostic. An
+**AGENT** column on every row says which CLI wrote the session; `--agent` /
+the TUI `a` key narrow the view.
+
+| | claude | codex |
+|:--|:--|:--|
+| Transcripts | `~/.claude/projects/**/*.jsonl` | `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` (default `~/.codex`; subagent rollouts hidden like `subagents/`) |
+| list / search / show / export / TUI / done / rm | ✓ | ✓ |
+| Resume (`Enter`, `cst resume`) | `claude --resume <id>` | `codex resume <uuid>` (skip-perm → `--dangerously-bypass-approvals-and-sandbox`) |
+| Live status | pid registry + hook overlay | flock probe on `thread-writer-locks/<uuid>.lock`: held → alive; rollout written < 90 s ago → `●`, else `◦`. `!` waiting is not detectable for codex |
+| Origin (`--origin`) | `entrypoint` cli vs `sdk-*` | `source` cli / vscode → user; exec / mcp / subagent → agent |
+| attach / jobs / bg / hooks / subagents / relocate / backup / restore | ✓ | ✗ (`not supported for codex sessions`) |
+
+Codex turns are the rollout's `response_item`/`message` records with role
+`user` or `assistant`; `developer` records and codex's own user-role wrappers
+(`<environment_context>`, `# AGENTS.md instructions`, …) are dropped so the
+MESSAGE column and transcripts show what the human typed. Deleting a codex
+session only unlinks the rollout (codex's sqlite index tolerates that;
+`codex delete <id>` is the first-party route). Gemini CLI is the next adapter.
 
 ---
 
@@ -116,16 +144,17 @@ Status is **computed fresh on every command invocation** — there is no backgro
 cst list [--limit 30] [--cwd PREFIX] [--days N]
          [--status working|waiting|idle|ended|done|active]
          [--sort time|status|msgs|project] [--reverse]
-         [--origin all|user|agent] [--json]
+         [--origin all|user|agent] [--agent all|claude|codex] [--json]
 ```
 
 ```
-claude-session-tracker v1.10.0
-  #  ST  LAST ACTIVITY     SESSION   MSGS  MESSAGE                   PROJECT
-  1  ●   2026-05-24 01:17  960faaa8   261  claude-sessions 는…       ~/.claude/skills
-  2  !   2026-05-24 01:16  06d116f7    34  proceed? (y/N)            ~/project/url-shortener
-  3  ✓   2026-05-24 01:15  6a33a615    25  잔여 작업 내역을 커밋…    ~/project/csm
-  4  ○   2026-05-23 21:24  afbd9e28   241  pnpm 적용 되어 있는가?    ~/project/url-shortener
+claude-session-tracker v1.18.0
+  #  ST  AGENT   LAST ACTIVITY     SESSION   MSGS  MESSAGE                   PROJECT
+  1  ●   claude  2026-05-24 01:17  960faaa8   261  claude-sessions 는…       ~/.claude/skills
+  2  !   claude  2026-05-24 01:16  06d116f7    34  proceed? (y/N)            ~/project/url-shortener
+  3  ◦   codex   2026-05-24 01:15  019cb053    12  실패건을 해결하라.        ~/project/url-shortener
+  4  ✓   claude  2026-05-24 01:15  6a33a615    25  잔여 작업 내역을 커밋…    ~/project/csm
+  5  ○   claude  2026-05-23 21:24  afbd9e28   241  pnpm 적용 되어 있는가?    ~/project/url-shortener
 ```
 
 - Row numbers start at 1; column auto-expands for 1000+ sessions.
@@ -146,14 +175,18 @@ claude-session-tracker v1.10.0
   one-off; with no flag the saved TUI preference (`f`/`F`) is used, and an
   active filter is announced as `[origin:user]` in the summary line. The same
   flag works on `cst search`.
+- **Agent:** `--agent all|claude|codex` (default `all`) shows one agent CLI's
+  sessions. An explicit `--agent` is a one-off; with no flag the view the TUI
+  `a` key last saved is used, announced as `[agent:codex]` in the summary
+  line. Same flag on `cst search` and `cst pick`.
 - **`--json`** emits the list as machine-readable JSON instead of the table
   (the contract consumed by the cst.app macOS companion). Each session carries
-  `entrypoint` and `origin`.
+  `entrypoint`, `origin` and `agent`.
 
 ### `cst pick` / `--tui` — interactive TUI
 
 ```bash
-cst pick [--cwd PREFIX] [--days N]
+cst pick [--cwd PREFIX] [--days N] [--agent all|claude|codex]
 cst --tui            # equivalent
 ```
 
@@ -421,7 +454,8 @@ A curses picker with fzf-style filter, status glyphs, modals, and action keys. *
 | **`H`** / **`h`** | Toggle hide-done — hide/show ✓ rows (no `Ctrl-H` alias — that's Backspace) |
 | **`C`** / **`c`** | Toggle cwd-only — show only sessions under the TUI's launch cwd (NFC-normalized prefix match) |
 | **`R`** / **`r`** / **`Ctrl-R`** | Rescan sessions + live-process registry |
-| **`a`** / **`A`** | Auto-rescan interval popup (Off / 5 / 10 / 30 / 60 / 120s; default ON 10s, persisted in `state.json`; `curses.beep()` + a sticky TUI toast when a session newly enters `!` waiting — no macOS desktop notification) |
+| **`a`** / **`A`** | Cycle the agent view: `all → claude → codex` (`A` backwards). Header shows `⚙codex` when not `all`. Persisted, shared with `cst list --agent`. |
+| **`i`** / **`I`** | Auto-rescan interval popup (Off / 5 / 10 / 30 / 60 / 120s; default ON 10s, persisted in `state.json`; `curses.beep()` + a sticky TUI toast when a session newly enters `!` waiting — no macOS desktop notification). Was `a` before 1.18. |
 | **`s`** | Cycle sort column in on-screen column order: `status → time → msgs → project` (resets to the column's natural direction). Header shows `sort:<col>▼/▲` and highlights the active column. Persisted. |
 | **`S`** | Reverse the current sort direction. Persisted. |
 | **`f`** | Cycle origin filter: `all → user → agent`. `user` = started from a terminal (agent-view `bg` jobs included); `agent` = SDK-spawned (security-review hooks, `claude -p`, tooling). Header shows `👤user` / `🤖agent`. Persisted, shared with `cst list --origin`. |
@@ -453,7 +487,7 @@ A cursor appears on the prompt line. Live filtering happens as you type.
 ### Header bar
 
 ```
- claude-session-tracker v1.10.0  12/563  ●3 !1 ◦0 ○558 ✓1  ⟳10s  sort:time▼  👤user  [✓ hidden]  [📂 ~/project]   ? help  Enter open  o folder  / filter  s sort  f origin  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit
+ claude-session-tracker v1.18.0  12/563  ●3 !1 ◦0 ○558 ✓1  ⟳10s  sort:time▼  👤user  ⚙codex  [✓ hidden]  [📂 ~/project]   ? help  Enter open  o folder  / filter  s sort  f origin  a agent  i auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit
 ```
 
 - `12/563` — visible rows / total sessions
@@ -461,6 +495,7 @@ A cursor appears on the prompt line. Live filtering happens as you type.
 - `⟳10s` — auto-rescan interval (or `⟳off`)
 - `sort:time▼` — active sort column + direction (`▼` desc / `▲` asc); the matching column header is highlighted
 - `👤user` / `🤖agent` — shown only when the origin filter is not `all`
+- `⚙codex` — shown only when the agent view is not `all`
 - `[✓ hidden]` — shown only when hide-done is on
 - `[📂 ~/project]` — shown only when cwd-only is on
 
@@ -476,7 +511,7 @@ Reflects the current state:
 
 - **Help (`?`)** — scrollable cheat-sheet.
 - **Preview (`v`)** — transcript with role colors, full message text (wrapped). The metadata header (Session / Status / Cwd / Branch / Started) is pinned above the rule and never scrolls away, and its Status row is colored by state like the list's ST column (● green · ! red · ◦ cyan · ○ dim · ✓ magenta); `d`/`Ctrl-D` toggles done in place, keeping the scroll position and any active search, and inverts the Status row for one keypress so the change is visible; `Del` deletes in place (with confirmation).
-- **Auto-rescan interval (`a`)** — Off / 5 / 10 / 30 / 60 / 120s. `1`–`6` jumps directly to an option; Enter applies; saved to `state.json`.
+- **Auto-rescan interval (`i`)** — Off / 5 / 10 / 30 / 60 / 120s. `1`–`6` jumps directly to an option; Enter applies; saved to `state.json`.
 - **Delete confirmation (`Del`)** — `y` confirm · `n/Esc/Enter` cancel · shows up to 5 victims.
 - **Skip-permissions confirmation** — appears on `Enter` resume when you didn't pass `--skip-perm`. `y/Y/Enter` resumes with the flag · `n/N` without · `Esc` cancels.
 - **cmux chooser** — only if cst is running inside cmux. `t/T/Enter` opens in a cmux workspace tab · `w/W` in a new cmux window · `Esc` cancels.
@@ -575,8 +610,10 @@ Equivalent manual entry (one event shown):
 | `~/.claude/settings.json` | Claude Code settings (cst writes hook entries here) | No — `cst uninstall-hook` only removes cst entries |
 | `~/.claude/jobs/<short>/state.json` | Agent-view background-job state (read-only) | Leave alone |
 | `~/.claude/jobs/pins.json` | Agent-view pin set (read-only; cst never writes) | Leave alone |
-| `~/.cst/index.json` | mtime/size-invalidated session-metadata cache | Yes — regenerates on next run |
-| `~/.cst/state.json` | done flags + hook status overlay + user prefs (auto-rescan, theme, sort, origin) | Yes — clears all `✓` marks, overlay, and prefs |
+| `$CODEX_HOME/sessions/**/rollout-*.jsonl` | Codex CLI transcripts (default `~/.codex`; read-only) | Leave alone |
+| `$CODEX_HOME/thread-writer-locks/<uuid>.lock` | Codex's per-thread writer lock — cst probes the flock for liveness (read-only) | Leave alone |
+| `~/.cst/index.json` | mtime/size-invalidated session-metadata cache (schema 6, entries carry `agent`) | Yes — regenerates on next run |
+| `~/.cst/state.json` | done flags + hook status overlay + user prefs (auto-rescan, theme, sort, origin, agent view) | Yes — clears all `✓` marks, overlay, and prefs |
 
 All `~/.claude/...` paths above honor **`$CLAUDE_CONFIG_DIR`** (same convention
 as Claude Code itself): when set, cst reads `projects/`, `sessions/`, `jobs/`,
@@ -611,14 +648,15 @@ prefs survive the upgrade).
     "key": "time" | "status" | "msgs" | "project",
     "reverse": true
   },
-  "origin": "all" | "user" | "agent"
+  "origin": "all" | "user" | "agent",
+  "agent": "all" | "claude" | "codex"
 }
 ```
 
 `status` is populated by `cst status-hook` (only when hooks are installed).
-`auto_rescan` is set from the TUI `a` popup, `theme` from `t`/`T` (or `--theme`),
-`sort` from the TUI `s`/`S` keys, `origin` from `f`/`F`. Deleting `state.json`
-clears all of them.
+`auto_rescan` is set from the TUI `i` popup, `theme` from `t`/`T` (or `--theme`),
+`sort` from the TUI `s`/`S` keys, `origin` from `f`/`F`, `agent` from `a`/`A`.
+Deleting `state.json` clears all of them.
 
 ---
 
@@ -684,11 +722,12 @@ cst relocate <id> ~/project/actual-folder -y
 
 `cst` is a superset. Every `claude-sessions` subcommand is preserved, plus:
 
-- **#** row-number column + **ST** glyph column + **PROJECT** column on every row
+- **#** row-number column + **ST** glyph column + **AGENT** column + **PROJECT** column on every row
+- **Multi-agent:** Codex CLI sessions listed, searched, shown, exported, resumed and status-tracked next to Claude's (`--agent`, TUI `a`)
 - **`done`**, **`undone`**, **`live`**, **`export`**, **`bg`** / **`jobs`** / **`stop`** / **`logs`** (agent-view background sessions), **`install-hook`** / **`uninstall-hook`** / **`prompt-hook`** / **`status-hook`** subcommands
 - `cst list --sort time|status|msgs|project [--reverse]` column sort
 - `cst list --origin all|user|agent` (and `cst search --origin`) — hide SDK-spawned sessions, or show only those
-- TUI keys: `D/d/Ctrl-D` (toggle done) · `H/h` (hide done) · `C/c` (cwd-only) · `R/r/Ctrl-R` (rescan) · `e/E` (export) · `o/O` (open folder) · `a/A` (auto-rescan) · `s`/`S` (column sort) · `f`/`F` (origin filter) · `t/T` (theme) · `Ctrl-A` (mark all) · `?` (help) · `v/V` (preview; `←/→` prev/next session inside it)
+- TUI keys: `D/d/Ctrl-D` (toggle done) · `H/h` (hide done) · `C/c` (cwd-only) · `R/r/Ctrl-R` (rescan) · `e/E` (export) · `o/O` (open folder) · `a/A` (agent view) · `i/I` (auto-rescan) · `s`/`S` (column sort) · `f`/`F` (origin filter) · `t/T` (theme) · `Ctrl-A` (mark all) · `?` (help) · `v/V` (preview; `←/→` prev/next session inside it)
 - Background/agent-view rows: `[bg]`/`[exec]`/`[bg ⎇branch]`/`[bg ∙]`/`[PR #N]` badges, `*` pin marker, `Enter` attaches (not forks)
 - Color themes (dark/light, `--theme` / `t`)
 - fzf-style `/` with live filter and typing-while-navigating

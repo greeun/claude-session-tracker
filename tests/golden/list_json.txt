@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "version": "<VER>",
+  "sessions": [
+    {
+      "sessionId": "cccccccc-3333-4333-8333-333333333333",
+      "shortId": null,
+      "cwd": "/repo/gamma",
+      "project": "gamma",
+      "status": "ended",
+      "glyph": "○",
+      "isLive": false,
+      "isDone": false,
+      "messages": 3,
+      "summary": "summarise the repo",
+      "lastActivity": "2026-03-01T08:00:20+00:00",
+      "lastTs": 1772352020,
+      "gitBranch": "",
+      "entrypoint": "sdk-py",
+      "origin": "agent",
+      "agent": "claude",
+      "job": null,
+      "prs": [],
+      "pinned": false
+    },
+    {
+      "sessionId": "bbbbbbbb-2222-4222-8222-222222222222",
+      "shortId": null,
+      "cwd": "/repo/beta",
+      "project": "beta",
+      "status": "ended",
+      "glyph": "○",
+      "isLive": false,
+      "isDone": false,
+      "messages": 2,
+      "summary": "한글 요청: 로그인 버그 수정",
+      "lastActivity": "2026-02-10T09:01:00+00:00",
+      "lastTs": 1770714060,
+      "gitBranch": "feat/login",
+      "entrypoint": "cli",
+      "origin": "user",
+      "agent": "claude",
+      "job": null,
+      "prs": [
+        {
+          "host": "github.com",
+          "repo": "acme/beta",
+          "number": 42,
+          "url": "https://github.com/acme/beta/pull/42"
+        }
+      ],
+      "pinned": false
+    },
+    {
+      "sessionId": "aaaaaaaa-1111-4111-8111-111111111111",
+      "shortId": null,
+      "cwd": "/repo/alpha",
+      "project": "alpha",
+      "status": "ended",
+      "glyph": "○",
+      "isLive": false,
+      "isDone": false,
+      "messages": 4,
+      "summary": "fix the login bug",
+      "lastActivity": "2026-01-05T10:06:00+00:00",
+      "lastTs": 1767607560,
+      "gitBranch": "",
+      "entrypoint": "",
+      "origin": "user",
+      "agent": "claude",
+      "job": null,
+      "prs": [],
+      "pinned": false
+    }
+  ],
+  "counts": {
+    "working": 0,
+    "waiting": 0,
+    "idle": 0,
+    "ended": 3,
+    "done": 0
+  }
+}

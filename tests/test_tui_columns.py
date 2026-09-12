@@ -22,11 +22,11 @@ _spec.loader.exec_module(tk)
 def _total(cols) -> int:
     """구현이 fixed에 쓰는 것과 같은 구분자 폭을 더한 실제 소비 칼럼 수.
 
-    fixed = (1+num+1) + (st+1) + (ts+2) + (sid+1) + (msgs+2) + 2
+    fixed = (1+num+1) + (st+1) + (ag+2) + (ts+2) + (sid+1) + (msgs+2) + 2
     여기에 msg 와 proj 를 더한 값이 화면에 실제로 그려지는 총 폭이다.
     """
-    num, st, ts, sid, msgs, msg, proj = cols
-    fixed = (1 + num + 1) + (st + 1) + (ts + 2) + (sid + 1) + (msgs + 2) + 2
+    num, st, ag, ts, sid, msgs, msg, proj = cols
+    fixed = (1 + num + 1) + (st + 1) + (ag + 2) + (ts + 2) + (sid + 1) + (msgs + 2) + 2
     return fixed + msg + proj
 
 
@@ -35,14 +35,14 @@ class TestTuiColumns(unittest.TestCase):
         for w in (40, 60, 80, 100, 120, 200):
             with self.subTest(w=w):
                 cols = tk._tui_columns(10, 10, w)
-                self.assertEqual(len(cols), 7)
+                self.assertEqual(len(cols), 8)
                 for i, c in enumerate(cols):
                     self.assertGreater(c, 0, f"col[{i}] <= 0 at w={w}")
 
     def test_narrow_terminal_keeps_documented_minimums(self):
         # TC-UNIT-131 — proj >= 20, msg >= 20 은 구현이 명시한 하한
         cols = tk._tui_columns(10, 10, 40)
-        _, _, _, _, _, msg_w, proj_w = cols
+        _, _, _, _, _, _, msg_w, proj_w = cols
         self.assertGreaterEqual(proj_w, 20)
         self.assertGreaterEqual(msg_w, 20)
 
@@ -56,7 +56,7 @@ class TestTuiColumns(unittest.TestCase):
         # 바인딩돼 있다"이며, 그쪽이 회귀(넓은 화면에서의 분배 오류)를 잡는다.
         for w in range(40, 400, 2):
             cols = tk._tui_columns(10, 10, w)
-            _, _, _, _, _, msg_w, proj_w = cols
+            _, _, _, _, _, _, msg_w, proj_w = cols
             with self.subTest(w=w):
                 if _total(cols) > w:
                     self.assertTrue(
@@ -67,7 +67,7 @@ class TestTuiColumns(unittest.TestCase):
         """가변 컬럼이 최소폭에서 풀린 뒤로는 총 소비가 폭을 넘지 않아야 한다."""
         for w in range(40, 400, 2):
             cols = tk._tui_columns(10, 10, w)
-            _, _, _, _, _, msg_w, proj_w = cols
+            _, _, _, _, _, _, msg_w, proj_w = cols
             if msg_w > 20 and proj_w > 20:
                 with self.subTest(w=w):
                     self.assertLessEqual(_total(cols), w)
@@ -86,17 +86,17 @@ class TestTuiColumns(unittest.TestCase):
         self.assertEqual(tk._tui_columns(0, 0, 120)[0], 3)
 
     def test_fixed_columns_are_constant_across_widths(self):
-        """ST/LAST ACTIVITY/SESSION/MSGS 는 폭에 따라 흔들리지 않는 고정 컬럼이다."""
+        """ST/AGENT/LAST ACTIVITY/SESSION/MSGS 는 폭에 따라 흔들리지 않는 고정 컬럼이다."""
         a = tk._tui_columns(10, 10, 80)
         b = tk._tui_columns(10, 10, 200)
-        self.assertEqual(a[1:5], b[1:5])
+        self.assertEqual(a[1:6], b[1:6])
         self.assertEqual(a[1], tk.STATUS_WIDTH)
 
     def test_wider_terminal_never_shrinks_flex_columns(self):
         """폭이 늘면 가변 컬럼(msg/proj)은 단조 증가하거나 유지된다."""
         prev_msg = prev_proj = 0
         for w in range(40, 260, 10):
-            _, _, _, _, _, msg_w, proj_w = tk._tui_columns(10, 10, w)
+            _, _, _, _, _, _, msg_w, proj_w = tk._tui_columns(10, 10, w)
             with self.subTest(w=w):
                 self.assertGreaterEqual(msg_w, prev_msg)
                 self.assertGreaterEqual(proj_w, prev_proj)

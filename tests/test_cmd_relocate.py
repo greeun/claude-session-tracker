@@ -59,6 +59,8 @@ class _RelocateBase(unittest.TestCase):
         self.projects.mkdir()
         self._orig_projects = tk.PROJECTS_DIR
         tk.PROJECTS_DIR = self.projects
+        tk.CODEX_SESSIONS_DIR = tk.PROJECTS_DIR.parent / "codex_sessions"
+        tk.CODEX_LOCKS_DIR = tk.PROJECTS_DIR.parent / "codex_locks"
         self.addCleanup(setattr, tk, "PROJECTS_DIR", self._orig_projects)
 
         self.old_cwd = self.root / "old"

@@ -63,6 +63,8 @@ class TestIndexScale(unittest.TestCase):
 
         self._orig = (tk.PROJECTS_DIR, tk.CACHE_DIR, tk.CACHE_PATH)
         tk.PROJECTS_DIR = self.projects
+        tk.CODEX_SESSIONS_DIR = tk.PROJECTS_DIR.parent / "codex_sessions"
+        tk.CODEX_LOCKS_DIR = tk.PROJECTS_DIR.parent / "codex_locks"
         tk.CACHE_DIR = self.root / "cst"
         tk.CACHE_DIR.mkdir()
         tk.CACHE_PATH = tk.CACHE_DIR / "index.json"

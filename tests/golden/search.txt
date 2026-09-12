@@ -1,0 +1,5 @@
+
+○ ended  claude  aaaaaaaa  2026-01-05 10:06  /repo/alpha  (1 hit(s))
+    [user] fix the login bug
+
+1 session(s) matched.

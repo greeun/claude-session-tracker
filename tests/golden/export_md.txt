@@ -1,0 +1,23 @@
+# Session: cccccccc-3333-4333-8333-333333333333
+
+**Agent:** claude  
+**Status:** ○ ended  
+**Started:** 2026-03-01 08:00  
+**Last:** 2026-03-01 08:00  
+**Cwd:** /repo/gamma  
+**Messages:** 3  
+
+---
+
+## 🧑 User [2026-03-01 08:00]
+
+<command-message>init</command-message>
+
+## 🧑 User [2026-03-01 08:00]
+
+summarise the repo
+
+## 🤖 Assistant [2026-03-01 08:00]
+
+[tool_use:Read]
+It is a small CLI.

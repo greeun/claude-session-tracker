@@ -12,7 +12,7 @@ Data sources:
 """
 from __future__ import annotations
 
-__version__ = "1.17.0"
+__version__ = "1.18.0"
 
 import argparse
 import json
@@ -26,7 +26,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 try:
     import fcntl  # POSIX advisory file locking (macOS/Linux); absent on Windows
@@ -66,7 +66,7 @@ CACHE_DIR = _cst_home()
 CACHE_PATH = CACHE_DIR / "index.json"
 # Bumped whenever the cached SessionMeta shape or extraction logic changes,
 # so stale entries are re-indexed instead of serving wrong snippets.
-_CACHE_SCHEMA = 5
+_CACHE_SCHEMA = 6
 STATE_PATH = CACHE_DIR / "state.json"
 
 # Pre-1.11 location; migrate_legacy_dir() moves its files into CACHE_DIR once.
@@ -189,6 +189,356 @@ _JSON_STATUS_NAME = {
 
 
 # ╔══════════════════════════════════════════════════════════════════════╗
+# ║ AGENT LAYER — one AgentSpec per CLI (claude, codex, …). Everything    ║
+# ║ agent-specific (data root, transcript format, resume command, live    ║
+# ║ probe) lives behind this table; CORE / CLI / TUI stay agent-agnostic.  ║
+# ╚══════════════════════════════════════════════════════════════════════╝
+
+@dataclass
+class Turn:
+    """One user/assistant message as every agent adapter reports it.
+
+    `text` is the raw extracted text (unstripped — consumers strip/filter as
+    they always did); `cwd` / `git_branch` / `entrypoint` are the per-event
+    metadata the loader keeps the first non-empty value of."""
+    etype: str                     # "user" | "assistant"
+    ts: "datetime | None"
+    text: str
+    cwd: str = ""
+    git_branch: str = ""
+    entrypoint: str = ""
+
+
+@dataclass(frozen=True)
+class AgentSpec:
+    """Everything cst needs to know about one agent CLI's local sessions."""
+    name: str            # registry key + display label ("claude", "codex")
+    bin: str             # CLI executable name
+    resume_label: str    # e.g. "claude --resume" — for spawn-failure messages
+    owns: "Callable[[Path], bool]"                  # is this transcript ours?
+    session_files: "Callable[[bool], list[Path]]"   # (include_subagents)
+    session_id_of: "Callable[[Path], str]"
+    iter_turns: "Callable[[Path], Iterator[Turn]]"
+    resume_argv: "Callable[[str, str, bool], list[str]]"  # (bin, sid, skip_perm)
+    caps: frozenset = frozenset()
+    skip_perm_flag: str = "--dangerously-skip-permissions"  # shown in the TUI prompt
+    # Agents without a pid registry supply their own liveness: live_probe()
+    # → {sid: {"busy": bool, "updatedAt": ms}} for every live session, merged
+    # into StatusContext; live_info(sid) → {"pid": int|None, "cwd": str} or
+    # None for one session (window focus + the TUI footer). None = claude's
+    # registry path handles it.
+    live_probe: "Callable[[], dict] | None" = None
+    live_info: "Callable[[str], dict | None] | None" = None
+
+
+def _path_under(path: Path, root: Path) -> bool:
+    """True when `path` sits below `root` (lexically, else via realpath)."""
+    try:
+        if path.is_relative_to(root):
+            return True
+        return path.resolve().is_relative_to(root.resolve())
+    except (ValueError, OSError):
+        return False
+
+
+def _claude_resume_argv(bin_: str, session_id: str, skip_perm: bool) -> list[str]:
+    argv = [bin_, "--resume", session_id]
+    if skip_perm:
+        argv.append("--dangerously-skip-permissions")
+    return argv
+
+
+# Late-bound wrappers: the CORE functions they call are defined further down,
+# and the tests re-point PROJECTS_DIR & co. at temp dirs after import — so the
+# spec reads the module globals at call time and never captures them.
+CLAUDE_AGENT = AgentSpec(
+    name="claude", bin="claude", resume_label="claude --resume",
+    owns=lambda p: _path_under(p, PROJECTS_DIR),
+    session_files=lambda inc: _claude_session_files(inc),
+    session_id_of=lambda p: p.stem,
+    iter_turns=lambda p: _claude_iter_turns(p),
+    resume_argv=_claude_resume_argv,
+    caps=frozenset({"resume", "attach", "jobs", "hooks", "subagents",
+                    "relocate", "backup"}),
+)
+
+# ---- codex (OpenAI Codex CLI) ----------------------------------------------
+# Data root: $CODEX_HOME (Codex's own convention), default ~/.codex. One
+# transcript per thread at sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl; the
+# first line is `session_meta` (id, cwd, source, git), messages are
+# `response_item` records of payload type "message" with role user /
+# assistant / developer. Liveness: codex flock()s
+# thread-writer-locks/<uuid>.lock for as long as a thread has an active
+# writer (verified against thread-store/src/local/writer_lock.rs), so a
+# non-blocking flock attempt from here tells live from stale without a pid
+# registry. The app-server keeps idle threads loaded for up to 30 min, so a
+# held lock is "alive", and the rollout's mtime decides busy (●) vs idle (◦).
+
+def _codex_home() -> Path:
+    env = os.environ.get("CODEX_HOME")
+    return Path(env).expanduser() if env else Path.home() / ".codex"
+
+
+CODEX_HOME = _codex_home()
+CODEX_SESSIONS_DIR = CODEX_HOME / "sessions"
+CODEX_LOCKS_DIR = CODEX_HOME / "thread-writer-locks"
+_CODEX_BUSY_WINDOW_S = 90   # rollout written within this → ● working, else ◦ idle
+_UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+_CODEX_ROLLOUT_RE = re.compile(r"^rollout-.*-(" + _UUID_RE + r")\.jsonl$")
+_CODEX_LOCK_RE = re.compile(r"^(" + _UUID_RE + r")\.lock$")
+# Codex injects these as `user` messages; none of them is the user's prompt.
+_CODEX_WRAPPER_PREFIXES = (
+    "# AGENTS.md instructions", "# Files mentioned by", "The following is the",
+)
+_CODEX_WRAPPER_TAG_RE = re.compile(r"^<[a-z][a-z0-9_\-]*[\s>]")  # <environment_context>…
+
+
+def _codex_session_id_of(path: Path) -> str:
+    m = _CODEX_ROLLOUT_RE.match(path.name)
+    return m.group(1) if m else path.stem
+
+
+def _codex_read_session_meta(path: Path) -> dict:
+    """The `session_meta` payload (first rollout line); {} if unreadable."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            line = f.readline()
+        evt = json.loads(line) if line.strip() else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(evt, dict) or evt.get("type") != "session_meta":
+        return {}
+    payload = evt.get("payload")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _codex_is_subagent_meta(meta: dict) -> bool:
+    """Spawned threads (source {"subagent": …}, a parent_thread_id, or a
+    subagent/guardian thread_source) are codex's subagents — hidden from the
+    main listing like Claude's `subagents/` dirs."""
+    if isinstance(meta.get("source"), dict):
+        return True
+    if meta.get("parent_thread_id"):
+        return True
+    return meta.get("thread_source") in ("subagent", "guardian_review")
+
+
+def _codex_entrypoint(meta: dict) -> str:
+    """Flatten SessionSource → "cli" | "vscode" | "exec" | "mcp" | "subagent"…"""
+    src = meta.get("source")
+    if isinstance(src, dict):
+        return "subagent"
+    return str(src) if src else ""
+
+
+def _codex_session_files(include_subagents: bool = False) -> list[Path]:
+    if not CODEX_SESSIONS_DIR.exists():
+        return []
+    out: list[Path] = []
+    for p in CODEX_SESSIONS_DIR.rglob("rollout-*.jsonl"):
+        if not _CODEX_ROLLOUT_RE.match(p.name):
+            continue
+        if not include_subagents and _codex_is_subagent_meta(_codex_read_session_meta(p)):
+            continue
+        out.append(p)
+    out.sort()
+    return out
+
+
+def _codex_text(content) -> str:
+    """Join the text parts of a codex message content list."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for c in content:
+        if isinstance(c, dict) and isinstance(c.get("text"), str):
+            parts.append(c["text"])
+    return "\n".join(parts)
+
+
+def _codex_is_wrapper(text: str) -> bool:
+    t = text.lstrip()
+    return (not t or t.startswith(_CODEX_WRAPPER_PREFIXES)
+            or bool(_CODEX_WRAPPER_TAG_RE.match(t)))
+
+
+def _codex_iter_turns(path: Path) -> Iterator[Turn]:
+    """Codex rollout → Turns. cwd/branch/entrypoint come from session_meta;
+    developer messages and codex's own user-role wrappers are dropped."""
+    cwd = branch = entry = ""
+    for evt in iter_jsonl(path):
+        etype = evt.get("type")
+        payload = evt.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if etype == "session_meta":
+            cwd = payload.get("cwd") or cwd
+            git = payload.get("git")
+            if isinstance(git, dict) and git.get("branch"):
+                branch = str(git["branch"])
+            entry = _codex_entrypoint(payload)
+            continue
+        if etype != "response_item" or payload.get("type") != "message":
+            continue
+        role = payload.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        text = _codex_text(payload.get("content"))
+        if role == "user" and _codex_is_wrapper(text):
+            continue
+        yield Turn(etype=role, ts=parse_ts(evt.get("timestamp")), text=text,
+                   cwd=cwd, git_branch=branch, entrypoint=entry)
+
+
+def _codex_resume_argv(bin_: str, session_id: str, skip_perm: bool) -> list[str]:
+    argv = [bin_, "resume", session_id]
+    if skip_perm:
+        argv.append("--dangerously-bypass-approvals-and-sandbox")
+    return argv
+
+
+def _flock_held(path: Path) -> bool:
+    """True when another process holds an flock on `path` (EWOULDBLOCK on a
+    non-blocking exclusive attempt). False when free, missing, or on
+    platforms without fcntl."""
+    if fcntl is None:
+        return False
+    try:
+        f = path.open("r+")
+    except OSError:
+        return False
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        import errno
+        return e.errno in (errno.EWOULDBLOCK, errno.EAGAIN)
+    else:
+        try:
+            fcntl.flock(f, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        return False
+    finally:
+        f.close()
+
+
+def _codex_rollout_for(session_id: str) -> Path | None:
+    if not CODEX_SESSIONS_DIR.exists():
+        return None
+    for p in CODEX_SESSIONS_DIR.rglob(f"rollout-*-{session_id}.jsonl"):
+        return p
+    return None
+
+
+def _codex_live_ids() -> set[str]:
+    """Thread ids whose writer lock is currently held."""
+    out: set[str] = set()
+    if not CODEX_LOCKS_DIR.is_dir():
+        return out
+    for lock in CODEX_LOCKS_DIR.iterdir():
+        m = _CODEX_LOCK_RE.match(lock.name)
+        if m and _flock_held(lock):
+            out.add(m.group(1))
+    return out
+
+
+def codex_live_probe() -> dict:
+    """{sid: {"busy": bool, "updatedAt": ms}} for every live codex thread."""
+    import time as _time
+    now = _time.time()
+    out: dict = {}
+    for sid in _codex_live_ids():
+        rollout = _codex_rollout_for(sid)
+        mtime = None
+        if rollout is not None:
+            try:
+                mtime = rollout.stat().st_mtime
+            except OSError:
+                mtime = None
+        busy = mtime is not None and (now - mtime) <= _CODEX_BUSY_WINDOW_S
+        out[sid] = {"busy": busy,
+                    "updatedAt": int(mtime * 1000) if mtime else None}
+    return out
+
+
+def _lock_holder_pid(path: Path) -> int | None:
+    """pid of the process holding `path` open (lsof), or None."""
+    import subprocess
+    lsof = shutil.which("lsof")
+    if not lsof:
+        return None
+    try:
+        r = subprocess.run([lsof, "-t", str(path)], capture_output=True,
+                           text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for tok in r.stdout.split():
+        if tok.isdigit():
+            return int(tok)
+    return None
+
+
+def codex_live_info(session_id: str) -> dict | None:
+    lock = CODEX_LOCKS_DIR / f"{session_id}.lock"
+    if not _flock_held(lock):
+        return None
+    meta = {}
+    rollout = _codex_rollout_for(session_id)
+    if rollout is not None:
+        meta = _codex_read_session_meta(rollout)
+    return {"sessionId": session_id, "pid": _lock_holder_pid(lock),
+            "cwd": meta.get("cwd") or "", "agent": "codex"}
+
+
+CODEX_AGENT = AgentSpec(
+    name="codex", bin="codex", resume_label="codex resume",
+    owns=lambda p: _path_under(p, CODEX_SESSIONS_DIR),
+    session_files=_codex_session_files,
+    session_id_of=_codex_session_id_of,
+    iter_turns=_codex_iter_turns,
+    resume_argv=_codex_resume_argv,
+    caps=frozenset({"resume"}),
+    skip_perm_flag="--dangerously-bypass-approvals-and-sandbox",
+    live_probe=codex_live_probe,
+    live_info=codex_live_info,
+)
+
+AGENTS: dict[str, AgentSpec] = {"claude": CLAUDE_AGENT, "codex": CODEX_AGENT}
+DEFAULT_AGENT = "claude"
+
+
+def require_cap(meta, cap: str, verb: str) -> bool:
+    """False (after printing why) when `meta`'s agent lacks capability `cap`.
+    Gates the Claude-only commands (subagents, relocate, …) on other agents."""
+    spec = agent_of(meta)
+    if cap in spec.caps:
+        return True
+    print(f"✗ {verb} is not supported for {spec.name} sessions", file=sys.stderr)
+    return False
+
+
+def agent_for_path(path: Path) -> AgentSpec:
+    """The AgentSpec owning a transcript path; claude for anything unowned, so
+    stray/test paths outside every data root keep their legacy behaviour."""
+    for spec in AGENTS.values():
+        if spec.owns(path):
+            return spec
+    return AGENTS[DEFAULT_AGENT]
+
+
+def agent_of(meta) -> AgentSpec:
+    """The AgentSpec for a SessionMeta: its `agent` field when set, else the
+    owner of its path, else claude (bare stubs in tests carry neither)."""
+    spec = AGENTS.get(getattr(meta, "agent", "") or "")
+    if spec is not None:
+        return spec
+    path = getattr(meta, "path", None)
+    return agent_for_path(path) if path else AGENTS[DEFAULT_AGENT]
+
+
+# ╔══════════════════════════════════════════════════════════════════════╗
 # ║ ADAPTER LAYER — OS/terminal integration. Domain-aware (knows resume    ║
 # ║ commands & session alarms) but isolated from data model / rendering.   ║
 # ╚══════════════════════════════════════════════════════════════════════╝
@@ -208,22 +558,24 @@ def _applescript_escape(s: str) -> str:
 
 
 def session_open_invocation(claude_bin: str, session_id: str,
-                            short: str | None, skip_perm: bool) -> str:
-    """The core `claude` invocation to open a session in a terminal.
+                            short: str | None, skip_perm: bool,
+                            agent: str = DEFAULT_AGENT) -> str:
+    """The core CLI invocation to open a session in a terminal.
 
     A background (agent-view) session has a job short id — open it with
     `claude attach <short>` so the terminal takes over the *live*
     supervisor-hosted session (catch-up summary + live stream). Everything else
-    is a plain transcript resume (`claude --resume <sid>`), a fresh local fork.
-    attach connects to an existing session, so the resume-only
-    --dangerously-skip-permissions flag does not apply there.
+    is the agent's plain transcript resume (`claude --resume <sid>`,
+    `codex resume <sid>`, …), a fresh local fork, built from the AgentSpec's
+    `resume_argv`. attach connects to an existing session, so the resume-only
+    skip-permissions flag does not apply there.
     """
     import shlex
     q = shlex.quote
     if short:
         return f"{q(claude_bin)} attach {q(short)}"
-    skip = " --dangerously-skip-permissions" if skip_perm else ""
-    return f"{q(claude_bin)} --resume {q(session_id)}{skip}"
+    spec = AGENTS.get(agent, CLAUDE_AGENT)
+    return " ".join(q(a) for a in spec.resume_argv(claude_bin, session_id, skip_perm))
 
 
 # macOS terminal apps ship their CLI inside the .app bundle and never touch
@@ -267,7 +619,8 @@ def open_in_new_terminal(cwd: str, session_id: str,
                          skip_perm: bool = False,
                          cmux_mode: str | None = None,
                          attach_short: str | None = None,
-                         terminal: str | None = None) -> tuple[bool, str]:
+                         terminal: str | None = None,
+                         agent: str = DEFAULT_AGENT) -> tuple[bool, str]:
     """Spawn `cd <cwd> && claude --resume <session_id>` in a new terminal window.
 
     Returns (ok, info). On success, `info` names the terminal used; on failure,
@@ -284,7 +637,8 @@ def open_in_new_terminal(cwd: str, session_id: str,
     import shlex
     import shutil
 
-    claude_bin = shutil.which("claude") or "claude"
+    spec = AGENTS.get(agent, CLAUDE_AGENT)
+    claude_bin = shutil.which(spec.bin) or spec.bin
 
     # `claude --resume <id>` is project-scoped: it only finds the session whose
     # cwd-string mangles to the project dir holding the transcript. If the
@@ -314,8 +668,8 @@ def open_in_new_terminal(cwd: str, session_id: str,
     skip_flag = " --dangerously-skip-permissions" if skip_perm else ""
     # attach to the live bg session by short id, else resume the transcript.
     core_cmd = session_open_invocation(claude_bin, session_id,
-                                       attach_short, skip_perm)
-    fail_label = "claude attach" if attach_short else "claude --resume"
+                                       attach_short, skip_perm, agent=spec.name)
+    fail_label = "claude attach" if attach_short else spec.resume_label
     # When the recorded cwd was gone we recreated an empty placeholder so
     # project-scoped `claude --resume` can still find the transcript. If the
     # folder was *moved* (not deleted) the real files live elsewhere — point
@@ -345,7 +699,7 @@ def open_in_new_terminal(cwd: str, session_id: str,
         f'rc=$?; if [ "$rc" -ne 0 ]; then '
         f'printf "\\n[cst] \'{fail_label}\' failed (exit %s)\\n"'
         f' "$rc"; '
-        f"printf \"[cst] claude binary: {claude_bin}\\n\"; "
+        f"printf \"[cst] {spec.bin} binary: {claude_bin}\\n\"; "
         f'printf "[cst] press Enter to close this window..."; '
         f"read -r; fi"
     )
@@ -1368,13 +1722,23 @@ def daemon_status_line(roster: dict | None) -> str:
 
 
 def get_live_session_info(session_id: str) -> dict | None:
-    """Return the registry record (pid, cwd, ideName, …) for a live session."""
+    """Return the registry record (pid, cwd, ideName, …) for a live session.
+    Registry-less agents (codex) answer through their spec's live_info."""
     for data in _iter_registry_records():
         if data.get("sessionId") == session_id:
             pid = data.get("pid")
             if isinstance(pid, int) and _pid_alive(pid):
                 return data
             return None
+    for spec in AGENTS.values():
+        if spec.live_info is None:
+            continue
+        try:
+            info = spec.live_info(session_id)
+        except Exception:
+            info = None
+        if info:
+            return info
     return None
 
 
@@ -1542,8 +1906,23 @@ class StatusContext:
     @classmethod
     def capture(cls) -> "StatusContext":
         live, _ = scan_live_sessions()
+        registry = scan_registry_status()
+        # Agents without a pid registry (codex) report their own live
+        # sessions; fold them in as synthetic registry records so
+        # classify_status needs no agent-specific branch.
+        for spec in AGENTS.values():
+            if spec.live_probe is None:
+                continue
+            try:
+                probed = spec.live_probe()
+            except Exception:
+                continue
+            for sid, rec in probed.items():
+                live.add(sid)
+                registry[sid] = {"status": "busy" if rec.get("busy") else "idle",
+                                 "updatedAt": rec.get("updatedAt")}
         return cls(live=live, done=done_ids(),
-                   registry=scan_registry_status(), overlay=status_overlay(),
+                   registry=registry, overlay=status_overlay(),
                    jobs=scan_jobs(), pins=read_pins())
 
     def resolve(self, session_id: str) -> str:
@@ -1754,12 +2133,18 @@ def save_sort(sort_key: str, reverse: bool) -> None:
 ORIGIN_CHOICES = ("all", "user", "agent")
 ORIGIN_LABELS = {"all": "all", "user": "user", "agent": "agent"}
 _AGENT_ENTRYPOINT_PREFIX = "sdk"
+# Codex SessionSource values that mean "not a human at a terminal": `codex
+# exec` (the `claude -p` analogue), MCP-hosted threads, spawned subagents.
+_AGENT_ENTRYPOINTS = frozenset({"exec", "mcp", "subagent"})
 
 
 def session_origin(meta) -> str:
     """"user" or "agent" for a SessionMeta (or a bare entrypoint string)."""
     ep = meta if isinstance(meta, str) else getattr(meta, "entrypoint", "")
-    return "agent" if (ep or "").startswith(_AGENT_ENTRYPOINT_PREFIX) else "user"
+    ep = ep or ""
+    if ep.startswith(_AGENT_ENTRYPOINT_PREFIX) or ep in _AGENT_ENTRYPOINTS:
+        return "agent"
+    return "user"
 
 
 def filter_origin(sessions, origin: str) -> list:
@@ -1798,6 +2183,60 @@ def save_origin(origin: str) -> None:
         origin = "all"
     st = load_state()
     st["origin"] = origin
+    save_state(st)
+
+
+# ---- agent view (CLI `--agent` / TUI `a`,`A`) ------------------------------
+# Which agent CLI's sessions are shown: "all" or one AGENTS key. The TUI `a`
+# key cycles all→claude→codex→…, `A` walks backwards; the last view is saved in
+# state.json (`{"agent": "..."}`) so the picker reopens where it was left, and
+# `cst list`/`cst search` fall back to that same pref unless `--agent` is given.
+
+AGENT_VIEW_ALL = "all"
+AGENT_VIEW_WIDTH = 6   # AGENT column width: fits "claude" / "codex" / "gemini"
+
+
+def agent_choices() -> tuple:
+    """("all", <every registered agent>) — the `--agent` choices + `a` cycle."""
+    return (AGENT_VIEW_ALL,) + tuple(AGENTS)
+
+
+def filter_agent(sessions, view: str) -> list:
+    """Return a NEW list keeping only `view`'s sessions; "all"/unknown keeps
+    everything (an unrecognised value must never silently empty the view)."""
+    if view not in AGENTS:
+        return list(sessions)
+    return [s for s in sessions if getattr(s, "agent", DEFAULT_AGENT) == view]
+
+
+def cycle_agent(view: str, step: int = 1) -> str:
+    """Next view in the all→claude→codex→… cycle (`step=-1` walks backwards)."""
+    choices = agent_choices()
+    try:
+        i = choices.index(view)
+    except ValueError:
+        i = 0
+    return choices[(i + step) % len(choices)]
+
+
+def agent_note(view: str) -> str:
+    """Trailing `  [agent:codex]` tag for CLI summaries; empty when unfiltered."""
+    if view not in AGENTS:
+        return ""
+    return f"  [agent:{view}]"
+
+
+def load_agent_view() -> str:
+    """Stored agent view from state.json; "all" by default."""
+    val = load_state().get("agent")
+    return val if val in agent_choices() else AGENT_VIEW_ALL
+
+
+def save_agent_view(view: str) -> None:
+    if view not in agent_choices():
+        view = AGENT_VIEW_ALL
+    st = load_state()
+    st["agent"] = view
     save_state(st)
 
 
@@ -1865,6 +2304,7 @@ class SessionMeta:
     git_branch: str = ""
     prs: list = field(default_factory=list)  # [{host,repo,number,url}] from transcript
     entrypoint: str = ""  # transcript `entrypoint`: cli | sdk-py | sdk-cli | sdk-ts
+    agent: str = DEFAULT_AGENT  # AGENTS key of the CLI that wrote the transcript
 
 
 @dataclass
@@ -1980,19 +2420,38 @@ def pr_badge(prs: list) -> str:
     return "[PR #" + ",".join(str(n) for n in nums) + "]"
 
 
+def _claude_iter_turns(path: Path) -> Iterator[Turn]:
+    """Claude Code transcript → Turns: one per user/assistant event, carrying
+    the event's cwd / gitBranch / entrypoint stamps."""
+    for evt in iter_jsonl(path):
+        etype = evt.get("type")
+        if etype not in ("user", "assistant"):
+            continue
+        yield Turn(
+            etype=etype,
+            ts=parse_ts(evt.get("timestamp")),
+            text=extract_text((evt.get("message") or {}).get("content")),
+            cwd=evt.get("cwd") or "",
+            git_branch=evt.get("gitBranch") or "",
+            entrypoint=evt.get("entrypoint") or "",
+        )
+
+
 def load_session_meta(path: Path, fast: bool = False) -> SessionMeta | None:
-    meta = SessionMeta(session_id=path.stem, path=path)
+    """Parse one transcript into a SessionMeta, whatever agent wrote it: the
+    owning AgentSpec supplies the id and the Turn stream, the folding below
+    is shared (first/last ts, counts, first real user message, PR refs)."""
+    spec = agent_for_path(path)
+    meta = SessionMeta(session_id=spec.session_id_of(path), path=path,
+                       agent=spec.name)
     if fast:
         try:
             meta.last_ts = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
         except OSError:
             pass
-    for evt in iter_jsonl(path):
-        etype = evt.get("type")
-        if etype not in ("user", "assistant"):
-            continue
+    for turn in spec.iter_turns(path):
         meta.msg_count += 1
-        ts = parse_ts(evt.get("timestamp"))
+        ts = turn.ts
         if ts and not fast:
             if not meta.first_ts or ts < meta.first_ts:
                 meta.first_ts = ts
@@ -2000,15 +2459,14 @@ def load_session_meta(path: Path, fast: bool = False) -> SessionMeta | None:
                 meta.last_ts = ts
         elif ts and fast and not meta.first_ts:
             meta.first_ts = ts
-        if not meta.cwd and evt.get("cwd"):
-            meta.cwd = evt["cwd"]
-        if not meta.git_branch and evt.get("gitBranch"):
-            meta.git_branch = evt["gitBranch"]
-        if not meta.entrypoint and evt.get("entrypoint"):
-            meta.entrypoint = evt["entrypoint"]
-        if etype == "user" and not meta.first_user_msg:
-            msg = evt.get("message") or {}
-            text = extract_text(msg.get("content")).strip()
+        if not meta.cwd and turn.cwd:
+            meta.cwd = turn.cwd
+        if not meta.git_branch and turn.git_branch:
+            meta.git_branch = turn.git_branch
+        if not meta.entrypoint and turn.entrypoint:
+            meta.entrypoint = turn.entrypoint
+        if turn.etype == "user" and not meta.first_user_msg:
+            text = turn.text.strip()
             if (text
                     and not text.startswith("[tool_use:")
                     and not _is_system_wrapper_msg(text)):
@@ -2063,7 +2521,7 @@ def last_message_ts(path: Path) -> "datetime | None":
     return None
 
 
-def all_session_files(include_subagents: bool = False) -> list[Path]:
+def _claude_session_files(include_subagents: bool = False) -> list[Path]:
     if not PROJECTS_DIR.exists():
         return []
     out: list[Path] = []
@@ -2072,6 +2530,15 @@ def all_session_files(include_subagents: bool = False) -> list[Path]:
             continue
         out.append(p)
     out.sort()
+    return out
+
+
+def all_session_files(include_subagents: bool = False) -> list[Path]:
+    """Every agent's transcript files, agent by agent in registry order and
+    path-sorted within each (dedupe_sessions relies on that determinism)."""
+    out: list[Path] = []
+    for spec in AGENTS.values():
+        out.extend(spec.session_files(include_subagents))
     return out
 
 
@@ -2116,6 +2583,7 @@ def _meta_to_cache(m: SessionMeta) -> dict:
         "git_branch": m.git_branch,
         "prs": m.prs,
         "entrypoint": m.entrypoint,
+        "agent": m.agent,
     }
 
 
@@ -2131,6 +2599,7 @@ def _meta_from_cache(d: dict, path: Path) -> SessionMeta:
         git_branch=d.get("git_branch", ""),
         prs=d.get("prs") or [],
         entrypoint=d.get("entrypoint", ""),
+        agent=d.get("agent") or DEFAULT_AGENT,
     )
 
 
@@ -2173,7 +2642,10 @@ def _dup_rank(m: SessionMeta) -> tuple:
     The canonical copy is the one sitting in the project dir that encodes its
     own transcript `cwd`; a leftover copy in a renamed project's old dir loses
     even if it looks fatter. Then richer transcript, then fresher activity."""
-    canonical = bool(m.cwd) and m.path.parent.name == encode_cwd(m.cwd)
+    # The encoded-cwd project dir is a Claude Code convention; other agents
+    # (codex: one dated rollout per session) have no such duplicate layout.
+    canonical = (m.agent == "claude" and bool(m.cwd)
+                 and m.path.parent.name == encode_cwd(m.cwd))
     return (canonical, m.msg_count, m.last_ts or _EPOCH)
 
 
@@ -2283,6 +2755,7 @@ def session_to_dict(s: "SessionMeta", ctx: "StatusContext") -> dict:
         "gitBranch": s.git_branch or "",
         "entrypoint": s.entrypoint or "",
         "origin": session_origin(s),
+        "agent": s.agent or DEFAULT_AGENT,
         "job": _job_json(job),
         "prs": list(s.prs or []),
         "pinned": bool(short and short in ctx.pins),
@@ -2313,6 +2786,10 @@ def cmd_list(args: argparse.Namespace) -> int:
     # the saved TUI preference (same contract as --sort below).
     origin = getattr(args, "origin", None) or load_origin()
     sessions = filter_origin(sessions, origin)
+    # Agent view: same contract — explicit --agent is a one-off, else the view
+    # the TUI `a` key last saved.
+    agent_view = getattr(args, "agent", None) or load_agent_view()
+    sessions = filter_agent(sessions, agent_view)
     # Column sort: an explicit --sort is a one-off override (natural direction,
     # flipped by --reverse); no flag uses the saved TUI preference. Sort runs
     # BEFORE --limit so the slice keeps the top-N of the chosen order. getattr
@@ -2343,6 +2820,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     header = (
         f"{'#':>{num_w}} "
         f"{pad_display('ST', STATUS_WIDTH)} "
+        f"{'AGENT':<{AGENT_VIEW_WIDTH}}  "
         f"{'LAST ACTIVITY':<16}  "
         f"{'SESSION':<10} "
         f"{'MSGS':>4}  "
@@ -2364,6 +2842,7 @@ def cmd_list(args: argparse.Namespace) -> int:
         print(
             f"{idx:>{num_w}} "
             f"{pad_display(st, STATUS_WIDTH)} "
+            f"{s.agent:<{AGENT_VIEW_WIDTH}}  "
             f"{ts:<16}  "
             f"{sid:<10} "
             f"{s.msg_count:>4}  "
@@ -2373,7 +2852,8 @@ def cmd_list(args: argparse.Namespace) -> int:
     counts = ctx.counts(sessions)
     summary = "  ".join(f"{status_label(g)}:{counts[g]}"
                         for g in STATUS_ALL if counts[g])
-    print(f"\n{len(sessions)} session(s)  [{summary}]{origin_note(origin)}")
+    print(f"\n{len(sessions)} session(s)  [{summary}]"
+          f"{origin_note(origin)}{agent_note(agent_view)}")
     return 0
 
 
@@ -2390,21 +2870,20 @@ def cmd_search(args: argparse.Namespace) -> int:
     regex = compile_query(args.query, args.ignore_case)
     hits: list[tuple[SessionMeta, list[tuple[datetime | None, str, str]]]] = []
     for p in all_session_files():
-        meta = SessionMeta(session_id=p.stem, path=p)
+        spec = agent_for_path(p)
+        meta = SessionMeta(session_id=spec.session_id_of(p), path=p,
+                           agent=spec.name)
         matches: list[tuple[datetime | None, str, str]] = []
-        for evt in iter_jsonl(p):
-            etype = evt.get("type")
-            if etype not in ("user", "assistant"):
-                continue
+        for turn in spec.iter_turns(p):
             meta.msg_count += 1
-            ts = parse_ts(evt.get("timestamp"))
+            ts = turn.ts
             if ts and (not meta.last_ts or ts > meta.last_ts):
                 meta.last_ts = ts
-            if not meta.cwd and evt.get("cwd"):
-                meta.cwd = evt["cwd"]
-            if not meta.entrypoint and evt.get("entrypoint"):
-                meta.entrypoint = evt["entrypoint"]
-            text = extract_text((evt.get("message") or {}).get("content"))
+            if not meta.cwd and turn.cwd:
+                meta.cwd = turn.cwd
+            if not meta.entrypoint and turn.entrypoint:
+                meta.entrypoint = turn.entrypoint
+            text = turn.text
             if not text:
                 continue
             m = regex.search(text)
@@ -2412,7 +2891,7 @@ def cmd_search(args: argparse.Namespace) -> int:
                 start = max(0, m.start() - 40)
                 end = min(len(text), m.end() + 80)
                 snippet = text[start:end].replace("\n", " ")
-                matches.append((ts, etype, snippet))
+                matches.append((ts, turn.etype, snippet))
         if matches and (not args.cwd or meta.cwd.startswith(args.cwd)):
             hits.append((meta, matches))
     # A session copied into two project dirs would otherwise report its hits
@@ -2422,22 +2901,27 @@ def cmd_search(args: argparse.Namespace) -> int:
     origin = getattr(args, "origin", None) or load_origin()
     if origin in ("user", "agent"):
         hits = [h for h in hits if session_origin(h[0]) == origin]
+    agent_view = getattr(args, "agent", None) or load_agent_view()
+    if agent_view in AGENTS:
+        hits = [h for h in hits if h[0].agent == agent_view]
     hits.sort(key=lambda h: h[0].last_ts or _EPOCH, reverse=True)
     if args.limit:
         hits = hits[: args.limit]
+    notes = f"{origin_note(origin)}{agent_note(agent_view)}"
     if not hits:
-        print(f"(no matches for {args.query!r}{origin_note(origin)})")
+        print(f"(no matches for {args.query!r}{notes})")
         return 0
     ctx = StatusContext.capture()
     for meta, matches in hits:
         st = ctx.resolve(meta.session_id)
-        print(f"\n{status_label(st)}  {meta.session_id[:8]}  {fmt_ts(meta.last_ts)}  "
+        print(f"\n{status_label(st)}  {meta.agent:<{AGENT_VIEW_WIDTH}}  "
+              f"{meta.session_id[:8]}  {fmt_ts(meta.last_ts)}  "
               f"{shorten_path(meta.cwd)}  ({len(matches)} hit(s))")
         for ts, role, snippet in matches[:3]:
             print(f"    [{role}] {truncate(snippet, 140)}")
         if len(matches) > 3:
             print(f"    … +{len(matches) - 3} more")
-    print(f"\n{len(hits)} session(s) matched.{origin_note(origin)}")
+    print(f"\n{len(hits)} session(s) matched.{notes}")
     return 0
 
 
@@ -2469,16 +2953,13 @@ def iter_messages(path: Path) -> "Iterator[tuple[str, str, str]]":
     """Shared transcript-iteration contract: yield (etype, ts_str, text) for
     each user/assistant message with non-empty text. Every renderer (tty /
     txt / md) consumes this so the filter/extract logic lives in one place;
-    only the per-format header & message styling differ downstream."""
-    for evt in iter_jsonl(path):
-        etype = evt.get("type")
-        if etype not in ("user", "assistant"):
-            continue
-        ts = fmt_ts(parse_ts(evt.get("timestamp")))
-        text = extract_text((evt.get("message") or {}).get("content")).strip()
+    only the per-format header & message styling differ downstream. The owning
+    AgentSpec supplies the Turn stream, so every agent renders alike."""
+    for turn in agent_for_path(path).iter_turns(path):
+        text = turn.text.strip()
         if not text:
             continue
-        yield etype, ts, text
+        yield turn.etype, fmt_ts(turn.ts), text
 
 
 def _print_transcript(path: Path, max_chars: int, indent: str = "",
@@ -2515,6 +2996,7 @@ def cmd_show(args: argparse.Namespace) -> int:
     ctx = StatusContext.capture()
     st = ctx.resolve(target.session_id)
     print(f"Session:  {target.session_id}")
+    print(f"Agent:    {target.agent}")
     print(f"Status:   {status_label(st)}")
     print(f"Cwd:      {target.cwd}")
     if target.git_branch:
@@ -2552,6 +3034,7 @@ def cmd_show(args: argparse.Namespace) -> int:
 def _build_export_text(target: "SessionMeta", st: str) -> str:
     lines: list[str] = []
     lines.append(f"Session:  {target.session_id}")
+    lines.append(f"Agent:    {target.agent}")
     lines.append(f"Status:   {status_label(st)}")
     lines.append(f"Cwd:      {target.cwd}")
     if target.git_branch:
@@ -2571,6 +3054,7 @@ def _build_export_md(target: "SessionMeta", st: str) -> str:
     lines: list[str] = []
     lines.append(f"# Session: {target.session_id}")
     lines.append(f"")
+    lines.append(f"**Agent:** {target.agent}  ")
     lines.append(f"**Status:** {status_label(st)}  ")
     lines.append(f"**Started:** {fmt_ts(target.first_ts)}  ")
     lines.append(f"**Last:** {fmt_ts(target.last_ts)}  ")
@@ -2623,6 +3107,8 @@ def cmd_export(args: argparse.Namespace) -> int:
 def cmd_subagents(args: argparse.Namespace) -> int:
     target = require_session(args.session_id)
     if target is None:
+        return 1
+    if not require_cap(target, "subagents", "subagents"):
         return 1
     subs = list_subagents(target.path)
     if not subs:
@@ -2680,6 +3166,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
             skip_perm=getattr(args, "skip_perm", False),
             attach_short=short,
             terminal=getattr(args, "terminal", None),
+            agent=agent_of(target).name,
         )
         if ok:
             print(f"→ {'attach' if short else 'resume'} {target.session_id[:8]}  {info}")
@@ -2691,8 +3178,10 @@ def cmd_resume(args: argparse.Namespace) -> int:
         cmd = f"claude attach {short}"
     else:
         import shlex
-        skip_flag = " --dangerously-skip-permissions" if getattr(args, "skip_perm", False) else ""
-        cmd = f'cd {shlex.quote(cwd)} && claude --resume {target.session_id}{skip_flag}'
+        spec = agent_of(target)
+        core = " ".join(shlex.quote(a) for a in spec.resume_argv(
+            spec.bin, target.session_id, bool(getattr(args, "skip_perm", False))))
+        cmd = f'cd {shlex.quote(cwd)} && {core}'
     if args.print_only:
         print(cmd)
         return 0
@@ -3489,10 +3978,8 @@ def _tui_run_search(stdscr, sessions: list[SessionMeta], query: str) -> dict[str
                 hits[s.session_id] = f"[session ID: {s.session_id}]"
                 continue
             try:
-                for evt in iter_jsonl(s.path):
-                    if evt.get("type") not in ("user", "assistant"):
-                        continue
-                    text = extract_text((evt.get("message") or {}).get("content"))
+                for turn in agent_of(s).iter_turns(s.path):
+                    text = turn.text
                     if not text:
                         continue
                     m = regex.search(text)
@@ -3539,7 +4026,8 @@ HELP_LINES = [
     "      Esc                clear query and exit prompt",
     "",
     "Session actions (normal mode)",
-    "  a / A                  auto-rescan interval popup (Off/5/10/30/60/120s)",
+    "  a / A                  cycle agent view (all→claude→codex; A backwards) — saved",
+    "  i / I                  auto-rescan interval popup (Off/5/10/30/60/120s)",
     "  v / V                  preview the focused session (scroll/search modal)",
     "                         ↑↓ scroll · PgUp/PgDn page · g/G top/bottom · q/Esc/v close",
     "                         ←/→ (or ‹ › / [ ]) prev/next session in list",
@@ -3828,7 +4316,9 @@ def _preview_modal(stdscr, items, sel: int, ctx):
         """Display lines for one session, plus the length of the leading
         metadata block the renderer pins above the scrolling body."""
         lines: list[tuple[str, int]] = []
-        lines.append((truncate_display(f"Session  {target.session_id}", inner_w), header_attr))
+        lines.append((truncate_display(
+            f"Session  {target.session_id}    Agent  {target.agent}", inner_w),
+            header_attr))
         lines.append(_status_row(status))
         lines.append((truncate_display(f"Cwd      {shorten_path(target.cwd)}", inner_w), cwd_attr))
         if target.git_branch:
@@ -3849,14 +4339,7 @@ def _preview_modal(stdscr, items, sel: int, ctx):
 
         rendered = 0
         try:
-            for evt in iter_jsonl(target.path):
-                etype = evt.get("type")
-                if etype not in ("user", "assistant"):
-                    continue
-                text = extract_text((evt.get("message") or {}).get("content")).strip()
-                if not text:
-                    continue
-                ts = fmt_ts(parse_ts(evt.get("timestamp")))
+            for etype, ts, text in iter_messages(target.path):
                 prefix = "🧑 user" if etype == "user" else "🤖 assistant"
                 attr = user_attr if etype == "user" else asst_attr
                 lines.append((truncate_display(f"{prefix}  [{ts}]", inner_w), attr))
@@ -4633,9 +5116,11 @@ def _confirm_skip_perm_modal(stdscr, target: SessionMeta) -> bool | None:
     box_w = min(72, max(48, w2 - 6))
     box_h = 9
     win = _centered_win(stdscr, box_h, box_w)
+    spec = agent_of(target)
+    flag = spec.skip_perm_flag
     try:
         win.box()
-        title = " --dangerously-skip-permissions? "
+        title = f" {flag}? "
         win.addnstr(0, max(2, (box_w - len(title)) // 2), title,
                     box_w - 4, curses.color_pair(5) | curses.A_BOLD)
         label = truncate(
@@ -4643,11 +5128,11 @@ def _confirm_skip_perm_modal(stdscr, target: SessionMeta) -> bool | None:
             box_w - 6,
         )
         win.addnstr(2, 3, f"Resume: {label}", box_w - 6)
-        win.addnstr(3, 3,
-                    "Apply --dangerously-skip-permissions for this resume?",
+        win.addnstr(3, 3, truncate(f"Apply {flag} for this resume?", box_w - 6),
                     box_w - 6)
         win.addnstr(4, 3,
-                    "Skips all permission prompts inside Claude Code.",
+                    truncate(f"Skips all permission prompts inside {spec.bin}.",
+                             box_w - 6),
                     box_w - 6, curses.A_DIM)
         prompt = " [y] Yes    [n] No    [Esc] Cancel "
         win.addnstr(box_h - 2, 3, prompt, box_w - 6, curses.A_BOLD)
@@ -4703,23 +5188,25 @@ def _choose_cmux_mode_modal(stdscr) -> str | None:
 
 
 def _tui_columns(n_items, n_sessions, w):
-    """List-view column widths: (num, status, ts, sid, msgs, msg, proj).
+    """List-view column widths: (num, status, agent, ts, sid, msgs, msg, proj).
 
     Pure layout math shared by the header row and `_tui_draw_rows`."""
     num_w = max(3, len(str(n_items or n_sessions)))
+    agent_w = AGENT_VIEW_WIDTH
     ts_w = 16
     sid_w = 8
     msgs_w = 4
     status_w = STATUS_WIDTH
     # Fixed width up through MSGS column. Tight 1-space separators around
-    # ST (#→ST, ST→LAST ACTIVITY) and between SESSION→MSGS; the rest use
-    # 2-space separators.
-    fixed = (1 + num_w + 1) + (status_w + 1) + (ts_w + 2) + (sid_w + 1) + (msgs_w + 2) + 2
+    # ST (#→ST, ST→AGENT) and between SESSION→MSGS; the rest use 2-space
+    # separators.
+    fixed = ((1 + num_w + 1) + (status_w + 1) + (agent_w + 2) + (ts_w + 2)
+             + (sid_w + 1) + (msgs_w + 2) + 2)
     remaining = max(30, w - fixed - 1)
     # split remaining: ~50% message, ~50% project (project at least 20)
     proj_w = max(20, remaining // 2)
     msg_w = max(20, remaining - proj_w - 2)
-    return num_w, status_w, ts_w, sid_w, msgs_w, msg_w, proj_w
+    return num_w, status_w, agent_w, ts_w, sid_w, msgs_w, msg_w, proj_w
 
 
 def _tui_draw_rows(stdscr, items, top, sel, list_top, list_h, marked,
@@ -4728,7 +5215,7 @@ def _tui_draw_rows(stdscr, items, top, sel, list_top, list_h, marked,
 
     Pure render — reads state, writes only to the screen (no state mutation)."""
     import curses
-    num_w, status_w, ts_w, sid_w, msgs_w, msg_w, proj_w = cols
+    num_w, status_w, agent_w, ts_w, sid_w, msgs_w, msg_w, proj_w = cols
     for i in range(list_h):
         idx = top + i
         if idx >= len(items):
@@ -4757,7 +5244,8 @@ def _tui_draw_rows(stdscr, items, top, sel, list_top, list_h, marked,
 
         line_before_status = f"{mark}{idx + 1:>{num_w}} "
         line_after_status = (
-            f" {ts:<{ts_w}}  {sid:<{sid_w}} "
+            f" {(s.agent or DEFAULT_AGENT):<{agent_w}}  "
+            f"{ts:<{ts_w}}  {sid:<{sid_w}} "
             f"{s.msg_count:>{msgs_w}}  {msg_cell}  {proj_cell}"
         )
 
@@ -4786,7 +5274,8 @@ def _tui_draw_rows(stdscr, items, top, sel, list_top, list_h, marked,
 
 def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
              days: int | None, skip_perm_default: bool = False,
-             hide_done_default: bool = False, theme: str = "dark"):
+             hide_done_default: bool = False, theme: str = "dark",
+             agent_view_override: str | None = None):
     import curses
     import time
     curses.curs_set(0)
@@ -4820,6 +5309,10 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
     search_mode: bool = False  # True while typing inside the `/` prompt
     sort_key, sort_reverse = load_sort()  # column sort (s cycles, S reverses)
     origin: str = load_origin()  # f cycles all→user→agent, F walks backwards
+    # a cycles all→claude→codex…, A backwards; `cst pick --agent` overrides
+    # the saved view for this launch only.
+    agent_view: str = (agent_view_override if agent_view_override in agent_choices()
+                       else load_agent_view())
     hide_done: bool = hide_done_default  # H toggle: hide 작업종료 from the view
     cwd_only: bool = False     # C toggle: only sessions under the TUI launch cwd
     try:
@@ -4836,6 +5329,8 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             pool = [s for s in pool if s.session_id not in ctx.done]
         if origin != "all":
             pool = filter_origin(pool, origin)
+        if agent_view != AGENT_VIEW_ALL:
+            pool = filter_agent(pool, agent_view)
         if cwd_only and launch_cwd:
             pool = [s for s in pool
                     if unicodedata.normalize("NFC", s.cwd or "").startswith(launch_cwd)]
@@ -4894,6 +5389,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
         # 80-column terminal truncates anything longer once the transient
         # mark/search/hide/cwd hints are also on screen.
         origin_hint = {"user": "  👤user", "agent": "  🤖agent"}.get(origin, "")
+        agent_hint = (f"  ⚙{agent_view}" if agent_view != AGENT_VIEW_ALL else "")
         header = (
             f" claude-session-tracker v{__version__}  "
             f"{len(items)}/{len(sessions)}  "
@@ -4902,9 +5398,9 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             f"{STATUS_IDLE}{scounts[STATUS_IDLE]} "
             f"{STATUS_ENDED}{scounts[STATUS_ENDED]} "
             f"{STATUS_DONE}{scounts[STATUS_DONE]}"
-            f"{auto_hint}{sort_hint}{origin_hint}"
+            f"{auto_hint}{sort_hint}{origin_hint}{agent_hint}"
             f"{mark_hint}{search_hint}{hide_hint}{cwd_hint}"
-            "   ? help  Enter open  o folder  / filter  s sort  f origin  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit "
+            "   ? help  Enter open  o folder  / filter  s sort  f origin  a agent  i auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit "
         )
         if search_mode:
             prompt = f"/ {query}"
@@ -4921,12 +5417,13 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
         # Column widths — num, status, ts, sid, msgs, message, project
         # The mark column (1 char) lives in `line_before_status`, so header
         # starts with a leading space to match row alignment.
-        num_w, status_w, ts_w, sid_w, msgs_w, msg_w, proj_w = _tui_columns(
-            len(items), len(sessions), w)
+        cols = _tui_columns(len(items), len(sessions), w)
+        num_w, status_w, agent_w, ts_w, sid_w, msgs_w, msg_w, proj_w = cols
 
         col_header = (
             f" {'#':>{num_w}} "
             f"{pad_display('ST', status_w)} "
+            f"{'AGENT':<{agent_w}}  "
             f"{'LAST ACTIVITY':<{ts_w}}  "
             f"{'SESSION':<{sid_w}} "
             f"{'MSGS':>{msgs_w}}  "
@@ -4943,12 +5440,12 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             # pure ASCII, so character index == display column; the (x, width)
             # of each sortable column is derived from the same field widths the
             # f-string above used, so no width drift.
+            _ts_x = num_w + 2 + status_w + 1 + agent_w + 2
             _sort_x = {
                 "status":  (num_w + 2, status_w),
-                "time":    (num_w + 2 + status_w + 1, ts_w),
-                "msgs":    (num_w + 2 + status_w + 1 + ts_w + 2 + sid_w + 1,
-                            msgs_w),
-                "project": (num_w + 2 + status_w + 1 + ts_w + 2 + sid_w + 1
+                "time":    (_ts_x, ts_w),
+                "msgs":    (_ts_x + ts_w + 2 + sid_w + 1, msgs_w),
+                "project": (_ts_x + ts_w + 2 + sid_w + 1
                             + msgs_w + 2 + msg_w + 2, len("PROJECT")),
             }.get(sort_key)
             if _sort_x:
@@ -4979,8 +5476,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             top = sel - list_h + 1
 
         _tui_draw_rows(stdscr, items, top, sel, list_top, list_h, marked,
-                       search_hits, ctx, w,
-                       (num_w, status_w, ts_w, sid_w, msgs_w, msg_w, proj_w))
+                       search_hits, ctx, w, cols)
 
         # footer line
         if toast:
@@ -5207,7 +5703,11 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                              else f"Attach failed: {info}  ({sid8})")
                     continue
                 open_cwd = target.cwd
-                if target.cwd and not os.path.isdir(target.cwd):
+                _spec = agent_of(target)
+                if (target.cwd and not os.path.isdir(target.cwd)
+                        and "relocate" in _spec.caps):
+                    # Relocation rewrites Claude's cwd-keyed transcript; other
+                    # agents just resume (the spawn recreates a placeholder).
                     kind, new_cwd = _orphan_relocate_flow(stdscr, target)
                     if kind == "cancel":
                         toast = "Resume cancelled"
@@ -5229,7 +5729,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                         continue
                 ok, info = open_in_new_terminal(
                     open_cwd, target.session_id, skip_perm=use_skip,
-                    cmux_mode=cmux_m,
+                    cmux_mode=cmux_m, agent=_spec.name,
                 )
                 short = target.session_id[:8]
                 flag_note = "  [skip-perm]" if use_skip else ""
@@ -5314,7 +5814,14 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                     ctx.done = done_ids()
                     toast = ("Marked done" if now_done else "Cleared done") \
                             + f": {target_sid[:8]}"
-        elif ch in (ord('a'), ord('A')):
+        elif ch in (ord('a'), ord('A')):  # cycle agent view (A = backwards)
+            agent_view = cycle_agent(agent_view, -1 if ch == ord('A') else 1)
+            save_agent_view(agent_view)
+            sel = 0
+            top = 0
+            toast = ("Agent: all" if agent_view == AGENT_VIEW_ALL
+                     else f"Agent: {agent_view} only")
+        elif ch in (ord('i'), ord('I')):  # auto-rescan interval popup
             _res = _auto_rescan_modal(stdscr, auto_enabled, auto_interval)
             if _res is not None:
                 auto_enabled, auto_interval = _res
@@ -5457,7 +5964,7 @@ def cmd_pick(args: argparse.Namespace) -> int:
               f"using xterm-256color)            ", file=sys.stderr)
     try:
         curses.wrapper(_pick_ui, sessions, args.cwd, args.days, skip_perm,
-                       hide_done, theme)
+                       hide_done, theme, getattr(args, "agent", None))
     except KeyboardInterrupt:
         pass
     # The TUI handles Enter by spawning a new terminal window, so we don't
@@ -5897,6 +6404,8 @@ def cmd_relocate(args: argparse.Namespace) -> int:
     target = require_session(args.session_id)
     if target is None:
         return 1
+    if not require_cap(target, "relocate", "relocate"):
+        return 1
 
     preview = relocate_session(target, args.new_cwd,
                                keep_original=args.keep_original,
@@ -6265,7 +6774,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
 def find_session(prefix: str) -> SessionMeta | None:
     matches: list[Path] = []
     for p in all_session_files():
-        if p.stem.startswith(prefix):
+        if agent_for_path(p).session_id_of(p).startswith(prefix):
             matches.append(p)
     if not matches:
         for p in all_subagent_files():
@@ -6344,6 +6853,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_pick.add_argument("--theme", choices=THEME_CHOICES,
                         default=argparse.SUPPRESS,
                         help="TUI color theme (toggle in-TUI with t)")
+    p_pick.add_argument("--agent", choices=agent_choices(), default=None,
+                        help="start in one agent CLI's view (default: the "
+                             "last view saved by the `a` key)")
     p_pick.set_defaults(func=cmd_pick)
 
     p_list = sub.add_parser("list", help="list sessions (CLI, with status column)")
@@ -6364,6 +6876,9 @@ def _build_parser() -> argparse.ArgumentParser:
                              "(agent = SDK-spawned; default: saved TUI preference)")
     p_list.add_argument("--json", action="store_true",
                         help="emit machine-readable JSON (for cst.app) instead of the table")
+    p_list.add_argument("--agent", choices=agent_choices(), default=None,
+                        help="show one agent CLI's sessions (default: the "
+                             "view saved by the TUI `a` key, else all)")
     p_list.set_defaults(func=cmd_list)
 
     p_search = sub.add_parser("search", help="keyword search across sessions")
@@ -6374,6 +6889,9 @@ def _build_parser() -> argparse.ArgumentParser:
                           help="who started the session: all|user|agent "
                                "(default: saved TUI preference)")
     p_search.add_argument("-i", "--ignore-case", action="store_true")
+    p_search.add_argument("--agent", choices=agent_choices(), default=None,
+                          help="restrict to one agent CLI's sessions "
+                               "(default: the saved TUI view, else all)")
     p_search.set_defaults(func=cmd_search)
 
     p_show = sub.add_parser("show", help="print a session transcript")
