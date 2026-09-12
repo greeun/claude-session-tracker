@@ -81,6 +81,8 @@ def _child():
             for d in (projects, old_cwd, cand_a, cand_b):
                 d.mkdir(parents=True, exist_ok=True)
             tr.PROJECTS_DIR = projects
+            tr.CODEX_SESSIONS_DIR = tr.PROJECTS_DIR.parent / "codex_sessions"
+            tr.CODEX_LOCKS_DIR = tr.PROJECTS_DIR.parent / "codex_locks"
 
             sid = "aaaa1111-0000-0000-0000-000000000001"
             proj_dir = projects / tr.encode_cwd(str(old_cwd))

@@ -2,8 +2,8 @@
 
 Driven headlessly via pty.fork — the curses picker needs a real tty. The child
 wraps `stdscr` in a proxy whose `getch()` feeds a scripted key sequence and
-snapshots the rendered screen before each key. A throwaway agent "zzz" is
-registered in the child so a second, non-claude view exists to cycle into.
+snapshots the rendered screen before each key. The codex row is the
+second, non-claude view the cycle lands on.
 """
 import importlib.util
 import json
@@ -35,11 +35,6 @@ def _child():
     tr = _load()
     tr.CACHE_DIR = pathlib.Path(tmp)
     tr.STATE_PATH = tr.CACHE_DIR / "state.json"
-    tr.AGENTS["zzz"] = tr.AgentSpec(
-        name="zzz", bin="zzz", resume_label="zzz resume",
-        owns=lambda p: False, session_files=lambda inc: [],
-        session_id_of=lambda p: p.stem, iter_turns=lambda p: iter(()),
-        resume_argv=lambda b, s, k: [b, s])
 
     def _sm(sid, agent, msg):
         return tr.SessionMeta(
@@ -48,7 +43,7 @@ def _child():
             msg_count=3, first_user_msg=msg, agent=agent)
 
     sessions = [_sm("aaaaaaaa", "claude", "CLAONE"),
-                _sm("bbbbbbbb", "zzz", "ZZZONE"),
+                _sm("bbbbbbbb", "codex", "CDXONE"),
                 _sm("cccccccc", "claude", "CLATWO")]
 
     empty_ctx = tr.StatusContext(live=set(), done=set(), registry={},
@@ -129,27 +124,27 @@ class TestAgentTui(unittest.TestCase):
     def test_starts_showing_every_agent_with_agent_column(self):
         f0 = self.frames()[0]
         self.assertIn("AGENT", f0)
-        for tag in ("CLAONE", "ZZZONE", "CLATWO"):
+        for tag in ("CLAONE", "CDXONE", "CLATWO"):
             self.assertIn(tag, f0)
 
     def test_a_once_shows_only_claude(self):
         f1 = self.frames()[1]
         self.assertIn("CLAONE", f1)
         self.assertIn("CLATWO", f1)
-        self.assertNotIn("ZZZONE", f1)
+        self.assertNotIn("CDXONE", f1)
         self.assertIn("⚙claude", f1)
         self.assertIn("Agent: claude only", f1)
 
     def test_a_twice_shows_only_the_second_agent(self):
         f2 = self.frames()[2]
-        self.assertIn("ZZZONE", f2)
+        self.assertIn("CDXONE", f2)
         self.assertNotIn("CLAONE", f2)
-        self.assertIn("⚙zzz", f2)
+        self.assertIn("⚙codex", f2)
 
     def test_shift_a_walks_back_to_claude(self):
         f3 = self.frames()[3]
         self.assertIn("CLAONE", f3)
-        self.assertNotIn("ZZZONE", f3)
+        self.assertNotIn("CDXONE", f3)
 
     def test_last_view_is_saved(self):
         self.frames()

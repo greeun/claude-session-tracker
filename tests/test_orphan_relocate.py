@@ -64,6 +64,8 @@ class TestRelocateSession(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             tk.PROJECTS_DIR = root / "projects"  # redirect target tree
+            tk.CODEX_SESSIONS_DIR = tk.PROJECTS_DIR.parent / "codex_sessions"
+            tk.CODEX_LOCKS_DIR = tk.PROJECTS_DIR.parent / "codex_locks"
             target = self._mk(root)
             newdir = root / "new" / "path"
             newdir.mkdir(parents=True)
@@ -77,6 +79,8 @@ class TestRelocateSession(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             tk.PROJECTS_DIR = root / "projects"
+            tk.CODEX_SESSIONS_DIR = tk.PROJECTS_DIR.parent / "codex_sessions"
+            tk.CODEX_LOCKS_DIR = tk.PROJECTS_DIR.parent / "codex_locks"
             target = self._mk(root)
             newdir = root / "new" / "path"
             newdir.mkdir(parents=True)
@@ -94,6 +98,8 @@ class TestRelocateSession(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             tk.PROJECTS_DIR = root / "projects"
+            tk.CODEX_SESSIONS_DIR = tk.PROJECTS_DIR.parent / "codex_sessions"
+            tk.CODEX_LOCKS_DIR = tk.PROJECTS_DIR.parent / "codex_locks"
             target = self._mk(root)
             newdir = root / "new" / "path"
             newdir.mkdir(parents=True)
@@ -109,6 +115,8 @@ class TestRelocateSession(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             tk.PROJECTS_DIR = root / "projects"
+            tk.CODEX_SESSIONS_DIR = tk.PROJECTS_DIR.parent / "codex_sessions"
+            tk.CODEX_LOCKS_DIR = tk.PROJECTS_DIR.parent / "codex_locks"
             proj = root / "proj-old"
             proj.mkdir(parents=True)
             sid = "11111111-2222-3333-4444-555555555555"
@@ -128,6 +136,8 @@ class TestRelocateSession(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             tk.PROJECTS_DIR = root / "projects"
+            tk.CODEX_SESSIONS_DIR = tk.PROJECTS_DIR.parent / "codex_sessions"
+            tk.CODEX_LOCKS_DIR = tk.PROJECTS_DIR.parent / "codex_locks"
             same = root / "same"
             same.mkdir()
             proj = root / "proj-old"
@@ -274,6 +284,8 @@ class TestFindCandidates(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             tk.PROJECTS_DIR = root / "projects"
+            tk.CODEX_SESSIONS_DIR = tk.PROJECTS_DIR.parent / "codex_sessions"
+            tk.CODEX_LOCKS_DIR = tk.PROJECTS_DIR.parent / "codex_locks"
             proj = root / "projects" / "proj-old"
             proj.mkdir(parents=True)
             sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -335,6 +347,8 @@ class TestFindCandidates(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             tk.PROJECTS_DIR = root / "projects"
+            tk.CODEX_SESSIONS_DIR = tk.PROJECTS_DIR.parent / "codex_sessions"
+            tk.CODEX_LOCKS_DIR = tk.PROJECTS_DIR.parent / "codex_locks"
             proj = root / "projects" / "p"
             proj.mkdir(parents=True)
             sid = "11111111-2222-3333-4444-555555555555"
@@ -361,6 +375,8 @@ class TestFindCandidates(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             tk.PROJECTS_DIR = root / "projects"
+            tk.CODEX_SESSIONS_DIR = tk.PROJECTS_DIR.parent / "codex_sessions"
+            tk.CODEX_LOCKS_DIR = tk.PROJECTS_DIR.parent / "codex_locks"
             proj = root / "projects" / "p"
             proj.mkdir(parents=True)
             sid = "11111111-2222-3333-4444-555555555555"
@@ -379,6 +395,8 @@ class TestFindCandidates(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             tk.PROJECTS_DIR = root / "projects"
+            tk.CODEX_SESSIONS_DIR = tk.PROJECTS_DIR.parent / "codex_sessions"
+            tk.CODEX_LOCKS_DIR = tk.PROJECTS_DIR.parent / "codex_locks"
             proj = root / "projects" / "p"
             proj.mkdir(parents=True)
             sid = "11111111-2222-3333-4444-555555555555"
@@ -405,6 +423,8 @@ class TestFindCandidates(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             tk.PROJECTS_DIR = root / "projects"
+            tk.CODEX_SESSIONS_DIR = tk.PROJECTS_DIR.parent / "codex_sessions"
+            tk.CODEX_LOCKS_DIR = tk.PROJECTS_DIR.parent / "codex_locks"
             proj = root / "projects" / "p"
             proj.mkdir(parents=True)
             sid = "11111111-2222-3333-4444-555555555555"

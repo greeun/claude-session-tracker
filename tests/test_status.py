@@ -263,6 +263,8 @@ class TestCmdPromptHook(unittest.TestCase):
         self._orig = (tracker.PROJECTS_DIR, tracker.CACHE_DIR,
                       tracker.STATE_PATH, sys.stdin)
         tracker.PROJECTS_DIR = root / "projects"
+        tracker.CODEX_SESSIONS_DIR = tracker.PROJECTS_DIR.parent / "codex_sessions"
+        tracker.CODEX_LOCKS_DIR = tracker.PROJECTS_DIR.parent / "codex_locks"
         tracker.PROJECTS_DIR.mkdir(parents=True)
         tracker.CACHE_DIR = root / "cache"
         tracker.STATE_PATH = tracker.CACHE_DIR / "state.json"

@@ -161,6 +161,8 @@ class TestCmdListAgentFilter(unittest.TestCase):
             "PROJECTS_DIR", "CACHE_DIR", "CACHE_PATH", "STATE_PATH",
             "JOBS_DIR", "DAEMON_DIR", "SESSIONS_REGISTRY_DIR")}
         tk.PROJECTS_DIR = root / "projects"
+        tk.CODEX_SESSIONS_DIR = tk.PROJECTS_DIR.parent / "codex_sessions"
+        tk.CODEX_LOCKS_DIR = tk.PROJECTS_DIR.parent / "codex_locks"
         tk.CACHE_DIR = root / "cache"
         tk.CACHE_PATH = tk.CACHE_DIR / "index.json"
         tk.STATE_PATH = tk.CACHE_DIR / "state.json"

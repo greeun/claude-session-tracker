@@ -37,6 +37,8 @@ class TestNoClaudeDirectoriesAtAll(unittest.TestCase):
         self._orig = (tk.PROJECTS_DIR, tk.SESSIONS_REGISTRY_DIR, tk.JOBS_DIR,
                       tk.CACHE_DIR, tk.CACHE_PATH, tk.STATE_PATH)
         tk.PROJECTS_DIR = gone / "projects"
+        tk.CODEX_SESSIONS_DIR = tk.PROJECTS_DIR.parent / "codex_sessions"
+        tk.CODEX_LOCKS_DIR = tk.PROJECTS_DIR.parent / "codex_locks"
         tk.SESSIONS_REGISTRY_DIR = gone / "sessions"
         tk.JOBS_DIR = gone / "jobs"
         tk.CACHE_DIR = Path(self._tmp.name) / "cst"

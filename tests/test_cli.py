@@ -30,6 +30,8 @@ class _CliIsolation(unittest.TestCase):
         self._orig_cache_dir = tk.CACHE_DIR
         self._orig_state = tk.STATE_PATH
         tk.PROJECTS_DIR = root / "projects"
+        tk.CODEX_SESSIONS_DIR = tk.PROJECTS_DIR.parent / "codex_sessions"
+        tk.CODEX_LOCKS_DIR = tk.PROJECTS_DIR.parent / "codex_locks"
         tk.PROJECTS_DIR.mkdir(parents=True)
         tk.CACHE_DIR = root / "cache"
         tk.STATE_PATH = tk.CACHE_DIR / "state.json"

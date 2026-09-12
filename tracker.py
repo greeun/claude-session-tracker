@@ -221,6 +221,14 @@ class AgentSpec:
     iter_turns: "Callable[[Path], Iterator[Turn]]"
     resume_argv: "Callable[[str, str, bool], list[str]]"  # (bin, sid, skip_perm)
     caps: frozenset = frozenset()
+    skip_perm_flag: str = "--dangerously-skip-permissions"  # shown in the TUI prompt
+    # Agents without a pid registry supply their own liveness: live_probe()
+    # → {sid: {"busy": bool, "updatedAt": ms}} for every live session, merged
+    # into StatusContext; live_info(sid) → {"pid": int|None, "cwd": str} or
+    # None for one session (window focus + the TUI footer). None = claude's
+    # registry path handles it.
+    live_probe: "Callable[[], dict] | None" = None
+    live_info: "Callable[[str], dict | None] | None" = None
 
 
 def _path_under(path: Path, root: Path) -> bool:
@@ -254,8 +262,261 @@ CLAUDE_AGENT = AgentSpec(
                     "relocate", "backup"}),
 )
 
-AGENTS: dict[str, AgentSpec] = {"claude": CLAUDE_AGENT}
+# ---- codex (OpenAI Codex CLI) ----------------------------------------------
+# Data root: $CODEX_HOME (Codex's own convention), default ~/.codex. One
+# transcript per thread at sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl; the
+# first line is `session_meta` (id, cwd, source, git), messages are
+# `response_item` records of payload type "message" with role user /
+# assistant / developer. Liveness: codex flock()s
+# thread-writer-locks/<uuid>.lock for as long as a thread has an active
+# writer (verified against thread-store/src/local/writer_lock.rs), so a
+# non-blocking flock attempt from here tells live from stale without a pid
+# registry. The app-server keeps idle threads loaded for up to 30 min, so a
+# held lock is "alive", and the rollout's mtime decides busy (●) vs idle (◦).
+
+def _codex_home() -> Path:
+    env = os.environ.get("CODEX_HOME")
+    return Path(env).expanduser() if env else Path.home() / ".codex"
+
+
+CODEX_HOME = _codex_home()
+CODEX_SESSIONS_DIR = CODEX_HOME / "sessions"
+CODEX_LOCKS_DIR = CODEX_HOME / "thread-writer-locks"
+_CODEX_BUSY_WINDOW_S = 90   # rollout written within this → ● working, else ◦ idle
+_UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+_CODEX_ROLLOUT_RE = re.compile(r"^rollout-.*-(" + _UUID_RE + r")\.jsonl$")
+_CODEX_LOCK_RE = re.compile(r"^(" + _UUID_RE + r")\.lock$")
+# Codex injects these as `user` messages; none of them is the user's prompt.
+_CODEX_WRAPPER_PREFIXES = (
+    "# AGENTS.md instructions", "# Files mentioned by", "The following is the",
+)
+_CODEX_WRAPPER_TAG_RE = re.compile(r"^<[a-z][a-z0-9_\-]*[\s>]")  # <environment_context>…
+
+
+def _codex_session_id_of(path: Path) -> str:
+    m = _CODEX_ROLLOUT_RE.match(path.name)
+    return m.group(1) if m else path.stem
+
+
+def _codex_read_session_meta(path: Path) -> dict:
+    """The `session_meta` payload (first rollout line); {} if unreadable."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            line = f.readline()
+        evt = json.loads(line) if line.strip() else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(evt, dict) or evt.get("type") != "session_meta":
+        return {}
+    payload = evt.get("payload")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _codex_is_subagent_meta(meta: dict) -> bool:
+    """Spawned threads (source {"subagent": …}, a parent_thread_id, or a
+    subagent/guardian thread_source) are codex's subagents — hidden from the
+    main listing like Claude's `subagents/` dirs."""
+    if isinstance(meta.get("source"), dict):
+        return True
+    if meta.get("parent_thread_id"):
+        return True
+    return meta.get("thread_source") in ("subagent", "guardian_review")
+
+
+def _codex_entrypoint(meta: dict) -> str:
+    """Flatten SessionSource → "cli" | "vscode" | "exec" | "mcp" | "subagent"…"""
+    src = meta.get("source")
+    if isinstance(src, dict):
+        return "subagent"
+    return str(src) if src else ""
+
+
+def _codex_session_files(include_subagents: bool = False) -> list[Path]:
+    if not CODEX_SESSIONS_DIR.exists():
+        return []
+    out: list[Path] = []
+    for p in CODEX_SESSIONS_DIR.rglob("rollout-*.jsonl"):
+        if not _CODEX_ROLLOUT_RE.match(p.name):
+            continue
+        if not include_subagents and _codex_is_subagent_meta(_codex_read_session_meta(p)):
+            continue
+        out.append(p)
+    out.sort()
+    return out
+
+
+def _codex_text(content) -> str:
+    """Join the text parts of a codex message content list."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for c in content:
+        if isinstance(c, dict) and isinstance(c.get("text"), str):
+            parts.append(c["text"])
+    return "\n".join(parts)
+
+
+def _codex_is_wrapper(text: str) -> bool:
+    t = text.lstrip()
+    return (not t or t.startswith(_CODEX_WRAPPER_PREFIXES)
+            or bool(_CODEX_WRAPPER_TAG_RE.match(t)))
+
+
+def _codex_iter_turns(path: Path) -> Iterator[Turn]:
+    """Codex rollout → Turns. cwd/branch/entrypoint come from session_meta;
+    developer messages and codex's own user-role wrappers are dropped."""
+    cwd = branch = entry = ""
+    for evt in iter_jsonl(path):
+        etype = evt.get("type")
+        payload = evt.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if etype == "session_meta":
+            cwd = payload.get("cwd") or cwd
+            git = payload.get("git")
+            if isinstance(git, dict) and git.get("branch"):
+                branch = str(git["branch"])
+            entry = _codex_entrypoint(payload)
+            continue
+        if etype != "response_item" or payload.get("type") != "message":
+            continue
+        role = payload.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        text = _codex_text(payload.get("content"))
+        if role == "user" and _codex_is_wrapper(text):
+            continue
+        yield Turn(etype=role, ts=parse_ts(evt.get("timestamp")), text=text,
+                   cwd=cwd, git_branch=branch, entrypoint=entry)
+
+
+def _codex_resume_argv(bin_: str, session_id: str, skip_perm: bool) -> list[str]:
+    argv = [bin_, "resume", session_id]
+    if skip_perm:
+        argv.append("--dangerously-bypass-approvals-and-sandbox")
+    return argv
+
+
+def _flock_held(path: Path) -> bool:
+    """True when another process holds an flock on `path` (EWOULDBLOCK on a
+    non-blocking exclusive attempt). False when free, missing, or on
+    platforms without fcntl."""
+    if fcntl is None:
+        return False
+    try:
+        f = path.open("r+")
+    except OSError:
+        return False
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        import errno
+        return e.errno in (errno.EWOULDBLOCK, errno.EAGAIN)
+    else:
+        try:
+            fcntl.flock(f, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        return False
+    finally:
+        f.close()
+
+
+def _codex_rollout_for(session_id: str) -> Path | None:
+    if not CODEX_SESSIONS_DIR.exists():
+        return None
+    for p in CODEX_SESSIONS_DIR.rglob(f"rollout-*-{session_id}.jsonl"):
+        return p
+    return None
+
+
+def _codex_live_ids() -> set[str]:
+    """Thread ids whose writer lock is currently held."""
+    out: set[str] = set()
+    if not CODEX_LOCKS_DIR.is_dir():
+        return out
+    for lock in CODEX_LOCKS_DIR.iterdir():
+        m = _CODEX_LOCK_RE.match(lock.name)
+        if m and _flock_held(lock):
+            out.add(m.group(1))
+    return out
+
+
+def codex_live_probe() -> dict:
+    """{sid: {"busy": bool, "updatedAt": ms}} for every live codex thread."""
+    import time as _time
+    now = _time.time()
+    out: dict = {}
+    for sid in _codex_live_ids():
+        rollout = _codex_rollout_for(sid)
+        mtime = None
+        if rollout is not None:
+            try:
+                mtime = rollout.stat().st_mtime
+            except OSError:
+                mtime = None
+        busy = mtime is not None and (now - mtime) <= _CODEX_BUSY_WINDOW_S
+        out[sid] = {"busy": busy,
+                    "updatedAt": int(mtime * 1000) if mtime else None}
+    return out
+
+
+def _lock_holder_pid(path: Path) -> int | None:
+    """pid of the process holding `path` open (lsof), or None."""
+    import subprocess
+    lsof = shutil.which("lsof")
+    if not lsof:
+        return None
+    try:
+        r = subprocess.run([lsof, "-t", str(path)], capture_output=True,
+                           text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for tok in r.stdout.split():
+        if tok.isdigit():
+            return int(tok)
+    return None
+
+
+def codex_live_info(session_id: str) -> dict | None:
+    lock = CODEX_LOCKS_DIR / f"{session_id}.lock"
+    if not _flock_held(lock):
+        return None
+    meta = {}
+    rollout = _codex_rollout_for(session_id)
+    if rollout is not None:
+        meta = _codex_read_session_meta(rollout)
+    return {"sessionId": session_id, "pid": _lock_holder_pid(lock),
+            "cwd": meta.get("cwd") or "", "agent": "codex"}
+
+
+CODEX_AGENT = AgentSpec(
+    name="codex", bin="codex", resume_label="codex resume",
+    owns=lambda p: _path_under(p, CODEX_SESSIONS_DIR),
+    session_files=_codex_session_files,
+    session_id_of=_codex_session_id_of,
+    iter_turns=_codex_iter_turns,
+    resume_argv=_codex_resume_argv,
+    caps=frozenset({"resume"}),
+    skip_perm_flag="--dangerously-bypass-approvals-and-sandbox",
+    live_probe=codex_live_probe,
+    live_info=codex_live_info,
+)
+
+AGENTS: dict[str, AgentSpec] = {"claude": CLAUDE_AGENT, "codex": CODEX_AGENT}
 DEFAULT_AGENT = "claude"
+
+
+def require_cap(meta, cap: str, verb: str) -> bool:
+    """False (after printing why) when `meta`'s agent lacks capability `cap`.
+    Gates the Claude-only commands (subagents, relocate, …) on other agents."""
+    spec = agent_of(meta)
+    if cap in spec.caps:
+        return True
+    print(f"✗ {verb} is not supported for {spec.name} sessions", file=sys.stderr)
+    return False
 
 
 def agent_for_path(path: Path) -> AgentSpec:
@@ -1461,13 +1722,23 @@ def daemon_status_line(roster: dict | None) -> str:
 
 
 def get_live_session_info(session_id: str) -> dict | None:
-    """Return the registry record (pid, cwd, ideName, …) for a live session."""
+    """Return the registry record (pid, cwd, ideName, …) for a live session.
+    Registry-less agents (codex) answer through their spec's live_info."""
     for data in _iter_registry_records():
         if data.get("sessionId") == session_id:
             pid = data.get("pid")
             if isinstance(pid, int) and _pid_alive(pid):
                 return data
             return None
+    for spec in AGENTS.values():
+        if spec.live_info is None:
+            continue
+        try:
+            info = spec.live_info(session_id)
+        except Exception:
+            info = None
+        if info:
+            return info
     return None
 
 
@@ -1635,8 +1906,23 @@ class StatusContext:
     @classmethod
     def capture(cls) -> "StatusContext":
         live, _ = scan_live_sessions()
+        registry = scan_registry_status()
+        # Agents without a pid registry (codex) report their own live
+        # sessions; fold them in as synthetic registry records so
+        # classify_status needs no agent-specific branch.
+        for spec in AGENTS.values():
+            if spec.live_probe is None:
+                continue
+            try:
+                probed = spec.live_probe()
+            except Exception:
+                continue
+            for sid, rec in probed.items():
+                live.add(sid)
+                registry[sid] = {"status": "busy" if rec.get("busy") else "idle",
+                                 "updatedAt": rec.get("updatedAt")}
         return cls(live=live, done=done_ids(),
-                   registry=scan_registry_status(), overlay=status_overlay(),
+                   registry=registry, overlay=status_overlay(),
                    jobs=scan_jobs(), pins=read_pins())
 
     def resolve(self, session_id: str) -> str:
@@ -1847,12 +2133,18 @@ def save_sort(sort_key: str, reverse: bool) -> None:
 ORIGIN_CHOICES = ("all", "user", "agent")
 ORIGIN_LABELS = {"all": "all", "user": "user", "agent": "agent"}
 _AGENT_ENTRYPOINT_PREFIX = "sdk"
+# Codex SessionSource values that mean "not a human at a terminal": `codex
+# exec` (the `claude -p` analogue), MCP-hosted threads, spawned subagents.
+_AGENT_ENTRYPOINTS = frozenset({"exec", "mcp", "subagent"})
 
 
 def session_origin(meta) -> str:
     """"user" or "agent" for a SessionMeta (or a bare entrypoint string)."""
     ep = meta if isinstance(meta, str) else getattr(meta, "entrypoint", "")
-    return "agent" if (ep or "").startswith(_AGENT_ENTRYPOINT_PREFIX) else "user"
+    ep = ep or ""
+    if ep.startswith(_AGENT_ENTRYPOINT_PREFIX) or ep in _AGENT_ENTRYPOINTS:
+        return "agent"
+    return "user"
 
 
 def filter_origin(sessions, origin: str) -> list:
@@ -2816,6 +3108,8 @@ def cmd_subagents(args: argparse.Namespace) -> int:
     target = require_session(args.session_id)
     if target is None:
         return 1
+    if not require_cap(target, "subagents", "subagents"):
+        return 1
     subs = list_subagents(target.path)
     if not subs:
         print(f"(session {target.session_id[:8]} has no subagents)")
@@ -2872,6 +3166,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
             skip_perm=getattr(args, "skip_perm", False),
             attach_short=short,
             terminal=getattr(args, "terminal", None),
+            agent=agent_of(target).name,
         )
         if ok:
             print(f"→ {'attach' if short else 'resume'} {target.session_id[:8]}  {info}")
@@ -4821,9 +5116,11 @@ def _confirm_skip_perm_modal(stdscr, target: SessionMeta) -> bool | None:
     box_w = min(72, max(48, w2 - 6))
     box_h = 9
     win = _centered_win(stdscr, box_h, box_w)
+    spec = agent_of(target)
+    flag = spec.skip_perm_flag
     try:
         win.box()
-        title = " --dangerously-skip-permissions? "
+        title = f" {flag}? "
         win.addnstr(0, max(2, (box_w - len(title)) // 2), title,
                     box_w - 4, curses.color_pair(5) | curses.A_BOLD)
         label = truncate(
@@ -4831,11 +5128,11 @@ def _confirm_skip_perm_modal(stdscr, target: SessionMeta) -> bool | None:
             box_w - 6,
         )
         win.addnstr(2, 3, f"Resume: {label}", box_w - 6)
-        win.addnstr(3, 3,
-                    "Apply --dangerously-skip-permissions for this resume?",
+        win.addnstr(3, 3, truncate(f"Apply {flag} for this resume?", box_w - 6),
                     box_w - 6)
         win.addnstr(4, 3,
-                    "Skips all permission prompts inside Claude Code.",
+                    truncate(f"Skips all permission prompts inside {spec.bin}.",
+                             box_w - 6),
                     box_w - 6, curses.A_DIM)
         prompt = " [y] Yes    [n] No    [Esc] Cancel "
         win.addnstr(box_h - 2, 3, prompt, box_w - 6, curses.A_BOLD)
@@ -5406,7 +5703,11 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                              else f"Attach failed: {info}  ({sid8})")
                     continue
                 open_cwd = target.cwd
-                if target.cwd and not os.path.isdir(target.cwd):
+                _spec = agent_of(target)
+                if (target.cwd and not os.path.isdir(target.cwd)
+                        and "relocate" in _spec.caps):
+                    # Relocation rewrites Claude's cwd-keyed transcript; other
+                    # agents just resume (the spawn recreates a placeholder).
                     kind, new_cwd = _orphan_relocate_flow(stdscr, target)
                     if kind == "cancel":
                         toast = "Resume cancelled"
@@ -5428,7 +5729,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                         continue
                 ok, info = open_in_new_terminal(
                     open_cwd, target.session_id, skip_perm=use_skip,
-                    cmux_mode=cmux_m,
+                    cmux_mode=cmux_m, agent=_spec.name,
                 )
                 short = target.session_id[:8]
                 flag_note = "  [skip-perm]" if use_skip else ""
@@ -6102,6 +6403,8 @@ def confirm(prompt: str) -> bool:
 def cmd_relocate(args: argparse.Namespace) -> int:
     target = require_session(args.session_id)
     if target is None:
+        return 1
+    if not require_cap(target, "relocate", "relocate"):
         return 1
 
     preview = relocate_session(target, args.new_cwd,

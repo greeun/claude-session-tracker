@@ -54,6 +54,8 @@ class _ArchiveBase(unittest.TestCase):
         self.projects.mkdir()
         self._orig = tk.PROJECTS_DIR
         tk.PROJECTS_DIR = self.projects
+        tk.CODEX_SESSIONS_DIR = tk.PROJECTS_DIR.parent / "codex_sessions"
+        tk.CODEX_LOCKS_DIR = tk.PROJECTS_DIR.parent / "codex_locks"
         self.addCleanup(setattr, tk, "PROJECTS_DIR", self._orig)
         self._orig_cache = tk.CACHE_PATH
         tk.CACHE_PATH = self.root / "index.json"

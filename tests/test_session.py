@@ -114,6 +114,8 @@ class _ProjIsolation(unittest.TestCase):
         self._orig_cache_path = tk.CACHE_PATH
         self._orig_cache_dir = tk.CACHE_DIR
         tk.PROJECTS_DIR = root / "projects"
+        tk.CODEX_SESSIONS_DIR = tk.PROJECTS_DIR.parent / "codex_sessions"
+        tk.CODEX_LOCKS_DIR = tk.PROJECTS_DIR.parent / "codex_locks"
         tk.PROJECTS_DIR.mkdir(parents=True)
         tk.CACHE_DIR = root / "cache"
         tk.CACHE_PATH = tk.CACHE_DIR / "index.json"
