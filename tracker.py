@@ -66,7 +66,7 @@ CACHE_DIR = _cst_home()
 CACHE_PATH = CACHE_DIR / "index.json"
 # Bumped whenever the cached SessionMeta shape or extraction logic changes,
 # so stale entries are re-indexed instead of serving wrong snippets.
-_CACHE_SCHEMA = 5
+_CACHE_SCHEMA = 6
 STATE_PATH = CACHE_DIR / "state.json"
 
 # Pre-1.11 location; migrate_legacy_dir() moves its files into CACHE_DIR once.
@@ -1894,6 +1894,60 @@ def save_origin(origin: str) -> None:
     save_state(st)
 
 
+# ---- agent view (CLI `--agent` / TUI `a`,`A`) ------------------------------
+# Which agent CLI's sessions are shown: "all" or one AGENTS key. The TUI `a`
+# key cycles all→claude→codex→…, `A` walks backwards; the last view is saved in
+# state.json (`{"agent": "..."}`) so the picker reopens where it was left, and
+# `cst list`/`cst search` fall back to that same pref unless `--agent` is given.
+
+AGENT_VIEW_ALL = "all"
+AGENT_VIEW_WIDTH = 6   # AGENT column width: fits "claude" / "codex" / "gemini"
+
+
+def agent_choices() -> tuple:
+    """("all", <every registered agent>) — the `--agent` choices + `a` cycle."""
+    return (AGENT_VIEW_ALL,) + tuple(AGENTS)
+
+
+def filter_agent(sessions, view: str) -> list:
+    """Return a NEW list keeping only `view`'s sessions; "all"/unknown keeps
+    everything (an unrecognised value must never silently empty the view)."""
+    if view not in AGENTS:
+        return list(sessions)
+    return [s for s in sessions if getattr(s, "agent", DEFAULT_AGENT) == view]
+
+
+def cycle_agent(view: str, step: int = 1) -> str:
+    """Next view in the all→claude→codex→… cycle (`step=-1` walks backwards)."""
+    choices = agent_choices()
+    try:
+        i = choices.index(view)
+    except ValueError:
+        i = 0
+    return choices[(i + step) % len(choices)]
+
+
+def agent_note(view: str) -> str:
+    """Trailing `  [agent:codex]` tag for CLI summaries; empty when unfiltered."""
+    if view not in AGENTS:
+        return ""
+    return f"  [agent:{view}]"
+
+
+def load_agent_view() -> str:
+    """Stored agent view from state.json; "all" by default."""
+    val = load_state().get("agent")
+    return val if val in agent_choices() else AGENT_VIEW_ALL
+
+
+def save_agent_view(view: str) -> None:
+    if view not in agent_choices():
+        view = AGENT_VIEW_ALL
+    st = load_state()
+    st["agent"] = view
+    save_state(st)
+
+
 def _detect_terminal_is_light(env: dict | None = None) -> bool | None:
     """Best-effort terminal-background detection via ``COLORFGBG``.
 
@@ -1958,6 +2012,7 @@ class SessionMeta:
     git_branch: str = ""
     prs: list = field(default_factory=list)  # [{host,repo,number,url}] from transcript
     entrypoint: str = ""  # transcript `entrypoint`: cli | sdk-py | sdk-cli | sdk-ts
+    agent: str = DEFAULT_AGENT  # AGENTS key of the CLI that wrote the transcript
 
 
 @dataclass
@@ -2095,7 +2150,8 @@ def load_session_meta(path: Path, fast: bool = False) -> SessionMeta | None:
     owning AgentSpec supplies the id and the Turn stream, the folding below
     is shared (first/last ts, counts, first real user message, PR refs)."""
     spec = agent_for_path(path)
-    meta = SessionMeta(session_id=spec.session_id_of(path), path=path)
+    meta = SessionMeta(session_id=spec.session_id_of(path), path=path,
+                       agent=spec.name)
     if fast:
         try:
             meta.last_ts = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
@@ -2235,6 +2291,7 @@ def _meta_to_cache(m: SessionMeta) -> dict:
         "git_branch": m.git_branch,
         "prs": m.prs,
         "entrypoint": m.entrypoint,
+        "agent": m.agent,
     }
 
 
@@ -2250,6 +2307,7 @@ def _meta_from_cache(d: dict, path: Path) -> SessionMeta:
         git_branch=d.get("git_branch", ""),
         prs=d.get("prs") or [],
         entrypoint=d.get("entrypoint", ""),
+        agent=d.get("agent") or DEFAULT_AGENT,
     )
 
 
@@ -2292,7 +2350,10 @@ def _dup_rank(m: SessionMeta) -> tuple:
     The canonical copy is the one sitting in the project dir that encodes its
     own transcript `cwd`; a leftover copy in a renamed project's old dir loses
     even if it looks fatter. Then richer transcript, then fresher activity."""
-    canonical = bool(m.cwd) and m.path.parent.name == encode_cwd(m.cwd)
+    # The encoded-cwd project dir is a Claude Code convention; other agents
+    # (codex: one dated rollout per session) have no such duplicate layout.
+    canonical = (m.agent == "claude" and bool(m.cwd)
+                 and m.path.parent.name == encode_cwd(m.cwd))
     return (canonical, m.msg_count, m.last_ts or _EPOCH)
 
 
@@ -2402,6 +2463,7 @@ def session_to_dict(s: "SessionMeta", ctx: "StatusContext") -> dict:
         "gitBranch": s.git_branch or "",
         "entrypoint": s.entrypoint or "",
         "origin": session_origin(s),
+        "agent": s.agent or DEFAULT_AGENT,
         "job": _job_json(job),
         "prs": list(s.prs or []),
         "pinned": bool(short and short in ctx.pins),
@@ -2432,6 +2494,10 @@ def cmd_list(args: argparse.Namespace) -> int:
     # the saved TUI preference (same contract as --sort below).
     origin = getattr(args, "origin", None) or load_origin()
     sessions = filter_origin(sessions, origin)
+    # Agent view: same contract — explicit --agent is a one-off, else the view
+    # the TUI `a` key last saved.
+    agent_view = getattr(args, "agent", None) or load_agent_view()
+    sessions = filter_agent(sessions, agent_view)
     # Column sort: an explicit --sort is a one-off override (natural direction,
     # flipped by --reverse); no flag uses the saved TUI preference. Sort runs
     # BEFORE --limit so the slice keeps the top-N of the chosen order. getattr
@@ -2462,6 +2528,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     header = (
         f"{'#':>{num_w}} "
         f"{pad_display('ST', STATUS_WIDTH)} "
+        f"{'AGENT':<{AGENT_VIEW_WIDTH}}  "
         f"{'LAST ACTIVITY':<16}  "
         f"{'SESSION':<10} "
         f"{'MSGS':>4}  "
@@ -2483,6 +2550,7 @@ def cmd_list(args: argparse.Namespace) -> int:
         print(
             f"{idx:>{num_w}} "
             f"{pad_display(st, STATUS_WIDTH)} "
+            f"{s.agent:<{AGENT_VIEW_WIDTH}}  "
             f"{ts:<16}  "
             f"{sid:<10} "
             f"{s.msg_count:>4}  "
@@ -2492,7 +2560,8 @@ def cmd_list(args: argparse.Namespace) -> int:
     counts = ctx.counts(sessions)
     summary = "  ".join(f"{status_label(g)}:{counts[g]}"
                         for g in STATUS_ALL if counts[g])
-    print(f"\n{len(sessions)} session(s)  [{summary}]{origin_note(origin)}")
+    print(f"\n{len(sessions)} session(s)  [{summary}]"
+          f"{origin_note(origin)}{agent_note(agent_view)}")
     return 0
 
 
@@ -2510,7 +2579,8 @@ def cmd_search(args: argparse.Namespace) -> int:
     hits: list[tuple[SessionMeta, list[tuple[datetime | None, str, str]]]] = []
     for p in all_session_files():
         spec = agent_for_path(p)
-        meta = SessionMeta(session_id=spec.session_id_of(p), path=p)
+        meta = SessionMeta(session_id=spec.session_id_of(p), path=p,
+                           agent=spec.name)
         matches: list[tuple[datetime | None, str, str]] = []
         for turn in spec.iter_turns(p):
             meta.msg_count += 1
@@ -2539,22 +2609,27 @@ def cmd_search(args: argparse.Namespace) -> int:
     origin = getattr(args, "origin", None) or load_origin()
     if origin in ("user", "agent"):
         hits = [h for h in hits if session_origin(h[0]) == origin]
+    agent_view = getattr(args, "agent", None) or load_agent_view()
+    if agent_view in AGENTS:
+        hits = [h for h in hits if h[0].agent == agent_view]
     hits.sort(key=lambda h: h[0].last_ts or _EPOCH, reverse=True)
     if args.limit:
         hits = hits[: args.limit]
+    notes = f"{origin_note(origin)}{agent_note(agent_view)}"
     if not hits:
-        print(f"(no matches for {args.query!r}{origin_note(origin)})")
+        print(f"(no matches for {args.query!r}{notes})")
         return 0
     ctx = StatusContext.capture()
     for meta, matches in hits:
         st = ctx.resolve(meta.session_id)
-        print(f"\n{status_label(st)}  {meta.session_id[:8]}  {fmt_ts(meta.last_ts)}  "
+        print(f"\n{status_label(st)}  {meta.agent:<{AGENT_VIEW_WIDTH}}  "
+              f"{meta.session_id[:8]}  {fmt_ts(meta.last_ts)}  "
               f"{shorten_path(meta.cwd)}  ({len(matches)} hit(s))")
         for ts, role, snippet in matches[:3]:
             print(f"    [{role}] {truncate(snippet, 140)}")
         if len(matches) > 3:
             print(f"    … +{len(matches) - 3} more")
-    print(f"\n{len(hits)} session(s) matched.{origin_note(origin)}")
+    print(f"\n{len(hits)} session(s) matched.{notes}")
     return 0
 
 
@@ -2629,6 +2704,7 @@ def cmd_show(args: argparse.Namespace) -> int:
     ctx = StatusContext.capture()
     st = ctx.resolve(target.session_id)
     print(f"Session:  {target.session_id}")
+    print(f"Agent:    {target.agent}")
     print(f"Status:   {status_label(st)}")
     print(f"Cwd:      {target.cwd}")
     if target.git_branch:
@@ -2666,6 +2742,7 @@ def cmd_show(args: argparse.Namespace) -> int:
 def _build_export_text(target: "SessionMeta", st: str) -> str:
     lines: list[str] = []
     lines.append(f"Session:  {target.session_id}")
+    lines.append(f"Agent:    {target.agent}")
     lines.append(f"Status:   {status_label(st)}")
     lines.append(f"Cwd:      {target.cwd}")
     if target.git_branch:
@@ -2685,6 +2762,7 @@ def _build_export_md(target: "SessionMeta", st: str) -> str:
     lines: list[str] = []
     lines.append(f"# Session: {target.session_id}")
     lines.append(f"")
+    lines.append(f"**Agent:** {target.agent}  ")
     lines.append(f"**Status:** {status_label(st)}  ")
     lines.append(f"**Started:** {fmt_ts(target.first_ts)}  ")
     lines.append(f"**Last:** {fmt_ts(target.last_ts)}  ")
@@ -3605,10 +3683,8 @@ def _tui_run_search(stdscr, sessions: list[SessionMeta], query: str) -> dict[str
                 hits[s.session_id] = f"[session ID: {s.session_id}]"
                 continue
             try:
-                for evt in iter_jsonl(s.path):
-                    if evt.get("type") not in ("user", "assistant"):
-                        continue
-                    text = extract_text((evt.get("message") or {}).get("content"))
+                for turn in agent_of(s).iter_turns(s.path):
+                    text = turn.text
                     if not text:
                         continue
                     m = regex.search(text)
@@ -3655,7 +3731,8 @@ HELP_LINES = [
     "      Esc                clear query and exit prompt",
     "",
     "Session actions (normal mode)",
-    "  a / A                  auto-rescan interval popup (Off/5/10/30/60/120s)",
+    "  a / A                  cycle agent view (all→claude→codex; A backwards) — saved",
+    "  i / I                  auto-rescan interval popup (Off/5/10/30/60/120s)",
     "  v / V                  preview the focused session (scroll/search modal)",
     "                         ↑↓ scroll · PgUp/PgDn page · g/G top/bottom · q/Esc/v close",
     "                         ←/→ (or ‹ › / [ ]) prev/next session in list",
@@ -3944,7 +4021,9 @@ def _preview_modal(stdscr, items, sel: int, ctx):
         """Display lines for one session, plus the length of the leading
         metadata block the renderer pins above the scrolling body."""
         lines: list[tuple[str, int]] = []
-        lines.append((truncate_display(f"Session  {target.session_id}", inner_w), header_attr))
+        lines.append((truncate_display(
+            f"Session  {target.session_id}    Agent  {target.agent}", inner_w),
+            header_attr))
         lines.append(_status_row(status))
         lines.append((truncate_display(f"Cwd      {shorten_path(target.cwd)}", inner_w), cwd_attr))
         if target.git_branch:
@@ -3965,14 +4044,7 @@ def _preview_modal(stdscr, items, sel: int, ctx):
 
         rendered = 0
         try:
-            for evt in iter_jsonl(target.path):
-                etype = evt.get("type")
-                if etype not in ("user", "assistant"):
-                    continue
-                text = extract_text((evt.get("message") or {}).get("content")).strip()
-                if not text:
-                    continue
-                ts = fmt_ts(parse_ts(evt.get("timestamp")))
+            for etype, ts, text in iter_messages(target.path):
                 prefix = "🧑 user" if etype == "user" else "🤖 assistant"
                 attr = user_attr if etype == "user" else asst_attr
                 lines.append((truncate_display(f"{prefix}  [{ts}]", inner_w), attr))
@@ -4819,23 +4891,25 @@ def _choose_cmux_mode_modal(stdscr) -> str | None:
 
 
 def _tui_columns(n_items, n_sessions, w):
-    """List-view column widths: (num, status, ts, sid, msgs, msg, proj).
+    """List-view column widths: (num, status, agent, ts, sid, msgs, msg, proj).
 
     Pure layout math shared by the header row and `_tui_draw_rows`."""
     num_w = max(3, len(str(n_items or n_sessions)))
+    agent_w = AGENT_VIEW_WIDTH
     ts_w = 16
     sid_w = 8
     msgs_w = 4
     status_w = STATUS_WIDTH
     # Fixed width up through MSGS column. Tight 1-space separators around
-    # ST (#→ST, ST→LAST ACTIVITY) and between SESSION→MSGS; the rest use
-    # 2-space separators.
-    fixed = (1 + num_w + 1) + (status_w + 1) + (ts_w + 2) + (sid_w + 1) + (msgs_w + 2) + 2
+    # ST (#→ST, ST→AGENT) and between SESSION→MSGS; the rest use 2-space
+    # separators.
+    fixed = ((1 + num_w + 1) + (status_w + 1) + (agent_w + 2) + (ts_w + 2)
+             + (sid_w + 1) + (msgs_w + 2) + 2)
     remaining = max(30, w - fixed - 1)
     # split remaining: ~50% message, ~50% project (project at least 20)
     proj_w = max(20, remaining // 2)
     msg_w = max(20, remaining - proj_w - 2)
-    return num_w, status_w, ts_w, sid_w, msgs_w, msg_w, proj_w
+    return num_w, status_w, agent_w, ts_w, sid_w, msgs_w, msg_w, proj_w
 
 
 def _tui_draw_rows(stdscr, items, top, sel, list_top, list_h, marked,
@@ -4844,7 +4918,7 @@ def _tui_draw_rows(stdscr, items, top, sel, list_top, list_h, marked,
 
     Pure render — reads state, writes only to the screen (no state mutation)."""
     import curses
-    num_w, status_w, ts_w, sid_w, msgs_w, msg_w, proj_w = cols
+    num_w, status_w, agent_w, ts_w, sid_w, msgs_w, msg_w, proj_w = cols
     for i in range(list_h):
         idx = top + i
         if idx >= len(items):
@@ -4873,7 +4947,8 @@ def _tui_draw_rows(stdscr, items, top, sel, list_top, list_h, marked,
 
         line_before_status = f"{mark}{idx + 1:>{num_w}} "
         line_after_status = (
-            f" {ts:<{ts_w}}  {sid:<{sid_w}} "
+            f" {(s.agent or DEFAULT_AGENT):<{agent_w}}  "
+            f"{ts:<{ts_w}}  {sid:<{sid_w}} "
             f"{s.msg_count:>{msgs_w}}  {msg_cell}  {proj_cell}"
         )
 
@@ -4902,7 +4977,8 @@ def _tui_draw_rows(stdscr, items, top, sel, list_top, list_h, marked,
 
 def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
              days: int | None, skip_perm_default: bool = False,
-             hide_done_default: bool = False, theme: str = "dark"):
+             hide_done_default: bool = False, theme: str = "dark",
+             agent_view_override: str | None = None):
     import curses
     import time
     curses.curs_set(0)
@@ -4936,6 +5012,10 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
     search_mode: bool = False  # True while typing inside the `/` prompt
     sort_key, sort_reverse = load_sort()  # column sort (s cycles, S reverses)
     origin: str = load_origin()  # f cycles all→user→agent, F walks backwards
+    # a cycles all→claude→codex…, A backwards; `cst pick --agent` overrides
+    # the saved view for this launch only.
+    agent_view: str = (agent_view_override if agent_view_override in agent_choices()
+                       else load_agent_view())
     hide_done: bool = hide_done_default  # H toggle: hide 작업종료 from the view
     cwd_only: bool = False     # C toggle: only sessions under the TUI launch cwd
     try:
@@ -4952,6 +5032,8 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             pool = [s for s in pool if s.session_id not in ctx.done]
         if origin != "all":
             pool = filter_origin(pool, origin)
+        if agent_view != AGENT_VIEW_ALL:
+            pool = filter_agent(pool, agent_view)
         if cwd_only and launch_cwd:
             pool = [s for s in pool
                     if unicodedata.normalize("NFC", s.cwd or "").startswith(launch_cwd)]
@@ -5010,6 +5092,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
         # 80-column terminal truncates anything longer once the transient
         # mark/search/hide/cwd hints are also on screen.
         origin_hint = {"user": "  👤user", "agent": "  🤖agent"}.get(origin, "")
+        agent_hint = (f"  ⚙{agent_view}" if agent_view != AGENT_VIEW_ALL else "")
         header = (
             f" claude-session-tracker v{__version__}  "
             f"{len(items)}/{len(sessions)}  "
@@ -5018,9 +5101,9 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             f"{STATUS_IDLE}{scounts[STATUS_IDLE]} "
             f"{STATUS_ENDED}{scounts[STATUS_ENDED]} "
             f"{STATUS_DONE}{scounts[STATUS_DONE]}"
-            f"{auto_hint}{sort_hint}{origin_hint}"
+            f"{auto_hint}{sort_hint}{origin_hint}{agent_hint}"
             f"{mark_hint}{search_hint}{hide_hint}{cwd_hint}"
-            "   ? help  Enter open  o folder  / filter  s sort  f origin  a auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit "
+            "   ? help  Enter open  o folder  / filter  s sort  f origin  a agent  i auto  ^R rescan  ^D mark✓  H hide✓  C cwd  Esc quit "
         )
         if search_mode:
             prompt = f"/ {query}"
@@ -5037,12 +5120,13 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
         # Column widths — num, status, ts, sid, msgs, message, project
         # The mark column (1 char) lives in `line_before_status`, so header
         # starts with a leading space to match row alignment.
-        num_w, status_w, ts_w, sid_w, msgs_w, msg_w, proj_w = _tui_columns(
-            len(items), len(sessions), w)
+        cols = _tui_columns(len(items), len(sessions), w)
+        num_w, status_w, agent_w, ts_w, sid_w, msgs_w, msg_w, proj_w = cols
 
         col_header = (
             f" {'#':>{num_w}} "
             f"{pad_display('ST', status_w)} "
+            f"{'AGENT':<{agent_w}}  "
             f"{'LAST ACTIVITY':<{ts_w}}  "
             f"{'SESSION':<{sid_w}} "
             f"{'MSGS':>{msgs_w}}  "
@@ -5059,12 +5143,12 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             # pure ASCII, so character index == display column; the (x, width)
             # of each sortable column is derived from the same field widths the
             # f-string above used, so no width drift.
+            _ts_x = num_w + 2 + status_w + 1 + agent_w + 2
             _sort_x = {
                 "status":  (num_w + 2, status_w),
-                "time":    (num_w + 2 + status_w + 1, ts_w),
-                "msgs":    (num_w + 2 + status_w + 1 + ts_w + 2 + sid_w + 1,
-                            msgs_w),
-                "project": (num_w + 2 + status_w + 1 + ts_w + 2 + sid_w + 1
+                "time":    (_ts_x, ts_w),
+                "msgs":    (_ts_x + ts_w + 2 + sid_w + 1, msgs_w),
+                "project": (_ts_x + ts_w + 2 + sid_w + 1
                             + msgs_w + 2 + msg_w + 2, len("PROJECT")),
             }.get(sort_key)
             if _sort_x:
@@ -5095,8 +5179,7 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
             top = sel - list_h + 1
 
         _tui_draw_rows(stdscr, items, top, sel, list_top, list_h, marked,
-                       search_hits, ctx, w,
-                       (num_w, status_w, ts_w, sid_w, msgs_w, msg_w, proj_w))
+                       search_hits, ctx, w, cols)
 
         # footer line
         if toast:
@@ -5430,7 +5513,14 @@ def _pick_ui(stdscr, sessions_ref: list[SessionMeta], cwd_filter: str | None,
                     ctx.done = done_ids()
                     toast = ("Marked done" if now_done else "Cleared done") \
                             + f": {target_sid[:8]}"
-        elif ch in (ord('a'), ord('A')):
+        elif ch in (ord('a'), ord('A')):  # cycle agent view (A = backwards)
+            agent_view = cycle_agent(agent_view, -1 if ch == ord('A') else 1)
+            save_agent_view(agent_view)
+            sel = 0
+            top = 0
+            toast = ("Agent: all" if agent_view == AGENT_VIEW_ALL
+                     else f"Agent: {agent_view} only")
+        elif ch in (ord('i'), ord('I')):  # auto-rescan interval popup
             _res = _auto_rescan_modal(stdscr, auto_enabled, auto_interval)
             if _res is not None:
                 auto_enabled, auto_interval = _res
@@ -5573,7 +5663,7 @@ def cmd_pick(args: argparse.Namespace) -> int:
               f"using xterm-256color)            ", file=sys.stderr)
     try:
         curses.wrapper(_pick_ui, sessions, args.cwd, args.days, skip_perm,
-                       hide_done, theme)
+                       hide_done, theme, getattr(args, "agent", None))
     except KeyboardInterrupt:
         pass
     # The TUI handles Enter by spawning a new terminal window, so we don't
@@ -6460,6 +6550,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_pick.add_argument("--theme", choices=THEME_CHOICES,
                         default=argparse.SUPPRESS,
                         help="TUI color theme (toggle in-TUI with t)")
+    p_pick.add_argument("--agent", choices=agent_choices(), default=None,
+                        help="start in one agent CLI's view (default: the "
+                             "last view saved by the `a` key)")
     p_pick.set_defaults(func=cmd_pick)
 
     p_list = sub.add_parser("list", help="list sessions (CLI, with status column)")
@@ -6480,6 +6573,9 @@ def _build_parser() -> argparse.ArgumentParser:
                              "(agent = SDK-spawned; default: saved TUI preference)")
     p_list.add_argument("--json", action="store_true",
                         help="emit machine-readable JSON (for cst.app) instead of the table")
+    p_list.add_argument("--agent", choices=agent_choices(), default=None,
+                        help="show one agent CLI's sessions (default: the "
+                             "view saved by the TUI `a` key, else all)")
     p_list.set_defaults(func=cmd_list)
 
     p_search = sub.add_parser("search", help="keyword search across sessions")
@@ -6490,6 +6586,9 @@ def _build_parser() -> argparse.ArgumentParser:
                           help="who started the session: all|user|agent "
                                "(default: saved TUI preference)")
     p_search.add_argument("-i", "--ignore-case", action="store_true")
+    p_search.add_argument("--agent", choices=agent_choices(), default=None,
+                          help="restrict to one agent CLI's sessions "
+                               "(default: the saved TUI view, else all)")
     p_search.set_defaults(func=cmd_search)
 
     p_show = sub.add_parser("show", help="print a session transcript")

@@ -1,4 +1,5 @@
 Session:  bbbbbbbb-2222-4222-8222-222222222222
+Agent:    claude
 Status:   ○ ended
 Cwd:      /repo/beta
 Branch:   feat/login

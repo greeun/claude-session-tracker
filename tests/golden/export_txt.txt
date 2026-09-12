@@ -1,4 +1,5 @@
 Session:  cccccccc-3333-4333-8333-333333333333
+Agent:    claude
 Status:   ○ ended
 Cwd:      /repo/gamma
 Started:  2026-03-01 08:00

@@ -18,6 +18,7 @@
       "gitBranch": "",
       "entrypoint": "sdk-py",
       "origin": "agent",
+      "agent": "claude",
       "job": null,
       "prs": [],
       "pinned": false
@@ -38,6 +39,7 @@
       "gitBranch": "feat/login",
       "entrypoint": "cli",
       "origin": "user",
+      "agent": "claude",
       "job": null,
       "prs": [
         {
@@ -65,6 +67,7 @@
       "gitBranch": "",
       "entrypoint": "",
       "origin": "user",
+      "agent": "claude",
       "job": null,
       "prs": [],
       "pinned": false
