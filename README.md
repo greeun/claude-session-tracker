@@ -475,7 +475,7 @@ Reflects the current state:
 ### Modal dialogs
 
 - **Help (`?`)** — scrollable cheat-sheet.
-- **Preview (`v`)** — transcript with role colors, full message text (wrapped). The metadata header (Session / Status / Cwd / Branch / Started) is pinned above the rule and never scrolls away; `d`/`Ctrl-D` toggles done in place, keeping the scroll position and any active search; `Del` deletes in place (with confirmation).
+- **Preview (`v`)** — transcript with role colors, full message text (wrapped). The metadata header (Session / Status / Cwd / Branch / Started) is pinned above the rule and never scrolls away, and its Status row is colored by state like the list's ST column (● green · ! red · ◦ cyan · ○ dim · ✓ magenta); `d`/`Ctrl-D` toggles done in place, keeping the scroll position and any active search, and inverts the Status row for one keypress so the change is visible; `Del` deletes in place (with confirmation).
 - **Auto-rescan interval (`a`)** — Off / 5 / 10 / 30 / 60 / 120s. `1`–`6` jumps directly to an option; Enter applies; saved to `state.json`.
 - **Delete confirmation (`Del`)** — `y` confirm · `n/Esc/Enter` cancel · shows up to 5 victims.
 - **Skip-permissions confirmation** — appears on `Enter` resume when you didn't pass `--skip-perm`. `y/Y/Enter` resumes with the flag · `n/N` without · `Esc` cancels.
