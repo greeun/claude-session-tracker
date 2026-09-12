@@ -171,7 +171,11 @@ stale `!` self-heals to `◦` to avoid a stuck state.
   step to the prev/next session in the list without closing, `d`/`Ctrl-D`
   toggles done on the previewed session (same ● working guard as the list;
   the scroll position and any active search are kept), and `Del` deletes the
-  previewed session (confirm in place — cancel returns to the preview)
+  previewed session (confirm in place — cancel returns to the preview).
+  The pinned Status row is colored by state, reusing the list's ST palette
+  (● green · ! red · ◦ cyan · ○ dim · ✓ magenta), and it inverts for one
+  keypress right after `d` changes the flag so the in-place repaint is not
+  missed
 - **`e` / `E`** — export focused session to `./<id>.md`
 - **`o` / `O`** — open the focused session's **folder** in a new terminal
   window: a plain interactive shell at the recorded cwd, no `claude` command

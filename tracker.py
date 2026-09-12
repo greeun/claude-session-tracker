@@ -3678,6 +3678,25 @@ _PREVIEW_STATUS_ROW = 1      # index of the Status line inside the header block
 _PREVIEW_MIN_BODY_ROWS = 3   # transcript rows the pinned header must leave free
 
 
+def _preview_status_row(status: str, inner_w: int, flash: bool = False):
+    """The preview modal's Status line as one (text, attr) display row.
+
+    The row carries the state's own color (`_status_attr`, the same palette the
+    list's ST column uses), so ● working / ! waiting / ✓ done read at a glance
+    instead of all looking alike in plain text.
+
+    `flash` reverses it for exactly one keypress after `d` changed the flag:
+    that toggle repaints a single pinned row in place, which is easy to miss on
+    a screenful of transcript, so the row briefly inverts to say "this just
+    changed".
+    """
+    import curses
+    attr = _status_attr(status)
+    if flash:
+        attr |= curses.A_REVERSE | curses.A_BOLD
+    return (truncate_display(f"Status   {status_label(status)}", inner_w), attr)
+
+
 def _preview_sticky_head(head_n: int, view_h: int) -> int:
     """Rows of the preview's metadata header to pin above the scrolling body.
 
@@ -3800,10 +3819,10 @@ def _preview_modal(stdscr, items, sel: int, ctx):
     hl_attr = curses.color_pair(2) | curses.A_REVERSE              # all matches — yellow block
     cur_attr = curses.color_pair(9) | curses.A_REVERSE | curses.A_BOLD  # current — cyan block
 
-    def _status_row(status):
+    def _status_row(status, flash=False):
         """The Status line, rebuilt in place when `d` toggles the done flag.
         Its index inside `lines` is `_PREVIEW_STATUS_ROW`."""
-        return (truncate_display(f"Status   {status_label(status)}", inner_w), 0)
+        return _preview_status_row(status, inner_w, flash)
 
     def _build_lines(target, status):
         """Display lines for one session, plus the length of the leading
@@ -3879,6 +3898,10 @@ def _preview_modal(stdscr, items, sel: int, ctx):
         # stays within [head_h, max_top].
         max_top = max(head_h, len(lines) - body_h)
         top = head_h
+
+        # True while the Status row is inverted right after a `d` toggle; the
+        # next keypress clears it, exactly like `notice`.
+        status_flash = False
 
         # --- in-modal full-text search state (per session) ---
         query = ""
@@ -3974,6 +3997,9 @@ def _preview_modal(stdscr, items, sel: int, ctx):
             if ch == -1 and ch_str is None:
                 continue
             notice = ""  # any real keypress dismisses the transient notice
+            if status_flash:  # ... and settles the Status row back to plain color
+                lines[_PREVIEW_STATUS_ROW] = _status_row(ctx.resolve(target.session_id))
+                status_flash = False
 
             if searching:
                 # --- typing inside the `/` find prompt (incremental) ---
@@ -4045,7 +4071,9 @@ def _preview_modal(stdscr, items, sel: int, ctx):
                     # Repaint the pinned Status row in place. Rebuilding every
                     # line (the old `reload` round-trip) also threw away the
                     # scroll position and the active search.
-                    lines[_PREVIEW_STATUS_ROW] = _status_row(ctx.resolve(target.session_id))
+                    lines[_PREVIEW_STATUS_ROW] = _status_row(
+                        ctx.resolve(target.session_id), flash=True)
+                    status_flash = True
                     if query:
                         matches = _preview_find_matches(lines, query)
                         if cur_match >= len(matches):
