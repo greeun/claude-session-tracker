@@ -1,0 +1,8 @@
+claude-session-tracker v<VER>
+  # ST LAST ACTIVITY     SESSION    MSGS  MESSAGE                                                       PROJECT
+-----------------------------------------------------------------------------------------------------------------------------------
+  1 ○  2026-03-01 08:00  cccccccc      3  summarise the repo                                            /repo/gamma
+  2 ○  2026-02-10 09:01  bbbbbbbb      2  한글 요청: 로그인 버그 수정                                   /repo/beta  [PR #42]
+  3 ○  2026-01-05 10:06  aaaaaaaa      4  fix the login bug                                             /repo/alpha
+
+3 session(s)  [○ ended:3]
