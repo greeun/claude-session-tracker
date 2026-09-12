@@ -26,7 +26,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 try:
     import fcntl  # POSIX advisory file locking (macOS/Linux); absent on Windows
@@ -189,6 +189,95 @@ _JSON_STATUS_NAME = {
 
 
 # ╔══════════════════════════════════════════════════════════════════════╗
+# ║ AGENT LAYER — one AgentSpec per CLI (claude, codex, …). Everything    ║
+# ║ agent-specific (data root, transcript format, resume command, live    ║
+# ║ probe) lives behind this table; CORE / CLI / TUI stay agent-agnostic.  ║
+# ╚══════════════════════════════════════════════════════════════════════╝
+
+@dataclass
+class Turn:
+    """One user/assistant message as every agent adapter reports it.
+
+    `text` is the raw extracted text (unstripped — consumers strip/filter as
+    they always did); `cwd` / `git_branch` / `entrypoint` are the per-event
+    metadata the loader keeps the first non-empty value of."""
+    etype: str                     # "user" | "assistant"
+    ts: "datetime | None"
+    text: str
+    cwd: str = ""
+    git_branch: str = ""
+    entrypoint: str = ""
+
+
+@dataclass(frozen=True)
+class AgentSpec:
+    """Everything cst needs to know about one agent CLI's local sessions."""
+    name: str            # registry key + display label ("claude", "codex")
+    bin: str             # CLI executable name
+    resume_label: str    # e.g. "claude --resume" — for spawn-failure messages
+    owns: "Callable[[Path], bool]"                  # is this transcript ours?
+    session_files: "Callable[[bool], list[Path]]"   # (include_subagents)
+    session_id_of: "Callable[[Path], str]"
+    iter_turns: "Callable[[Path], Iterator[Turn]]"
+    resume_argv: "Callable[[str, str, bool], list[str]]"  # (bin, sid, skip_perm)
+    caps: frozenset = frozenset()
+
+
+def _path_under(path: Path, root: Path) -> bool:
+    """True when `path` sits below `root` (lexically, else via realpath)."""
+    try:
+        if path.is_relative_to(root):
+            return True
+        return path.resolve().is_relative_to(root.resolve())
+    except (ValueError, OSError):
+        return False
+
+
+def _claude_resume_argv(bin_: str, session_id: str, skip_perm: bool) -> list[str]:
+    argv = [bin_, "--resume", session_id]
+    if skip_perm:
+        argv.append("--dangerously-skip-permissions")
+    return argv
+
+
+# Late-bound wrappers: the CORE functions they call are defined further down,
+# and the tests re-point PROJECTS_DIR & co. at temp dirs after import — so the
+# spec reads the module globals at call time and never captures them.
+CLAUDE_AGENT = AgentSpec(
+    name="claude", bin="claude", resume_label="claude --resume",
+    owns=lambda p: _path_under(p, PROJECTS_DIR),
+    session_files=lambda inc: _claude_session_files(inc),
+    session_id_of=lambda p: p.stem,
+    iter_turns=lambda p: _claude_iter_turns(p),
+    resume_argv=_claude_resume_argv,
+    caps=frozenset({"resume", "attach", "jobs", "hooks", "subagents",
+                    "relocate", "backup"}),
+)
+
+AGENTS: dict[str, AgentSpec] = {"claude": CLAUDE_AGENT}
+DEFAULT_AGENT = "claude"
+
+
+def agent_for_path(path: Path) -> AgentSpec:
+    """The AgentSpec owning a transcript path; claude for anything unowned, so
+    stray/test paths outside every data root keep their legacy behaviour."""
+    for spec in AGENTS.values():
+        if spec.owns(path):
+            return spec
+    return AGENTS[DEFAULT_AGENT]
+
+
+def agent_of(meta) -> AgentSpec:
+    """The AgentSpec for a SessionMeta: its `agent` field when set, else the
+    owner of its path, else claude (bare stubs in tests carry neither)."""
+    spec = AGENTS.get(getattr(meta, "agent", "") or "")
+    if spec is not None:
+        return spec
+    path = getattr(meta, "path", None)
+    return agent_for_path(path) if path else AGENTS[DEFAULT_AGENT]
+
+
+# ╔══════════════════════════════════════════════════════════════════════╗
 # ║ ADAPTER LAYER — OS/terminal integration. Domain-aware (knows resume    ║
 # ║ commands & session alarms) but isolated from data model / rendering.   ║
 # ╚══════════════════════════════════════════════════════════════════════╝
@@ -208,22 +297,24 @@ def _applescript_escape(s: str) -> str:
 
 
 def session_open_invocation(claude_bin: str, session_id: str,
-                            short: str | None, skip_perm: bool) -> str:
-    """The core `claude` invocation to open a session in a terminal.
+                            short: str | None, skip_perm: bool,
+                            agent: str = DEFAULT_AGENT) -> str:
+    """The core CLI invocation to open a session in a terminal.
 
     A background (agent-view) session has a job short id — open it with
     `claude attach <short>` so the terminal takes over the *live*
     supervisor-hosted session (catch-up summary + live stream). Everything else
-    is a plain transcript resume (`claude --resume <sid>`), a fresh local fork.
-    attach connects to an existing session, so the resume-only
-    --dangerously-skip-permissions flag does not apply there.
+    is the agent's plain transcript resume (`claude --resume <sid>`,
+    `codex resume <sid>`, …), a fresh local fork, built from the AgentSpec's
+    `resume_argv`. attach connects to an existing session, so the resume-only
+    skip-permissions flag does not apply there.
     """
     import shlex
     q = shlex.quote
     if short:
         return f"{q(claude_bin)} attach {q(short)}"
-    skip = " --dangerously-skip-permissions" if skip_perm else ""
-    return f"{q(claude_bin)} --resume {q(session_id)}{skip}"
+    spec = AGENTS.get(agent, CLAUDE_AGENT)
+    return " ".join(q(a) for a in spec.resume_argv(claude_bin, session_id, skip_perm))
 
 
 # macOS terminal apps ship their CLI inside the .app bundle and never touch
@@ -267,7 +358,8 @@ def open_in_new_terminal(cwd: str, session_id: str,
                          skip_perm: bool = False,
                          cmux_mode: str | None = None,
                          attach_short: str | None = None,
-                         terminal: str | None = None) -> tuple[bool, str]:
+                         terminal: str | None = None,
+                         agent: str = DEFAULT_AGENT) -> tuple[bool, str]:
     """Spawn `cd <cwd> && claude --resume <session_id>` in a new terminal window.
 
     Returns (ok, info). On success, `info` names the terminal used; on failure,
@@ -284,7 +376,8 @@ def open_in_new_terminal(cwd: str, session_id: str,
     import shlex
     import shutil
 
-    claude_bin = shutil.which("claude") or "claude"
+    spec = AGENTS.get(agent, CLAUDE_AGENT)
+    claude_bin = shutil.which(spec.bin) or spec.bin
 
     # `claude --resume <id>` is project-scoped: it only finds the session whose
     # cwd-string mangles to the project dir holding the transcript. If the
@@ -314,8 +407,8 @@ def open_in_new_terminal(cwd: str, session_id: str,
     skip_flag = " --dangerously-skip-permissions" if skip_perm else ""
     # attach to the live bg session by short id, else resume the transcript.
     core_cmd = session_open_invocation(claude_bin, session_id,
-                                       attach_short, skip_perm)
-    fail_label = "claude attach" if attach_short else "claude --resume"
+                                       attach_short, skip_perm, agent=spec.name)
+    fail_label = "claude attach" if attach_short else spec.resume_label
     # When the recorded cwd was gone we recreated an empty placeholder so
     # project-scoped `claude --resume` can still find the transcript. If the
     # folder was *moved* (not deleted) the real files live elsewhere — point
@@ -345,7 +438,7 @@ def open_in_new_terminal(cwd: str, session_id: str,
         f'rc=$?; if [ "$rc" -ne 0 ]; then '
         f'printf "\\n[cst] \'{fail_label}\' failed (exit %s)\\n"'
         f' "$rc"; '
-        f"printf \"[cst] claude binary: {claude_bin}\\n\"; "
+        f"printf \"[cst] {spec.bin} binary: {claude_bin}\\n\"; "
         f'printf "[cst] press Enter to close this window..."; '
         f"read -r; fi"
     )
@@ -1980,19 +2073,37 @@ def pr_badge(prs: list) -> str:
     return "[PR #" + ",".join(str(n) for n in nums) + "]"
 
 
+def _claude_iter_turns(path: Path) -> Iterator[Turn]:
+    """Claude Code transcript → Turns: one per user/assistant event, carrying
+    the event's cwd / gitBranch / entrypoint stamps."""
+    for evt in iter_jsonl(path):
+        etype = evt.get("type")
+        if etype not in ("user", "assistant"):
+            continue
+        yield Turn(
+            etype=etype,
+            ts=parse_ts(evt.get("timestamp")),
+            text=extract_text((evt.get("message") or {}).get("content")),
+            cwd=evt.get("cwd") or "",
+            git_branch=evt.get("gitBranch") or "",
+            entrypoint=evt.get("entrypoint") or "",
+        )
+
+
 def load_session_meta(path: Path, fast: bool = False) -> SessionMeta | None:
-    meta = SessionMeta(session_id=path.stem, path=path)
+    """Parse one transcript into a SessionMeta, whatever agent wrote it: the
+    owning AgentSpec supplies the id and the Turn stream, the folding below
+    is shared (first/last ts, counts, first real user message, PR refs)."""
+    spec = agent_for_path(path)
+    meta = SessionMeta(session_id=spec.session_id_of(path), path=path)
     if fast:
         try:
             meta.last_ts = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
         except OSError:
             pass
-    for evt in iter_jsonl(path):
-        etype = evt.get("type")
-        if etype not in ("user", "assistant"):
-            continue
+    for turn in spec.iter_turns(path):
         meta.msg_count += 1
-        ts = parse_ts(evt.get("timestamp"))
+        ts = turn.ts
         if ts and not fast:
             if not meta.first_ts or ts < meta.first_ts:
                 meta.first_ts = ts
@@ -2000,15 +2111,14 @@ def load_session_meta(path: Path, fast: bool = False) -> SessionMeta | None:
                 meta.last_ts = ts
         elif ts and fast and not meta.first_ts:
             meta.first_ts = ts
-        if not meta.cwd and evt.get("cwd"):
-            meta.cwd = evt["cwd"]
-        if not meta.git_branch and evt.get("gitBranch"):
-            meta.git_branch = evt["gitBranch"]
-        if not meta.entrypoint and evt.get("entrypoint"):
-            meta.entrypoint = evt["entrypoint"]
-        if etype == "user" and not meta.first_user_msg:
-            msg = evt.get("message") or {}
-            text = extract_text(msg.get("content")).strip()
+        if not meta.cwd and turn.cwd:
+            meta.cwd = turn.cwd
+        if not meta.git_branch and turn.git_branch:
+            meta.git_branch = turn.git_branch
+        if not meta.entrypoint and turn.entrypoint:
+            meta.entrypoint = turn.entrypoint
+        if turn.etype == "user" and not meta.first_user_msg:
+            text = turn.text.strip()
             if (text
                     and not text.startswith("[tool_use:")
                     and not _is_system_wrapper_msg(text)):
@@ -2063,7 +2173,7 @@ def last_message_ts(path: Path) -> "datetime | None":
     return None
 
 
-def all_session_files(include_subagents: bool = False) -> list[Path]:
+def _claude_session_files(include_subagents: bool = False) -> list[Path]:
     if not PROJECTS_DIR.exists():
         return []
     out: list[Path] = []
@@ -2072,6 +2182,15 @@ def all_session_files(include_subagents: bool = False) -> list[Path]:
             continue
         out.append(p)
     out.sort()
+    return out
+
+
+def all_session_files(include_subagents: bool = False) -> list[Path]:
+    """Every agent's transcript files, agent by agent in registry order and
+    path-sorted within each (dedupe_sessions relies on that determinism)."""
+    out: list[Path] = []
+    for spec in AGENTS.values():
+        out.extend(spec.session_files(include_subagents))
     return out
 
 
@@ -2390,21 +2509,19 @@ def cmd_search(args: argparse.Namespace) -> int:
     regex = compile_query(args.query, args.ignore_case)
     hits: list[tuple[SessionMeta, list[tuple[datetime | None, str, str]]]] = []
     for p in all_session_files():
-        meta = SessionMeta(session_id=p.stem, path=p)
+        spec = agent_for_path(p)
+        meta = SessionMeta(session_id=spec.session_id_of(p), path=p)
         matches: list[tuple[datetime | None, str, str]] = []
-        for evt in iter_jsonl(p):
-            etype = evt.get("type")
-            if etype not in ("user", "assistant"):
-                continue
+        for turn in spec.iter_turns(p):
             meta.msg_count += 1
-            ts = parse_ts(evt.get("timestamp"))
+            ts = turn.ts
             if ts and (not meta.last_ts or ts > meta.last_ts):
                 meta.last_ts = ts
-            if not meta.cwd and evt.get("cwd"):
-                meta.cwd = evt["cwd"]
-            if not meta.entrypoint and evt.get("entrypoint"):
-                meta.entrypoint = evt["entrypoint"]
-            text = extract_text((evt.get("message") or {}).get("content"))
+            if not meta.cwd and turn.cwd:
+                meta.cwd = turn.cwd
+            if not meta.entrypoint and turn.entrypoint:
+                meta.entrypoint = turn.entrypoint
+            text = turn.text
             if not text:
                 continue
             m = regex.search(text)
@@ -2412,7 +2529,7 @@ def cmd_search(args: argparse.Namespace) -> int:
                 start = max(0, m.start() - 40)
                 end = min(len(text), m.end() + 80)
                 snippet = text[start:end].replace("\n", " ")
-                matches.append((ts, etype, snippet))
+                matches.append((ts, turn.etype, snippet))
         if matches and (not args.cwd or meta.cwd.startswith(args.cwd)):
             hits.append((meta, matches))
     # A session copied into two project dirs would otherwise report its hits
@@ -2469,16 +2586,13 @@ def iter_messages(path: Path) -> "Iterator[tuple[str, str, str]]":
     """Shared transcript-iteration contract: yield (etype, ts_str, text) for
     each user/assistant message with non-empty text. Every renderer (tty /
     txt / md) consumes this so the filter/extract logic lives in one place;
-    only the per-format header & message styling differ downstream."""
-    for evt in iter_jsonl(path):
-        etype = evt.get("type")
-        if etype not in ("user", "assistant"):
-            continue
-        ts = fmt_ts(parse_ts(evt.get("timestamp")))
-        text = extract_text((evt.get("message") or {}).get("content")).strip()
+    only the per-format header & message styling differ downstream. The owning
+    AgentSpec supplies the Turn stream, so every agent renders alike."""
+    for turn in agent_for_path(path).iter_turns(path):
+        text = turn.text.strip()
         if not text:
             continue
-        yield etype, ts, text
+        yield turn.etype, fmt_ts(turn.ts), text
 
 
 def _print_transcript(path: Path, max_chars: int, indent: str = "",
@@ -2691,8 +2805,10 @@ def cmd_resume(args: argparse.Namespace) -> int:
         cmd = f"claude attach {short}"
     else:
         import shlex
-        skip_flag = " --dangerously-skip-permissions" if getattr(args, "skip_perm", False) else ""
-        cmd = f'cd {shlex.quote(cwd)} && claude --resume {target.session_id}{skip_flag}'
+        spec = agent_of(target)
+        core = " ".join(shlex.quote(a) for a in spec.resume_argv(
+            spec.bin, target.session_id, bool(getattr(args, "skip_perm", False))))
+        cmd = f'cd {shlex.quote(cwd)} && {core}'
     if args.print_only:
         print(cmd)
         return 0
@@ -6265,7 +6381,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
 def find_session(prefix: str) -> SessionMeta | None:
     matches: list[Path] = []
     for p in all_session_files():
-        if p.stem.startswith(prefix):
+        if agent_for_path(p).session_id_of(p).startswith(prefix):
             matches.append(p)
     if not matches:
         for p in all_subagent_files():
